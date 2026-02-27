@@ -41,6 +41,11 @@ _INSERT = (
 def _stat_key(path: str) -> str:
     """JSON array of stat fields used for cache invalidation."""
     st = os.stat(path)
+    return _stat_key_from_stat(st)
+
+
+def _stat_key_from_stat(st: os.stat_result) -> str:
+    """JSON array of stat fields used for cache invalidation."""
     return json.dumps([
         st.st_size, st.st_mtime_ns,
         st.st_ino, st.st_dev, st.st_ctime_ns,
@@ -58,10 +63,15 @@ class EmbeddingCache:
         self._conn.commit()
 
     def get(
-        self, path: Path, model_id: str,
+        self,
+        path: Path,
+        model_id: str,
+        *,
+        path_key: str | None = None,
+        file_stat: str | None = None,
     ) -> NDArray[np.float32] | None:
         """Return the cached embedding, or ``None`` on miss/stale."""
-        resolved = os.path.realpath(path)
+        resolved = path_key or os.path.realpath(path)
         row = self._conn.execute(
             "SELECT file_stat, embedding FROM embeddings"
             " WHERE path = ? AND model = ?",
@@ -70,7 +80,8 @@ class EmbeddingCache:
         if row is None:
             return None
         stored_stat, blob = row
-        if stored_stat != _stat_key(resolved):
+        stat_key = file_stat or _stat_key(resolved)
+        if stored_stat != stat_key:
             return None
         arr: NDArray[np.float32] = (
             np.frombuffer(blob, dtype=np.float32)
@@ -80,20 +91,33 @@ class EmbeddingCache:
         return arr
 
     def put(
-        self, path: Path, model_id: str, embedding: NDArray[np.float32],
+        self,
+        path: Path,
+        model_id: str,
+        embedding: NDArray[np.float32],
+        *,
+        path_key: str | None = None,
+        file_stat: str | None = None,
     ) -> None:
         """Insert or replace the cached embedding for *(path, model)*."""
-        resolved = os.path.realpath(path)
+        resolved = path_key or os.path.realpath(path)
+        stat_key = file_stat or _stat_key(resolved)
         self._conn.execute(
             _INSERT,
-            (resolved, _stat_key(resolved),
+            (resolved, stat_key,
              model_id, embedding.tobytes()),
         )
         self._conn.commit()
 
-    def is_not_image(self, path: Path) -> bool:
+    def is_not_image(
+        self,
+        path: Path,
+        *,
+        path_key: str | None = None,
+        file_stat: str | None = None,
+    ) -> bool:
         """Return ``True`` if *path* was previously recorded as not an image."""
-        resolved = os.path.realpath(path)
+        resolved = path_key or os.path.realpath(path)
         row = self._conn.execute(
             "SELECT file_stat FROM not_images WHERE path = ?",
             (resolved,),
@@ -101,15 +125,23 @@ class EmbeddingCache:
         if row is None:
             return False
         stored_stat: str = row[0]
-        return stored_stat == _stat_key(resolved)
+        stat_key = file_stat or _stat_key(resolved)
+        return stored_stat == stat_key
 
-    def put_not_image(self, path: Path) -> None:
+    def put_not_image(
+        self,
+        path: Path,
+        *,
+        path_key: str | None = None,
+        file_stat: str | None = None,
+    ) -> None:
         """Record that *path* is not a valid image."""
-        resolved = os.path.realpath(path)
+        resolved = path_key or os.path.realpath(path)
+        stat_key = file_stat or _stat_key(resolved)
         self._conn.execute(
             "INSERT OR REPLACE INTO not_images (path, file_stat)"
             " VALUES (?, ?)",
-            (resolved, _stat_key(resolved)),
+            (resolved, stat_key),
         )
         self._conn.commit()
 

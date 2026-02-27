@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -15,13 +17,29 @@ if TYPE_CHECKING:
     from grape.model import CLIPModel
 
 
-def _is_image(path: Path, cache: EmbeddingCache | None = None) -> bool:
+def _stat_key_from_stat(st: os.stat_result) -> str:
+    """Build cache invalidation key from an existing stat result."""
+    return json.dumps([
+        st.st_size, st.st_mtime_ns,
+        st.st_ino, st.st_dev, st.st_ctime_ns,
+    ])
+
+
+def _is_image(
+    path: Path,
+    cache: EmbeddingCache | None = None,
+    *,
+    path_key: str | None = None,
+    file_stat: str | None = None,
+) -> bool:
     """Check whether a file is a recognized image format.
 
     When a cache is provided, consults and updates it to avoid
     re-opening files already known not to be images.
     """
-    if cache is not None and cache.is_not_image(path):
+    if cache is not None and cache.is_not_image(
+        path, path_key=path_key, file_stat=file_stat
+    ):
         return False
     try:
         with Image.open(path) as im:
@@ -33,7 +51,7 @@ def _is_image(path: Path, cache: EmbeddingCache | None = None) -> bool:
         if e.errno is not None:
             raise
         if cache is not None:
-            cache.put_not_image(path)
+            cache.put_not_image(path, path_key=path_key, file_stat=file_stat)
         return False
 
 
@@ -47,14 +65,33 @@ def find_images(
     Uses ``PIL.Image.verify`` for content-based detection (not file
     extensions).  Pass a *cache* to skip re-checking known non-images.
     """
-    root = Path(directory)
+    # Canonicalize the root once so parent-directory symlinks are resolved
+    # without paying realpath cost repeatedly per discovered file.
+    root = Path(os.path.realpath(directory))
     if not root.is_dir():
         return []
-    pattern = "**/*" if recursive else "*"
-    return sorted(
-        f for f in root.glob(pattern)
-        if f.is_file() and _is_image(f, cache)
-    )
+    found: list[Path] = []
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        with os.scandir(current) as entries:
+            for entry in entries:
+                # Match Path.is_file()/is_dir() behavior (follows symlinks).
+                if recursive and entry.is_dir():
+                    stack.append(Path(entry.path))
+                    continue
+                if not entry.is_file():
+                    continue
+                path = Path(entry.path)
+                stat_key = _stat_key_from_stat(entry.stat())
+                if _is_image(
+                    path,
+                    cache,
+                    path_key=entry.path,
+                    file_stat=stat_key,
+                ):
+                    found.append(path)
+    return sorted(found)
 
 
 def _build_result(
