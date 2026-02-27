@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grape"
+version = "0.1.0"
+description = "Find images matching multiple keywords using CLIP"
+requires-python = ">=3.10"
+dependencies = [
+    "open-clip-torch>=2.24.0",
+    "torch>=2.0.0",
+    "Pillow>=9.0.0",
+    "transformers>=4.49.0",
+    "sentencepiece>=0.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.4.0",
+    "mypy>=1.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["grape*"]
+
+[project.scripts]
+grape = "grape.cli:main"
+
+# --- pytest ---
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = [
+    "--tb=short",
+    # coverage
+    "--cov=grape",
+    "--cov-report=term-missing",
+    "--cov-fail-under=50",
+]
+markers = [
+    "slow: tests that download/load the CLIP model",
+]
+
+# --- ruff ---
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+# --- mypy ---
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
