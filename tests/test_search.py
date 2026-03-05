@@ -1,10 +1,11 @@
 """Tests for image discovery (no model needed)."""
 
+import numpy as np
 import pytest
 from PIL import Image
 
 from grape.cache import EmbeddingCache
-from grape.search import find_images
+from grape.search import find_images, score_image
 
 
 def test_finds_images_not_text(fixtures_dir):
@@ -88,6 +89,25 @@ def test_find_images_cache_invalidates_on_change(tmp_path):
     cache.close()
 
 
+def test_find_images_uses_embedding_cache_for_known_images(tmp_path, monkeypatch):
+    """Known cached images skip PIL verification on re-scan."""
+    scan_dir = tmp_path / "images"
+    scan_dir.mkdir()
+    image_path = scan_dir / "real.jpg"
+    Image.new("RGB", (1, 1)).save(image_path, format="JPEG")
+
+    cache = EmbeddingCache(tmp_path / "test.db")
+    cache.put(image_path, "model-a", np.ones((1, 4), dtype=np.float32))
+
+    def _fail_open(*_args, **_kwargs):
+        pytest.fail("Image.open should not be called for cached image hits")
+
+    monkeypatch.setattr("grape.search.Image.open", _fail_open)
+    images = find_images(str(scan_dir), cache=cache)
+    assert [p.name for p in images] == ["real.jpg"]
+    cache.close()
+
+
 def test_find_images_real_filesystem_error_propagates(tmp_path):
     """OSError with an errno (e.g. permission denied) is not swallowed."""
     img = tmp_path / "locked.jpg"
@@ -98,3 +118,28 @@ def test_find_images_real_filesystem_error_propagates(tmp_path):
             find_images(str(tmp_path))
     finally:
         img.chmod(0o644)
+
+
+def test_score_image_prompt_ensemble_averages_templates(tmp_path):
+    """Prompt ensembling should average text embeddings per keyword."""
+
+    class DummyModel:
+        def encode_texts(self, texts):
+            table = {
+                "a photo of a dog": [1.0, 0.0],
+                "a close-up photo of a dog": [0.0, 1.0],
+            }
+            return np.array([table[t] for t in texts], dtype=np.float32)
+
+        def encode_image(self, _):
+            return np.array([[1.0, 0.0]], dtype=np.float32)
+
+    image_path = tmp_path / "x.jpg"
+    image_path.write_bytes(b"unused")
+    result = score_image(
+        DummyModel(),
+        image_path,
+        ["dog"],
+        prompt_templates=["a photo of a {}", "a close-up photo of a {}"],
+    )
+    assert result["score"] == pytest.approx(2 ** -0.5, rel=1e-5)

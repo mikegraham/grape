@@ -8,9 +8,11 @@ version = "0.1.0"
 description = "Find images matching multiple keywords using CLIP"
 requires-python = ">=3.10"
 dependencies = [
+    "Jinja2>=3.1",
     "open-clip-torch>=2.24.0",
     "torch>=2.0.0",
     "Pillow>=9.0.0",
+    "pywebview>=6.1",
     "transformers>=4.49.0",
     "sentencepiece>=0.2.0",
 ]

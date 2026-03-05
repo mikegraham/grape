@@ -79,6 +79,30 @@ def test_cache_per_model(cache, img):
     np.testing.assert_array_equal(got_b, emb_b)
 
 
+# --- image-hit tracking ---
+
+def test_has_any_embedding_roundtrip(cache, img):
+    assert not cache.has_any_embedding(img)
+    cache.put(img, "model-a", _rand_embedding(30))
+    assert cache.has_any_embedding(img)
+
+
+def test_has_any_embedding_invalidated_on_change(cache, img):
+    cache.put(img, "model-a", _rand_embedding(31))
+    time.sleep(0.05)
+    img.write_bytes(img.read_bytes())
+    assert not cache.has_any_embedding(img)
+
+
+def test_image_hit_index_contains_cached_file(cache, img):
+    cache.put(img, "model-a", _rand_embedding(32))
+    stat = cache._conn.execute(
+        "SELECT file_stat FROM embeddings WHERE path = ?",
+        (str(img.resolve()),),
+    ).fetchone()[0]
+    assert (str(img.resolve()), stat) in cache.image_hit_index()
+
+
 # --- not-image tracking ---
 
 def test_not_image_roundtrip(cache, img):
@@ -92,3 +116,12 @@ def test_not_image_invalidated_on_change(cache, img):
     time.sleep(0.05)
     img.write_bytes(img.read_bytes())
     assert not cache.is_not_image(img)
+
+
+def test_not_image_index_contains_cached_non_image(cache, img):
+    cache.put_not_image(img)
+    stat = cache._conn.execute(
+        "SELECT file_stat FROM not_images WHERE path = ?",
+        (str(img.resolve()),),
+    ).fetchone()[0]
+    assert (str(img.resolve()), stat) in cache.not_image_index()

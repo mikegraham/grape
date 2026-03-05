@@ -1,4 +1,6 @@
+import os
 import sys
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -9,10 +11,44 @@ from huggingface_hub import try_to_load_from_cache
 from numpy.typing import NDArray
 from PIL import Image
 
-# Default model: ViT-B-32 is the best speed/quality tradeoff on CPU.
-# ~150-300ms per image on a modern CPU, 512-dim embeddings.
-DEFAULT_MODEL = "ViT-B-32"
-DEFAULT_PRETRAINED = "laion2b_s34b_b79k"
+# Default model: ViT-B-16 provides stronger semantic quality than B-32.
+# Embedding dimensionality remains 512.
+DEFAULT_MODEL = "ViT-B-16"
+DEFAULT_PRETRAINED = "laion2b_s34b_b88k"
+_WEIGHT_FILENAMES = (
+    "open_clip_model.safetensors",
+    "open_clip_pytorch_model.safetensors",
+    "open_clip_pytorch_model.bin",
+)
+
+
+@contextmanager
+def _temporary_env(name: str, value: str):
+    """Temporarily set an environment variable."""
+    had_value = name in os.environ
+    previous = os.environ.get(name)
+    os.environ[name] = value
+    try:
+        yield
+    finally:
+        if had_value:
+            assert previous is not None
+            os.environ[name] = previous
+        else:
+            os.environ.pop(name, None)
+
+
+def _has_cached_weights(model_name: str, pretrained: str) -> bool:
+    """Return True if this model has local HF weight files cached."""
+    cfg = open_clip.get_pretrained_cfg(model_name, pretrained) or {}
+    hf_hub = str(cfg.get("hf_hub", "")).rstrip("/")
+    if not hf_hub:
+        return False
+    for filename in _WEIGHT_FILENAMES:
+        cached = try_to_load_from_cache(hf_hub, filename)
+        if cached and isinstance(cached, str):
+            return True
+    return False
 
 
 class CLIPModel:
@@ -29,9 +65,15 @@ class CLIPModel:
         self.device = "cpu"
         if not quiet:
             print("Loading model...", end=" ", flush=True, file=sys.stderr)
-        self.model, _, self.preprocess = open_clip.create_model_and_transforms(
-            model_name, pretrained=pretrained, device=self.device
+        offline_ctx = (
+            _temporary_env("HF_HUB_OFFLINE", "1")
+            if _has_cached_weights(model_name, pretrained)
+            else nullcontext()
         )
+        with offline_ctx:
+            self.model, _, self.preprocess = open_clip.create_model_and_transforms(
+                model_name, pretrained=pretrained, device=self.device
+            )
         self.tokenizer = open_clip.get_tokenizer(model_name)
         self.model.eval()
         if not quiet:
@@ -55,11 +97,7 @@ class CLIPModel:
             )
             return self._model_id
         # Try common weight filenames to locate the cached snapshot.
-        for filename in (
-            "open_clip_model.safetensors",
-            "open_clip_pytorch_model.safetensors",
-            "open_clip_pytorch_model.bin",
-        ):
+        for filename in _WEIGHT_FILENAMES:
             cached = try_to_load_from_cache(hf_hub, filename)
             if cached and isinstance(cached, str):
                 commit = Path(cached).parent.name

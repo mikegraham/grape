@@ -90,6 +90,38 @@ class EmbeddingCache:
         )
         return arr
 
+    def has_any_embedding(
+        self,
+        path: Path,
+        *,
+        path_key: str | None = None,
+        file_stat: str | None = None,
+    ) -> bool:
+        """Return ``True`` if any cached embedding matches current file stat."""
+        resolved = path_key or os.path.realpath(path)
+        stat_key = file_stat or _stat_key(resolved)
+        row = self._conn.execute(
+            "SELECT 1 FROM embeddings"
+            " WHERE path = ? AND file_stat = ?"
+            " LIMIT 1",
+            (resolved, stat_key),
+        ).fetchone()
+        return row is not None
+
+    def image_hit_index(self) -> set[tuple[str, str]]:
+        """Return ``(path, file_stat)`` pairs known to have embeddings."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT path, file_stat FROM embeddings"
+        ).fetchall()
+        return {(path, file_stat) for path, file_stat in rows}
+
+    def not_image_index(self) -> set[tuple[str, str]]:
+        """Return ``(path, file_stat)`` pairs known to be non-images."""
+        rows = self._conn.execute(
+            "SELECT path, file_stat FROM not_images"
+        ).fetchall()
+        return {(path, file_stat) for path, file_stat in rows}
+
     def put(
         self,
         path: Path,

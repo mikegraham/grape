@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -60,6 +61,18 @@ def find_images(
     recursive: bool = False,
     cache: EmbeddingCache | None = None,
 ) -> list[Path]:
+    """Return sorted image paths under *directory*."""
+    return sorted(iter_images(directory, recursive=recursive, cache=cache))
+
+
+def iter_images(
+    directory: str,
+    recursive: bool = False,
+    cache: EmbeddingCache | None = None,
+    *,
+    image_hits: set[tuple[str, str]] | None = None,
+    not_image_hits: set[tuple[str, str]] | None = None,
+) -> Iterator[Path]:
     """Return sorted image paths under *directory*.
 
     Uses ``PIL.Image.verify`` for content-based detection (not file
@@ -70,7 +83,10 @@ def find_images(
     root = Path(os.path.realpath(directory))
     if not root.is_dir():
         return []
-    found: list[Path] = []
+    if image_hits is None and cache is not None:
+        image_hits = cache.image_hit_index()
+    if not_image_hits is None and cache is not None:
+        not_image_hits = cache.not_image_index()
     stack = [root]
     while stack:
         current = stack.pop()
@@ -84,14 +100,19 @@ def find_images(
                     continue
                 path = Path(entry.path)
                 stat_key = _stat_key_from_stat(entry.stat())
+                cache_key = (entry.path, stat_key)
+                if image_hits is not None and cache_key in image_hits:
+                    yield path
+                    continue
+                if not_image_hits is not None and cache_key in not_image_hits:
+                    continue
                 if _is_image(
                     path,
                     cache,
                     path_key=entry.path,
                     file_stat=stat_key,
                 ):
-                    found.append(path)
-    return sorted(found)
+                    yield path
 
 
 def _build_result(
@@ -123,19 +144,85 @@ def _get_embedding(
     return emb
 
 
+def _encode_keyword_embeddings(
+    model: CLIPModel,
+    keywords: list[str],
+    prompt_template: str,
+    prompt_templates: list[str] | None,
+) -> np.ndarray:
+    """Encode keyword prompts, optionally with prompt ensembling."""
+    if prompt_templates is None:
+        prompts = [prompt_template.format(kw) for kw in keywords]
+        return model.encode_texts(prompts)
+
+    if not prompt_templates:
+        raise ValueError("prompt_templates must not be empty")
+
+    prompts = [
+        template.format(keyword)
+        for keyword in keywords
+        for template in prompt_templates
+    ]
+    text_emb = model.encode_texts(prompts)
+    num_keywords = len(keywords)
+    num_templates = len(prompt_templates)
+    reshaped = text_emb.reshape(num_keywords, num_templates, -1)
+    merged = reshaped.mean(axis=1)
+    norms = np.linalg.norm(merged, axis=1, keepdims=True)
+    merged = merged / np.clip(norms, 1e-12, None)
+    return merged.astype(np.float32)
+
+
+def encode_keywords(
+    model: CLIPModel,
+    keywords: list[str],
+    prompt_template: str = "a photo of {}",
+    prompt_templates: list[str] | None = None,
+) -> np.ndarray:
+    """Encode keyword prompts once for repeated image scoring."""
+    return _encode_keyword_embeddings(
+        model,
+        keywords,
+        prompt_template=prompt_template,
+        prompt_templates=prompt_templates,
+    )
+
+
+def score_image_with_text_embeddings(
+    model: CLIPModel,
+    image_path: Path,
+    keywords: list[str],
+    text_emb: np.ndarray,
+    cache: EmbeddingCache | None = None,
+) -> dict:
+    """Score a single image using precomputed keyword embeddings."""
+    img_emb = _get_embedding(model, image_path, cache)
+    sims = (img_emb @ text_emb.T)[0]
+    return _build_result(image_path, keywords, sims)
+
+
 def score_image(
     model: CLIPModel,
     image_path: Path,
     keywords: list[str],
     prompt_template: str = "a photo of {}",
+    prompt_templates: list[str] | None = None,
     cache: EmbeddingCache | None = None,
 ) -> dict:
     """Score a single image against all keywords."""
-    prompts = [prompt_template.format(kw) for kw in keywords]
-    text_emb = model.encode_texts(prompts)
-    img_emb = _get_embedding(model, image_path, cache)
-    sims = (img_emb @ text_emb.T)[0]
-    return _build_result(image_path, keywords, sims)
+    text_emb = encode_keywords(
+        model,
+        keywords,
+        prompt_template=prompt_template,
+        prompt_templates=prompt_templates,
+    )
+    return score_image_with_text_embeddings(
+        model,
+        image_path,
+        keywords,
+        text_emb,
+        cache=cache,
+    )
 
 
 def score_images(
@@ -143,6 +230,7 @@ def score_images(
     image_paths: list[Path],
     keywords: list[str],
     prompt_template: str = "a photo of {}",
+    prompt_templates: list[str] | None = None,
     quiet: bool = False,
     cache: EmbeddingCache | None = None,
 ) -> list[dict]:
@@ -154,20 +242,30 @@ def score_images(
       - score: arithmetic mean of cosine similarities (primary ranking)
       - min_score: minimum similarity across keywords
     """
-    prompts = [prompt_template.format(kw) for kw in keywords]
-    text_emb = model.encode_texts(prompts)
+    text_emb = encode_keywords(
+        model,
+        keywords,
+        prompt_template=prompt_template,
+        prompt_templates=prompt_templates,
+    )
 
     results = []
     for path in tqdm(image_paths, desc="Scoring", file=sys.stderr,
                      disable=quiet):
         try:
-            img_emb = _get_embedding(model, path, cache)
+            results.append(
+                score_image_with_text_embeddings(
+                    model,
+                    path,
+                    keywords,
+                    text_emb,
+                    cache=cache,
+                )
+            )
         except OSError as e:
             if e.errno is not None:
                 raise
             tqdm.write(f"  skipping {path}: {e}", file=sys.stderr)
             continue
-        sims = (img_emb @ text_emb.T)[0]
-        results.append(_build_result(path, keywords, sims))
 
     return results
