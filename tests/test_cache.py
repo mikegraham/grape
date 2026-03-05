@@ -79,6 +79,33 @@ def test_cache_per_model(cache, img):
     np.testing.assert_array_equal(got_b, emb_b)
 
 
+def test_get_many_for_paths_returns_matching_embeddings(cache, img):
+    emb = _rand_embedding(21)
+    cache.put(img, "model-a", emb)
+    row = cache._conn.execute(
+        "SELECT path, file_stat FROM embeddings WHERE model = ?",
+        ("model-a",),
+    ).fetchone()
+    assert row is not None
+    path, file_stat = row
+    got = cache.get_many_for_paths("model-a", {path: file_stat})
+    assert path in got
+    np.testing.assert_array_equal(got[path].reshape(1, -1), emb)
+
+
+def test_get_many_for_paths_filters_stale_stats(cache, img):
+    emb = _rand_embedding(22)
+    cache.put(img, "model-a", emb)
+    row = cache._conn.execute(
+        "SELECT path FROM embeddings WHERE model = ?",
+        ("model-a",),
+    ).fetchone()
+    assert row is not None
+    path = row[0]
+    got = cache.get_many_for_paths("model-a", {path: "bad-stat"})
+    assert got == {}
+
+
 # --- image-hit tracking ---
 
 def test_has_any_embedding_roundtrip(cache, img):

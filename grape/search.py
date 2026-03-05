@@ -5,7 +5,7 @@ import os
 import sys
 from collections.abc import Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 from PIL import Image
@@ -16,6 +16,12 @@ from tqdm import tqdm
 if TYPE_CHECKING:
     from grape.cache import EmbeddingCache
     from grape.model import CLIPModel
+
+
+class ImageRecord(NamedTuple):
+    path: Path
+    path_key: str
+    file_stat: str
 
 
 def _stat_key_from_stat(st: os.stat_result) -> str:
@@ -65,24 +71,20 @@ def find_images(
     return sorted(iter_images(directory, recursive=recursive, cache=cache))
 
 
-def iter_images(
+def iter_image_records(
     directory: str,
     recursive: bool = False,
     cache: EmbeddingCache | None = None,
     *,
     image_hits: set[tuple[str, str]] | None = None,
     not_image_hits: set[tuple[str, str]] | None = None,
-) -> Iterator[Path]:
-    """Return sorted image paths under *directory*.
-
-    Uses ``PIL.Image.verify`` for content-based detection (not file
-    extensions).  Pass a *cache* to skip re-checking known non-images.
-    """
+) -> Iterator[ImageRecord]:
+    """Yield image records under *directory* with cache key metadata."""
     # Canonicalize the root once so parent-directory symlinks are resolved
     # without paying realpath cost repeatedly per discovered file.
     root = Path(os.path.realpath(directory))
     if not root.is_dir():
-        return []
+        return
     if image_hits is None and cache is not None:
         image_hits = cache.image_hit_index()
     if not_image_hits is None and cache is not None:
@@ -102,7 +104,7 @@ def iter_images(
                 stat_key = _stat_key_from_stat(entry.stat())
                 cache_key = (entry.path, stat_key)
                 if image_hits is not None and cache_key in image_hits:
-                    yield path
+                    yield ImageRecord(path=path, path_key=entry.path, file_stat=stat_key)
                     continue
                 if not_image_hits is not None and cache_key in not_image_hits:
                     continue
@@ -112,7 +114,26 @@ def iter_images(
                     path_key=entry.path,
                     file_stat=stat_key,
                 ):
-                    yield path
+                    yield ImageRecord(path=path, path_key=entry.path, file_stat=stat_key)
+
+
+def iter_images(
+    directory: str,
+    recursive: bool = False,
+    cache: EmbeddingCache | None = None,
+    *,
+    image_hits: set[tuple[str, str]] | None = None,
+    not_image_hits: set[tuple[str, str]] | None = None,
+) -> Iterator[Path]:
+    """Yield image paths under *directory* (path-only wrapper)."""
+    for record in iter_image_records(
+        directory,
+        recursive=recursive,
+        cache=cache,
+        image_hits=image_hits,
+        not_image_hits=not_image_hits,
+    ):
+        yield record.path
 
 
 def _build_result(

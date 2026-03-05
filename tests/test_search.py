@@ -5,7 +5,7 @@ import pytest
 from PIL import Image
 
 from grape.cache import EmbeddingCache
-from grape.search import find_images, score_image
+from grape.search import find_images, iter_image_records, score_image
 
 
 def test_finds_images_not_text(fixtures_dir):
@@ -53,6 +53,18 @@ def test_detects_by_content_not_extension(tmp_path):
     assert "photo.dat" in names
     assert "fake.jpg" not in names
     assert "notes.txt" not in names
+
+
+def test_iter_image_records_includes_cache_keys(tmp_path):
+    image_path = tmp_path / "real.jpg"
+    Image.new("RGB", (1, 1)).save(image_path, format="JPEG")
+
+    records = list(iter_image_records(str(tmp_path)))
+    assert len(records) == 1
+    record = records[0]
+    assert record.path == image_path
+    assert record.path_key == str(image_path)
+    assert isinstance(record.file_stat, str)
 
 
 # --- find_images with cache ---

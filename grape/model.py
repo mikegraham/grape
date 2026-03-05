@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import open_clip
 import torch
-from huggingface_hub import try_to_load_from_cache
+from huggingface_hub import constants as hf_constants, try_to_load_from_cache
 from numpy.typing import NDArray
 from PIL import Image
 
@@ -51,6 +51,18 @@ def _has_cached_weights(model_name: str, pretrained: str) -> bool:
     return False
 
 
+@contextmanager
+def _temporary_hf_hub_offline():
+    """Temporarily force huggingface_hub into offline mode."""
+    previous_offline = hf_constants.HF_HUB_OFFLINE
+    with _temporary_env("HF_HUB_OFFLINE", "1"):
+        hf_constants.HF_HUB_OFFLINE = True
+        try:
+            yield
+        finally:
+            hf_constants.HF_HUB_OFFLINE = previous_offline
+
+
 class CLIPModel:
     """Wrapper around an open_clip model for encoding images and text."""
     def __init__(
@@ -66,7 +78,7 @@ class CLIPModel:
         if not quiet:
             print("Loading model...", end=" ", flush=True, file=sys.stderr)
         offline_ctx = (
-            _temporary_env("HF_HUB_OFFLINE", "1")
+            _temporary_hf_hub_offline()
             if _has_cached_weights(model_name, pretrained)
             else nullcontext()
         )

@@ -112,6 +112,13 @@ def iter_images(*args, **kwargs):
     return _iter_images(*args, **kwargs)
 
 
+def iter_image_records(*args, **kwargs):
+    """Lazily import and call grape.search.iter_image_records."""
+    from grape.search import iter_image_records as _iter_image_records
+
+    return _iter_image_records(*args, **kwargs)
+
+
 def encode_keywords(*args, **kwargs):
     """Lazily import and call grape.search.encode_keywords."""
     from grape.search import encode_keywords as _encode_keywords
@@ -403,6 +410,13 @@ class _ScanDone:
     error_message: str | None = None
 
 
+@dataclass
+class _ScannedImage:
+    path: Path
+    path_key: str | None = None
+    file_stat: str | None = None
+
+
 def _build_scan_indexes(cache) -> tuple[set[tuple[str, str]] | None, set[tuple[str, str]] | None]:
     """Fetch cache indexes once for fast, DB-free scan membership checks."""
     if cache is None:
@@ -424,21 +438,27 @@ def _scan_paths_worker(
         for p in path_args:
             target = Path(p)
             if target.is_file():
-                out_queue.put(target)
+                out_queue.put(_ScannedImage(path=target))
                 image_count += 1
                 continue
             if target.is_dir():
                 if not recursive:
                     print(f"grape: {p}: Is a directory", file=sys.stderr)
                     continue
-                for image_path in iter_images(
+                for record in iter_image_records(
                     str(target),
                     recursive=True,
                     cache=None,
                     image_hits=image_hits,
                     not_image_hits=not_image_hits,
                 ):
-                    out_queue.put(image_path)
+                    out_queue.put(
+                        _ScannedImage(
+                            path=record.path,
+                            path_key=record.path_key,
+                            file_stat=record.file_stat,
+                        )
+                    )
                     image_count += 1
                 continue
             error_message = f"grape: {p}: No such file or directory"
@@ -458,6 +478,83 @@ def _format_query_summary(
     if exclude_keywords:
         query_parts.append(f"excluding: {', '.join(exclude_keywords)}")
     return "; ".join(query_parts) if query_parts else "(no keywords)"
+
+
+_SCORE_BATCH_SIZE = 512
+
+
+def _build_scored_result(
+    path: Path,
+    keywords: list[str],
+    sims,
+) -> dict:
+    """Build a score dict from similarity values."""
+    return {
+        "path": path,
+        "scores": {kw: float(s) for kw, s in zip(keywords, sims)},
+        "score": float(sims.mean()),
+        "min_score": float(sims.min()),
+    }
+
+
+def _score_batch(
+    *,
+    batch: list[_ScannedImage],
+    model,
+    score_keywords: list[str],
+    text_emb,
+    cache,
+    model_id: str | None,
+    quiet: bool,
+) -> list[dict]:
+    """Score a batch of scanned images with batched cache lookups."""
+    if not batch:
+        return []
+
+    cached_vectors: dict[str, object] = {}
+    if cache is not None and model_id is not None:
+        path_stats = {
+            item.path_key: item.file_stat
+            for item in batch
+            if item.path_key is not None and item.file_stat is not None
+        }
+        if path_stats:
+            cached_vectors = cache.get_many_for_paths(model_id, path_stats)
+
+    cached_items: list[_ScannedImage] = []
+    uncached_items: list[_ScannedImage] = []
+    for item in batch:
+        if item.path_key is not None and item.path_key in cached_vectors:
+            cached_items.append(item)
+        else:
+            uncached_items.append(item)
+
+    results: list[dict] = []
+    if cached_items:
+        import numpy as np
+
+        image_emb = np.vstack([cached_vectors[item.path_key] for item in cached_items])
+        sims_matrix = image_emb @ text_emb.T
+        for item, sims in zip(cached_items, sims_matrix):
+            results.append(_build_scored_result(item.path, score_keywords, sims))
+
+    for item in uncached_items:
+        try:
+            results.append(
+                score_image_with_text_embeddings(
+                    model,
+                    item.path,
+                    score_keywords,
+                    text_emb,
+                    cache=cache,
+                )
+            )
+        except OSError as e:
+            if e.errno is not None:
+                raise
+            if not quiet:
+                print(f"  skipping {item.path}: {e}", file=sys.stderr)
+    return results
 
 
 def _score_or_stub_results(
@@ -502,8 +599,10 @@ def _score_or_stub_results(
         score_keywords,
         prompt_templates=prompt_templates,
     )
+    model_id = model.model_id() if cache is not None else None
     results: list[dict] = []
     image_count = 0
+    pending_batch: list[_ScannedImage] = []
     scan_done: _ScanDone | None = None
     while scan_done is None:
         item = path_queue.get()
@@ -511,23 +610,36 @@ def _score_or_stub_results(
             scan_done = item
             continue
 
-        assert isinstance(item, Path)
+        assert isinstance(item, _ScannedImage)
         image_count += 1
-        try:
-            results.append(
-                score_image_with_text_embeddings(
-                    model,
-                    item,
-                    score_keywords,
-                    text_emb,
+        pending_batch.append(item)
+        if len(pending_batch) >= _SCORE_BATCH_SIZE:
+            results.extend(
+                _score_batch(
+                    batch=pending_batch,
+                    model=model,
+                    score_keywords=score_keywords,
+                    text_emb=text_emb,
                     cache=cache,
+                    model_id=model_id,
+                    quiet=quiet,
                 )
             )
-        except OSError as e:
-            if e.errno is not None:
-                raise
-            if not quiet:
-                print(f"  skipping {item}: {e}", file=sys.stderr)
+            pending_batch.clear()
+
+    if pending_batch:
+        results.extend(
+            _score_batch(
+                batch=pending_batch,
+                model=model,
+                score_keywords=score_keywords,
+                text_emb=text_emb,
+                cache=cache,
+                model_id=model_id,
+                quiet=quiet,
+            )
+        )
+        pending_batch.clear()
 
     scan_future.result()
     if scan_done.error_message:
