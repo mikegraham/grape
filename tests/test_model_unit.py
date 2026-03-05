@@ -1,6 +1,7 @@
 """Fast unit tests for model-loading helpers."""
 
 import os
+from types import SimpleNamespace
 
 import grape.model as model_mod
 from grape.model import (
@@ -12,16 +13,20 @@ from grape.model import (
 
 def test_has_cached_weights_false_without_hf_repo(monkeypatch):
     monkeypatch.setattr(
-        "grape.model.open_clip.get_pretrained_cfg",
-        lambda *_args, **_kwargs: {},
+        "grape.model._import_open_clip",
+        lambda **_kwargs: SimpleNamespace(
+            get_pretrained_cfg=lambda *_args, **_kw: {},
+        ),
     )
     assert _has_cached_weights("ViT-B-16", "laion2b_s34b_b88k") is False
 
 
 def test_has_cached_weights_true_when_any_file_cached(monkeypatch):
     monkeypatch.setattr(
-        "grape.model.open_clip.get_pretrained_cfg",
-        lambda *_args, **_kwargs: {"hf_hub": "repo/id"},
+        "grape.model._import_open_clip",
+        lambda **_kwargs: SimpleNamespace(
+            get_pretrained_cfg=lambda *_args, **_kw: {"hf_hub": "repo/id"},
+        ),
     )
 
     def _fake_try_to_load_from_cache(repo_id, filename):

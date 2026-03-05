@@ -4,7 +4,6 @@ Avoids redundant CLIP encoding by caching embeddings keyed on
 (absolute_path, model_id) with file-stat-based invalidation.
 """
 
-import json
 import os
 import sqlite3
 from collections.abc import Mapping
@@ -47,10 +46,12 @@ def _stat_key(path: str) -> str:
 
 def _stat_key_from_stat(st: os.stat_result) -> str:
     """JSON array of stat fields used for cache invalidation."""
-    return json.dumps([
-        st.st_size, st.st_mtime_ns,
-        st.st_ino, st.st_dev, st.st_ctime_ns,
-    ])
+    # Keep exact spacing compatible with json.dumps(list) to preserve
+    # cache-key stability while reducing JSON encoder overhead.
+    return (
+        f"[{st.st_size}, {st.st_mtime_ns},"
+        f" {st.st_ino}, {st.st_dev}, {st.st_ctime_ns}]"
+    )
 
 
 class EmbeddingCache:

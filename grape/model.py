@@ -1,11 +1,12 @@
+import importlib
 import os
 import sys
+import types
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-import open_clip
 import torch
 from huggingface_hub import constants as hf_constants, try_to_load_from_cache
 from numpy.typing import NDArray
@@ -20,6 +21,8 @@ _WEIGHT_FILENAMES = (
     "open_clip_pytorch_model.safetensors",
     "open_clip_pytorch_model.bin",
 )
+_open_clip_module = None
+_open_clip_fast_path = False
 
 
 @contextmanager
@@ -40,6 +43,7 @@ def _temporary_env(name: str, value: str):
 
 def _has_cached_weights(model_name: str, pretrained: str) -> bool:
     """Return True if this model has local HF weight files cached."""
+    open_clip = _import_open_clip(use_transformers=False)
     cfg = open_clip.get_pretrained_cfg(model_name, pretrained) or {}
     hf_hub = str(cfg.get("hf_hub", "")).rstrip("/")
     if not hf_hub:
@@ -63,6 +67,57 @@ def _temporary_hf_hub_offline():
             hf_constants.HF_HUB_OFFLINE = previous_offline
 
 
+def _purge_open_clip_modules() -> None:
+    """Drop loaded open_clip modules so we can re-import with new policy."""
+    for name in list(sys.modules):
+        if name == "open_clip" or name.startswith("open_clip."):
+            del sys.modules[name]
+
+
+@contextmanager
+def _temporary_transformers_stub():
+    """Temporarily make `import transformers` fail fast during open_clip import."""
+    saved_transformers: dict[str, Any] = {}
+    for key in list(sys.modules):
+        if key == "transformers" or key.startswith("transformers."):
+            saved_transformers[key] = sys.modules.pop(key)
+    sys.modules["transformers"] = types.ModuleType("transformers")
+    try:
+        yield
+    finally:
+        for key in list(sys.modules):
+            if key == "transformers" or key.startswith("transformers."):
+                del sys.modules[key]
+        sys.modules.update(saved_transformers)
+
+
+def _import_open_clip(*, use_transformers: bool):
+    """Import open_clip, optionally skipping transformers-heavy code paths."""
+    global _open_clip_fast_path, _open_clip_module
+    if _open_clip_module is not None:
+        if use_transformers and _open_clip_fast_path:
+            _purge_open_clip_modules()
+            _open_clip_module = None
+        else:
+            return _open_clip_module
+
+    if use_transformers:
+        _open_clip_module = importlib.import_module("open_clip")
+        _open_clip_fast_path = False
+        return _open_clip_module
+
+    with _temporary_transformers_stub():
+        _open_clip_module = importlib.import_module("open_clip")
+    _open_clip_fast_path = True
+    return _open_clip_module
+
+
+def _requires_transformers(exc: Exception) -> bool:
+    """Return True when open_clip failed due to missing transformers."""
+    text = str(exc).lower()
+    return "transformers" in text and "install" in text
+
+
 class CLIPModel:
     """Wrapper around an open_clip model for encoding images and text."""
     def __init__(
@@ -75,6 +130,7 @@ class CLIPModel:
         self._pretrained = pretrained
         self._model_id: str | None = None
         self.device = "cpu"
+        open_clip = _import_open_clip(use_transformers=False)
         if not quiet:
             print("Loading model...", end=" ", flush=True, file=sys.stderr)
         offline_ctx = (
@@ -82,11 +138,21 @@ class CLIPModel:
             if _has_cached_weights(model_name, pretrained)
             else nullcontext()
         )
-        with offline_ctx:
-            self.model, _, self.preprocess = open_clip.create_model_and_transforms(
-                model_name, pretrained=pretrained, device=self.device
-            )
-        self.tokenizer = open_clip.get_tokenizer(model_name)
+        try:
+            with offline_ctx:
+                self.model, _, self.preprocess = open_clip.create_model_and_transforms(
+                    model_name, pretrained=pretrained, device=self.device
+                )
+            self.tokenizer = open_clip.get_tokenizer(model_name)
+        except Exception as e:
+            if not _requires_transformers(e):
+                raise
+            open_clip = _import_open_clip(use_transformers=True)
+            with offline_ctx:
+                self.model, _, self.preprocess = open_clip.create_model_and_transforms(
+                    model_name, pretrained=pretrained, device=self.device
+                )
+            self.tokenizer = open_clip.get_tokenizer(model_name)
         self.model.eval()
         if not quiet:
             print("done.", file=sys.stderr)
@@ -99,6 +165,7 @@ class CLIPModel:
         """
         if self._model_id is not None:
             return self._model_id
+        open_clip = _import_open_clip(use_transformers=False)
         cfg = open_clip.get_pretrained_cfg(
             self._model_name, self._pretrained,
         )
@@ -120,6 +187,7 @@ class CLIPModel:
 
     def embed_dim(self) -> int:
         """Embedding dimensionality for this model architecture."""
+        open_clip = _import_open_clip(use_transformers=False)
         cfg = open_clip.get_model_config(self._model_name)
         dim: int = cfg["embed_dim"]
         return dim

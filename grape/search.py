@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import sys
 from collections.abc import Iterator
@@ -26,10 +25,12 @@ class ImageRecord(NamedTuple):
 
 def _stat_key_from_stat(st: os.stat_result) -> str:
     """Build cache invalidation key from an existing stat result."""
-    return json.dumps([
-        st.st_size, st.st_mtime_ns,
-        st.st_ino, st.st_dev, st.st_ctime_ns,
-    ])
+    # Keep exact spacing compatible with json.dumps(list) to preserve
+    # cache-key stability while avoiding JSON encoder overhead.
+    return (
+        f"[{st.st_size}, {st.st_mtime_ns},"
+        f" {st.st_ino}, {st.st_dev}, {st.st_ctime_ns}]"
+    )
 
 
 def _is_image(
@@ -94,11 +95,11 @@ def iter_image_records(
         current = stack.pop()
         with os.scandir(current) as entries:
             for entry in entries:
-                # Match Path.is_file()/is_dir() behavior (follows symlinks).
-                if recursive and entry.is_dir():
-                    stack.append(Path(entry.path))
-                    continue
+                # Check file first to avoid calling is_dir() on every file.
+                # On large flat trees this removes a costly extra syscall.
                 if not entry.is_file():
+                    if recursive and entry.is_dir():
+                        stack.append(Path(entry.path))
                     continue
                 path = Path(entry.path)
                 stat_key = _stat_key_from_stat(entry.stat())

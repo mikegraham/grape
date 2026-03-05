@@ -417,6 +417,10 @@ class _ScannedImage:
     file_stat: str | None = None
 
 
+_SCORE_BATCH_SIZE = 512
+_SCAN_QUEUE_BATCH_SIZE = _SCORE_BATCH_SIZE
+
+
 def _build_scan_indexes(cache) -> tuple[set[tuple[str, str]] | None, set[tuple[str, str]] | None]:
     """Fetch cache indexes once for fast, DB-free scan membership checks."""
     if cache is None:
@@ -431,15 +435,26 @@ def _scan_paths_worker(
     not_image_hits: set[tuple[str, str]] | None,
     out_queue: queue.Queue,
 ) -> None:
-    """Scan input paths and stream image paths into *out_queue*."""
+    """Scan input paths and stream image batches into *out_queue*."""
     image_count = 0
     error_message: str | None = None
+    batch: list[_ScannedImage] = []
+
+    def _flush_batch() -> None:
+        nonlocal batch
+        if not batch:
+            return
+        out_queue.put(batch)
+        batch = []
+
     try:
         for p in path_args:
             target = Path(p)
             if target.is_file():
-                out_queue.put(_ScannedImage(path=target))
+                batch.append(_ScannedImage(path=target))
                 image_count += 1
+                if len(batch) >= _SCAN_QUEUE_BATCH_SIZE:
+                    _flush_batch()
                 continue
             if target.is_dir():
                 if not recursive:
@@ -452,7 +467,7 @@ def _scan_paths_worker(
                     image_hits=image_hits,
                     not_image_hits=not_image_hits,
                 ):
-                    out_queue.put(
+                    batch.append(
                         _ScannedImage(
                             path=record.path,
                             path_key=record.path_key,
@@ -460,10 +475,13 @@ def _scan_paths_worker(
                         )
                     )
                     image_count += 1
+                    if len(batch) >= _SCAN_QUEUE_BATCH_SIZE:
+                        _flush_batch()
                 continue
             error_message = f"grape: {p}: No such file or directory"
             break
     finally:
+        _flush_batch()
         out_queue.put(_ScanDone(image_count=image_count, error_message=error_message))
 
 
@@ -478,9 +496,6 @@ def _format_query_summary(
     if exclude_keywords:
         query_parts.append(f"excluding: {', '.join(exclude_keywords)}")
     return "; ".join(query_parts) if query_parts else "(no keywords)"
-
-
-_SCORE_BATCH_SIZE = 512
 
 
 def _build_scored_result(
@@ -602,7 +617,6 @@ def _score_or_stub_results(
     model_id = model.model_id() if cache is not None else None
     results: list[dict] = []
     image_count = 0
-    pending_batch: list[_ScannedImage] = []
     scan_done: _ScanDone | None = None
     while scan_done is None:
         item = path_queue.get()
@@ -610,27 +624,11 @@ def _score_or_stub_results(
             scan_done = item
             continue
 
-        assert isinstance(item, _ScannedImage)
-        image_count += 1
-        pending_batch.append(item)
-        if len(pending_batch) >= _SCORE_BATCH_SIZE:
-            results.extend(
-                _score_batch(
-                    batch=pending_batch,
-                    model=model,
-                    score_keywords=score_keywords,
-                    text_emb=text_emb,
-                    cache=cache,
-                    model_id=model_id,
-                    quiet=quiet,
-                )
-            )
-            pending_batch.clear()
-
-    if pending_batch:
+        assert isinstance(item, list)
+        image_count += len(item)
         results.extend(
             _score_batch(
-                batch=pending_batch,
+                batch=item,
                 model=model,
                 score_keywords=score_keywords,
                 text_emb=text_emb,
@@ -639,7 +637,6 @@ def _score_or_stub_results(
                 quiet=quiet,
             )
         )
-        pending_batch.clear()
 
     scan_future.result()
     if scan_done.error_message:
