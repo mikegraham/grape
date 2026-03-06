@@ -32,6 +32,18 @@ CREATE TABLE IF NOT EXISTS not_images (
 )
 """
 
+_CREATE_TEXT_EMBEDDINGS = """\
+CREATE TABLE IF NOT EXISTS text_embeddings (
+    model      TEXT NOT NULL,
+    keyword    TEXT NOT NULL,
+    templates  TEXT NOT NULL,
+    embedding  BLOB NOT NULL,
+    cached_at  TEXT NOT NULL
+               DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (model, keyword, templates)
+)
+"""
+
 _INSERT = (
     "INSERT OR REPLACE INTO embeddings"
     " (path, file_stat, model, embedding)"
@@ -65,6 +77,7 @@ class EmbeddingCache:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute(_CREATE_EMBEDDINGS)
             self._conn.execute(_CREATE_NOT_IMAGES)
+            self._conn.execute(_CREATE_TEXT_EMBEDDINGS)
             self._conn.commit()
 
     def get(
@@ -254,6 +267,59 @@ class EmbeddingCache:
                 " VALUES (?, ?)",
                 (resolved, stat_key),
             )
+            self._conn.commit()
+
+    @staticmethod
+    def text_templates_key(templates: Sequence[str]) -> str:
+        """Build a canonical cache key from prompt templates."""
+        return "\n".join(templates)
+
+    def get_text_embeddings(
+        self,
+        model_id: str,
+        keywords: Sequence[str],
+        templates_key: str,
+    ) -> dict[str, NDArray[np.float32]]:
+        """Return cached text embeddings for the given keywords.
+
+        Returns a dict mapping keyword -> embedding for cache hits only.
+        """
+        if not keywords:
+            return {}
+        placeholders = ",".join("?" for _ in keywords)
+        sql = (
+            "SELECT keyword, embedding FROM text_embeddings"
+            " WHERE model = ? AND templates = ?"
+            " AND keyword IN ({})"
+        ).format(placeholders)
+        params = [model_id, templates_key, *keywords]
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return {
+            kw: np.frombuffer(blob, dtype=np.float32).reshape(1, -1).copy()
+            for kw, blob in rows
+        }
+
+    def put_text_embeddings(
+        self,
+        model_id: str,
+        templates_key: str,
+        keyword_embeddings: Sequence[tuple[str, NDArray[np.float32]]],
+    ) -> None:
+        """Store text embeddings for keywords."""
+        if not keyword_embeddings:
+            return
+        sql = (
+            "INSERT OR REPLACE INTO text_embeddings"
+            " (model, keyword, templates, embedding)"
+            " VALUES (?, ?, ?, ?)"
+        )
+        payload = [
+            (model_id, kw, templates_key, emb.tobytes())
+            for kw, emb in keyword_embeddings
+        ]
+        with self._lock:
+            self._conn.executemany(sql, payload)
             self._conn.commit()
 
     def close(self) -> None:
