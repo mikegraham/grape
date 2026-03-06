@@ -544,6 +544,27 @@ def _format_query_summary(
 # Argument parsing
 # ---------------------------------------------------------------------------
 
+def _format_model_list() -> str:
+    """Format the open_clip model list, grouped by architecture."""
+    import open_clip
+    groups: dict[str, list[str]] = {}
+    for model_name, pretrained in open_clip.list_pretrained():
+        groups.setdefault(model_name, []).append(pretrained)
+    lines = []
+    for model_name in sorted(groups):
+        tags = ", ".join(sorted(groups[model_name]))
+        lines.append(f"  {model_name}: {tags}")
+    return "\n".join(lines) + "\n"
+
+
+class _LazyHelpFormatter(argparse.RawDescriptionHelpFormatter):
+    """Formatter that appends the model list only when --help runs."""
+
+    def format_help(self) -> str:
+        base = super().format_help()
+        return base + "\navailable models:\n" + _format_model_list()
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Construct and return the CLI parser."""
     default_prompt_templates = ", ".join(DEFAULT_PROMPT_ENSEMBLE)
@@ -555,7 +576,7 @@ def _build_parser() -> argparse.ArgumentParser:
                "  grape 'cat,dog' *.jpg\n"
                "  grape -r 'golden retriever,tennis ball' ~/Pictures\n"
                "  grape -v -t 0.25 sunset photo.jpg\n",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=_LazyHelpFormatter,
     )
     parser.add_argument(
         "keywords",
