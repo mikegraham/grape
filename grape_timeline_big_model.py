@@ -60,7 +60,7 @@ def run_case(image_dir: str, cache_db: str, name: str) -> None:
         return instrumented
 
     delayed_nodes = [
-        "_import_model_module", "_load_model", "_encode_keywords",
+        "_load_model", "_encode_keywords",
         "_encode_like_images", "_combine_query_embeddings",
         "_resolve_and_index_cache", "_scan_files",
         "_prepare_cached_embeddings", "_score_all",

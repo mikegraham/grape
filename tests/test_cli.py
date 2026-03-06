@@ -289,19 +289,14 @@ def test_no_images_exits(tmp_path, monkeypatch):
 def _stub_pipeline(monkeypatch, score=0.75):
     """Stub the delayed pipeline tasks so tests don't load the real model.
 
-    Replaces _import_model_module, _load_model, _encode_keywords, and
-    _resolve_model_id with plain @dask.delayed stubs that return
-    lightweight fake objects. _score_all is replaced with a version that
-    scores each scanned image using the fixed score value.
+    Replaces _load_model, _encode_keywords, _resolve_and_index_cache,
+    and _score_all with plain @dask.delayed stubs that return
+    lightweight fake objects so tests don't load the real model.
     """
     import grape.cli as cli_mod
 
     @dask.delayed
-    def _fake_import_model_module(model_name, pretrained):
-        return object()
-
-    @dask.delayed
-    def _fake_load_model(model_module, model_name, pretrained, quiet):
+    def _fake_load_model(model_name, pretrained, quiet):
         return object()
 
     @dask.delayed
@@ -311,7 +306,7 @@ def _stub_pipeline(monkeypatch, score=0.75):
         return object()
 
     @dask.delayed
-    def _fake_resolve_and_index_cache(model_module, model_name, pretrained, cache):
+    def _fake_resolve_and_index_cache(model_name, pretrained, cache):
         return (None, None)
 
     @dask.delayed
@@ -340,7 +335,6 @@ def _stub_pipeline(monkeypatch, score=0.75):
     def _fake_combine_query_embeddings(text_emb, like_emb):
         return object()
 
-    monkeypatch.setattr(cli_mod, "_import_model_module", _fake_import_model_module)
     monkeypatch.setattr(cli_mod, "_load_model", _fake_load_model)
     monkeypatch.setattr(cli_mod, "_encode_keywords", _fake_encode_keywords)
     monkeypatch.setattr(

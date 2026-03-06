@@ -25,6 +25,9 @@ import torch
 from numpy.typing import NDArray
 from PIL import Image
 
+from grape.hf_cache import WEIGHT_FILENAMES as _WEIGHT_FILENAMES
+from grape.hf_cache import cached_file_from_repo as _cached_file_from_repo
+
 # Default to offline HF Hub access in this process to avoid unexpected
 # network latency during model startup. This only applies when the caller
 # did not already set `HF_HUB_OFFLINE` in the environment.
@@ -164,11 +167,12 @@ class CLIPModel:
         return result
 
 
-def resolve_model_id(
-    model_name: str,
-    pretrained: str,
-) -> str:
-    """Resolve a stable model id without loading model weights."""
+def get_hf_hub(model_name: str, pretrained: str) -> str:
+    """Return the hf_hub repo string from open_clip's pretrained config.
+
+    Returns empty string if the model has no hf_hub config.
+    Requires open_clip to be imported.
+    """
     try:
         open_clip = _import_open_clip(
             use_transformers=False, model_name=model_name,
@@ -180,15 +184,20 @@ def resolve_model_id(
             use_transformers=True, model_name=model_name,
         )
     cfg = open_clip.get_pretrained_cfg(model_name, pretrained)
-    hf_hub: str = (cfg or {}).get("hf_hub", "").rstrip("/")
+    hf_hub: str = (cfg or {}).get("hf_hub", "")
+    return hf_hub.rstrip("/")
+
+
+def resolve_model_id(
+    model_name: str,
+    pretrained: str,
+) -> str:
+    """Resolve a stable model id without loading model weights."""
+    hf_hub = get_hf_hub(model_name, pretrained)
     if not hf_hub:
         return f"{model_name}/{pretrained}"
-    for filename in _WEIGHT_FILENAMES:
-        cached = _cached_file_from_repo(hf_hub, filename)
-        if cached:
-            commit = Path(cached).parent.name
-            return f"{hf_hub}@{commit}"
-    return hf_hub
+    from grape.hf_cache import resolve_model_id as _resolve_from_hf_hub
+    return _resolve_from_hf_hub(hf_hub)
 
 
 # ---------------------------------------------------------------------------
@@ -218,11 +227,6 @@ def resolve_model_id(
 # but correct.
 # ---------------------------------------------------------------------------
 
-_WEIGHT_FILENAMES = (
-    "open_clip_model.safetensors",
-    "open_clip_pytorch_model.safetensors",
-    "open_clip_pytorch_model.bin",
-)
 _open_clip_module = None
 _open_clip_fast_path = False
 _preloaded_state_dict: dict | None = None
@@ -378,45 +382,6 @@ def _requires_transformers(exc: Exception) -> bool:
 # changes, _cached_file_from_repo returns None and callers fall back to
 # normal open_clip resolution.
 
-def _hf_cache_root() -> Path:
-    """Return the huggingface hub cache root directory."""
-    hub_cache = os.environ.get("HUGGINGFACE_HUB_CACHE")
-    if hub_cache:
-        return Path(hub_cache)
-    hf_home = os.environ.get("HF_HOME")
-    if hf_home:
-        return Path(hf_home) / "hub"
-    return Path.home() / ".cache" / "huggingface" / "hub"
-
-
-def _cached_file_from_repo(repo_id: str, filename: str) -> str | None:
-    """Return cached file path for ``repo_id/filename`` if present."""
-    repo_dir = _hf_cache_root() / f"models--{repo_id.replace('/', '--')}"
-    snapshots_dir = repo_dir / "snapshots"
-    if not snapshots_dir.is_dir():
-        return None
-
-    ref_main = repo_dir / "refs" / "main"
-    if ref_main.is_file():
-        commit = ref_main.read_text(encoding="utf-8").strip()
-        if commit:
-            candidate = snapshots_dir / commit / filename
-            if candidate.is_file():
-                return str(candidate)
-
-    newest: Path | None = None
-    newest_mtime = -1
-    for snapshot in snapshots_dir.iterdir():
-        candidate = snapshot / filename
-        if not candidate.is_file():
-            continue
-        mtime = candidate.stat().st_mtime_ns
-        if mtime > newest_mtime:
-            newest = candidate
-            newest_mtime = mtime
-    if newest is None:
-        return None
-    return str(newest)
 
 
 def _has_cached_weights(model_name: str, pretrained: str) -> bool:

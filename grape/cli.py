@@ -92,12 +92,12 @@ def _get_webview() -> Any:
 # in _run_pipeline(). A single dask.compute() call runs four branches
 # concurrently on a thread pool:
 #
-#   _import_model_module --+-- _load_model --+-- _encode_keywords ------+
-#                          |                 \-- _encode_like_images --+ |
-#                          |                                    _combine +
-#                          \-- _resolve_and_index_cache --+              |
-#   _scan_files --------------------------------------+-- _prepare      |
-#                                                         \-- _score_all
+#   _load_model (instant) ------+-- _encode_keywords ------+
+#                                \-- _encode_like_images --+ |
+#                                                    _combine +
+#   _resolve_and_index_cache --+                             |
+#   _scan_files ------+--------+-- _prepare                  |
+#                                   \-- _score_all ----------+
 #
 # After dask.compute(), _filter_and_sort and _emit run on the main
 # thread (pywebview requires it, stdout is cleaner without interleaving).
@@ -106,43 +106,33 @@ def _get_webview() -> Any:
 # - The scheduler is passed as a function (dask.threaded.get) not a string
 #   ("threads") to avoid a ~0.2s lazy import of dask.distributed that
 #   happens inside dask's get_scheduler() lookup.
-# - _import_model_module eagerly imports open_clip (~1s) so that cost is
-#   paid concurrently with file scanning, rather than inside _load_model.
-# - _resolve_and_index_cache depends on _import_model_module (not a root
-#   node) because open_clip's import uses global state that is not
-#   thread-safe -- it must finish before other threads call into it.
+# - _load_model creates a _LazyModel proxy; the expensive torch/open_clip
+#   import and weight loading only happen if a downstream node actually
+#   accesses the model (i.e. cache miss).  When everything is cached,
+#   no import happens and _scan_files runs uncontested by the GIL.
+# - _resolve_and_index_cache caches model_id in SQLite so it can skip
+#   the open_clip import on warm-cache runs.
 # ---------------------------------------------------------------------------
-
-@dask.delayed
-def _import_model_module(model_name: str, pretrained: str) -> Any:
-    """Import grape.model and open_clip (pulls in torch -- slow).
-
-    Eagerly triggers the open_clip import so that the ~1s cost is paid
-    here (concurrent with file scanning) rather than inside _load_model.
-
-    Also kicks off a background thread to pre-read the safetensors
-    weights from disk (see preload_weights docstring in model.py).
-    By the time _load_model runs, the state dict is already in memory
-    and we can use the fast meta-device path (~30ms vs ~800ms).
-    """
-    import grape.model
-    grape.model.preload_weights(model_name, pretrained)
-    return grape.model
 
 
 class _LazyModel:
     """Deferred model loader: only constructs CLIPModel on first use.
 
+    Handles the full import-and-init lifecycle internally: imports
+    grape.model (pulling in torch/open_clip), kicks off background
+    weight preloading, then constructs CLIPModel.
+
     When all embeddings (text + image) are cached, the model is never
-    accessed and CLIPModel.__init__ never runs -- saving ~1s of
-    weight loading.  Thread-safe for concurrent dask tasks.
+    accessed and none of that happens -- saving ~1.5s of import + init.
+    Thread-safe for concurrent dask tasks.
     """
 
     def __init__(
-        self, model_module: Any, model_name: str,
-        pretrained: str, quiet: bool,
+        self, model_name: str, pretrained: str, quiet: bool,
     ) -> None:
-        self._loader_args = (model_module, model_name, pretrained, quiet)
+        self._model_name = model_name
+        self._pretrained = pretrained
+        self._quiet = quiet
         self._model: Any = None
         self._lock = threading.Lock()
 
@@ -150,9 +140,14 @@ class _LazyModel:
         if self._model is None:
             with self._lock:
                 if self._model is None:
-                    mm, mn, pt, q = self._loader_args
-                    self._model = mm.CLIPModel(
-                        model_name=mn, pretrained=pt, quiet=q,
+                    import grape.model
+                    grape.model.preload_weights(
+                        self._model_name, self._pretrained,
+                    )
+                    self._model = grape.model.CLIPModel(
+                        model_name=self._model_name,
+                        pretrained=self._pretrained,
+                        quiet=self._quiet,
                     )
         return self._model
 
@@ -162,18 +157,18 @@ class _LazyModel:
 
 @dask.delayed
 def _load_model(
-    model_module: Any,
     model_name: str,
     pretrained: str,
     quiet: bool,
 ) -> Any:
-    """Return a lazy model proxy; actual weight loading is deferred.
+    """Return a lazy model proxy; the real work is deferred.
 
-    CLIPModel.__init__ only runs when a downstream dask node actually
-    accesses the model (e.g. to encode uncached keywords or images).
-    When everything is cached, the model is never loaded.
+    Creates a _LazyModel that only imports torch/open_clip and loads
+    weights when a downstream node actually accesses it (cache miss).
+    When everything is cached, this is the only model-related work
+    that runs -- and it takes ~0ms.
     """
-    return _LazyModel(model_module, model_name, pretrained, quiet)
+    return _LazyModel(model_name, pretrained, quiet)
 
 
 @dask.delayed
@@ -216,6 +211,16 @@ def _encode_keywords(
     if uncached_prompts:
         # Encode only uncached prompts through the model.
         fresh = model.encode_texts(uncached_prompts)
+
+        # Now that the model is loaded, verify our cached model_id
+        # is still correct (could be stale if HF cache was updated).
+        real_model_id = model.model_id()
+        assert model_id is None or real_model_id == model_id, (
+            f"model_id mismatch: cached {model_id!r},"
+            f" resolved {real_model_id!r}"
+        )
+        model_id = real_model_id
+
         new_pairs: list[tuple[str, Any]] = []
         for i, prompt in enumerate(uncached_prompts):
             emb = fresh[i : i + 1]
@@ -283,23 +288,37 @@ def _combine_query_embeddings(
 
 @dask.delayed
 def _resolve_and_index_cache(
-    model_module: Any,
     model_name: str,
     pretrained: str,
     cache: "EmbeddingCache | None",
 ) -> tuple[str | None, dict[tuple[str, str], Any] | None]:
     """Resolve model_id and materialize the cache index.
 
-    Depends on model_module to ensure open_clip is already imported --
-    open_clip's import machinery is not thread-safe, so we must not
-    race with _load_model which also uses it.  Once open_clip is
-    imported, resolve_model_id only reads config + probes the HF
-    filesystem cache (no weight loading), so this still runs
-    concurrently with _load_model.
+    Uses the cached hf_hub string + lightweight filesystem probing
+    to resolve model_id without importing torch/open_clip.  Falls
+    back to the full import only on first use with a new model.
     """
     if cache is None:
         return None, None
-    model_id = model_module.resolve_model_id(model_name, pretrained)
+
+    from grape.hf_cache import resolve_model_id as _resolve_from_hf_hub
+
+    hf_hub = cache.get_hf_hub(model_name, pretrained)
+    if hf_hub is not None:
+        # Warm path: resolve from filesystem, no torch import.
+        if hf_hub:
+            model_id = _resolve_from_hf_hub(hf_hub)
+        else:
+            # Model has no hf_hub config (e.g. custom weights).
+            model_id = f"{model_name}/{pretrained}"
+    else:
+        # Cold path (first run): must import to get hf_hub string.
+        import grape.model
+        model_id = grape.model.resolve_model_id(model_name, pretrained)
+        # Extract hf_hub from the pretrained config and cache it.
+        hf_hub = grape.model.get_hf_hub(model_name, pretrained)
+        cache.put_hf_hub(model_name, pretrained, hf_hub)
+
     cached_index = cache.embedding_index_for_model(model_id)
     return model_id, cached_index
 
@@ -911,18 +930,18 @@ def _run_pipeline(
     """Build and execute the dask task graph for the full CLI pipeline."""
     # --- Build the task graph ---
     # Three independent roots run concurrently:
-    #   1. model import -> weight loading -> query encoding
-    #   2. model import -> model_id resolution + cache index
-    #   3. file scanning (builds scan indexes, then walks paths)
-    # All converge at _score_all.
+    #   1. _load_model (instant -- creates lazy proxy)
+    #   2. _resolve_and_index_cache (fast SQLite lookup on warm cache)
+    #   3. _scan_files (IO-bound directory walk)
+    # When the cache is warm, torch/open_clip are never imported and
+    # _scan_files runs uncontested by the GIL.
 
-    # Branch 1: model module import -> weight loading -> query encoding
-    model_module = _import_model_module(model_name, pretrained)
-    model = _load_model(model_module, model_name, pretrained, quiet)
+    # Root 1: lazy model proxy (no import, no weight loading)
+    model = _load_model(model_name, pretrained, quiet)
 
-    # Branch 2: model module import -> model_id resolution + cache index
+    # Root 2: model_id resolution + cache index (SQLite only when warm)
     cache_context = _resolve_and_index_cache(
-        model_module, model_name, pretrained, cache,
+        model_name, pretrained, cache,
     )
 
     # Text keyword embeddings (None when no text keywords).
