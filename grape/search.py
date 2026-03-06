@@ -130,14 +130,17 @@ def iter_image_records(
                 path = Path(entry.path)
                 stat_key = _stat_key_from_stat(entry.stat())
                 cache_key = (entry.path, stat_key)
+                # Check not-image before image-hit: a file that was
+                # once embedded but later found to be broken (truncated,
+                # video container, etc.) must stay excluded.
+                if not_image_hits is not None and cache_key in not_image_hits:
+                    continue
                 if image_hits is not None and cache_key in image_hits:
                     yield ImageRecord(
                         path=path,
                         path_key=entry.path,
                         file_stat=stat_key,
                     )
-                    continue
-                if not_image_hits is not None and cache_key in not_image_hits:
                     continue
                 if _is_image(
                     path,

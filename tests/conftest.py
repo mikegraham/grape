@@ -14,4 +14,4 @@ def fixtures_dir():
 def clip_model():
     """Load the CLIP model once for the entire test session."""
     from grape.model import CLIPModel
-    return CLIPModel()
+    return CLIPModel(model_name="ViT-B-32", pretrained="laion2b_s34b_b79k")

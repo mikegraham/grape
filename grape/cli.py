@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("grape")
 
-DEFAULT_MODEL = "ViT-B-16/laion2b_s34b_b88k"
+DEFAULT_MODEL = "ViT-L-14/laion2b_s32b_b82k"
 
 DEFAULT_PROMPT_ENSEMBLE = [
     "a photo of a {}",

@@ -148,6 +148,47 @@ def test_recursive_symlink_cycle_terminates(tmp_path):
     assert names.count("img.jpg") == 1
 
 
+def test_truncated_image_rejected(fixtures_dir):
+    """Truncated JPEG (valid header, incomplete body) is not an image.
+
+    Pillow's verify() only checks headers and lets these through.
+    We use load() to catch them.  Regression test for files that pass
+    the scan but fail encode_image, triggering an unnecessary model load.
+    """
+    images = find_images(str(fixtures_dir), recursive=False)
+    names = {p.name for p in images}
+    assert "truncated.jpg" not in names
+
+
+def test_mp4_rejected(fixtures_dir):
+    """Video files are not images."""
+    images = find_images(str(fixtures_dir), recursive=False)
+    names = {p.name for p in images}
+    assert "not_an_image.mp4" not in names
+
+
+def test_not_image_takes_priority_over_image_hit(tmp_path):
+    """A file in both image_hits and not_image_hits is excluded.
+
+    This happens when a file was once embedded successfully but later
+    found to be broken (e.g. truncated).  not_images must win.
+    """
+    scan_dir = tmp_path / "images"
+    scan_dir.mkdir()
+    bad = scan_dir / "broken.jpg"
+    bad.write_bytes(b"not a real image")
+
+    cache = EmbeddingCache(tmp_path / "test.db")
+    # Simulate: file has a stale embedding from a previous run.
+    cache.put(bad, "old-model", np.ones((1, 4), dtype=np.float32))
+    # And it was also recorded as not-image (e.g. by _score_all).
+    cache.put_not_image(bad)
+
+    records = list(iter_image_records(str(scan_dir), cache=cache))
+    assert len(records) == 0, "not_image should take priority over image_hit"
+    cache.close()
+
+
 def test_score_image_prompt_ensemble_averages_templates(tmp_path):
     """Prompt ensembling should average text embeddings per keyword."""
 

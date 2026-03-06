@@ -33,10 +33,6 @@ from grape.hf_cache import cached_file_from_repo as _cached_file_from_repo
 # did not already set `HF_HUB_OFFLINE` in the environment.
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
-# Default model: ViT-B-16 provides stronger semantic quality than B-32.
-# Embedding dimensionality remains 512.
-DEFAULT_MODEL = "ViT-B-16"
-DEFAULT_PRETRAINED = "laion2b_s34b_b88k"
 
 
 # ---------------------------------------------------------------------------
@@ -48,8 +44,8 @@ class CLIPModel:
 
     def __init__(
         self,
-        model_name: str = DEFAULT_MODEL,
-        pretrained: str = DEFAULT_PRETRAINED,
+        model_name: str,
+        pretrained: str,
         quiet: bool = False,
     ) -> None:
         self._model_name = model_name
