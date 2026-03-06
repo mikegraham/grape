@@ -5,10 +5,11 @@ Public API:
     resolve_model_id   -- stable model identifier without loading weights
     preload_weights    -- kick off background weight read for fast startup
 
-The bottom half of this file is startup hacks. They are ugly but save ~2s
-of import/init time on every invocation. Each hack is documented with what
-it does, why it exists, and what breaks if the assumption is wrong.
+This module contains some crazy hacks to recude latency.
 """
+
+# The bottom half of this file is startup hacks. They are ugly but save ~2s
+# of import/init time on every invocation.
 
 import importlib
 import os
@@ -86,7 +87,7 @@ class CLIPModel:
         """
         state_dict = _take_preloaded_state_dict()
         if state_dict is not None:
-            self._init_model_fast(open_clip, model_name, state_dict)
+            self._init_model_fast(open_clip, model_name, pretrained, state_dict)
             return
 
         cached = _cached_weight_path(model_name, pretrained)
@@ -109,13 +110,16 @@ class CLIPModel:
         self,
         open_clip: Any,
         model_name: str,
+        pretrained: str,
         state_dict: dict,
     ) -> None:
         """Load model via meta device + pre-loaded state dict.
 
         See _MetaDeviceLoader docstring for the full explanation.
         """
-        _MetaDeviceLoader.load_into(self, open_clip, model_name, state_dict)
+        _MetaDeviceLoader.load_into(
+            self, open_clip, model_name, pretrained, state_dict,
+        )
 
     def model_id(self) -> str:
         """Stable identifier: ``{hf_repo_id}@{commit_hash}``.
@@ -535,11 +539,30 @@ class _MetaDeviceLoader:
         clip: CLIPModel,
         open_clip: Any,
         model_name: str,
+        pretrained: str,
         state_dict: dict,
     ) -> None:
+        # The pretrained config specifies model-specific normalization
+        # (mean/std) and resize mode.  create_model(load_weights=False)
+        # does NOT apply these, so we must pass them explicitly via
+        # force_preprocess_cfg.  Without this, models that use non-default
+        # normalization (e.g. mean/std = 0.5 instead of ImageNet defaults)
+        # produce wrong embeddings.
+        from open_clip.factory import merge_preprocess_kwargs
+        pt_cfg = open_clip.get_pretrained_cfg(model_name, pretrained) or {}
+        force_pp = merge_preprocess_kwargs(
+            {},
+            mean=pt_cfg.get("mean"),
+            std=pt_cfg.get("std"),
+            interpolation=pt_cfg.get("interpolation"),
+            resize_mode=pt_cfg.get("resize_mode"),
+        )
         with torch.device("meta"):
             model = open_clip.create_model(
-                model_name, load_weights=False, device="meta",
+                model_name,
+                load_weights=False,
+                device="meta",
+                force_preprocess_cfg=force_pp,
             )
         model.load_state_dict(state_dict, assign=True, strict=True)
         # The causal attention mask is a non-persistent buffer created in
