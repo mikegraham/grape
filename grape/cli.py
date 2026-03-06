@@ -106,16 +106,19 @@ def _get_webview() -> Any:
 # ---------------------------------------------------------------------------
 
 @dask.delayed
-def _import_model_module(model_name: str) -> Any:
+def _import_model_module(model_name: str, pretrained: str) -> Any:
     """Import grape.model and open_clip (pulls in torch -- slow).
 
     Eagerly triggers the open_clip import so that the ~1s cost is paid
     here (concurrent with file scanning) rather than inside _load_model.
+
+    Also kicks off a background thread to pre-read the safetensors
+    weights from disk (see preload_weights docstring in model.py).
+    By the time _load_model runs, the state dict is already in memory
+    and we can use the fast meta-device path (~30ms vs ~800ms).
     """
     import grape.model
-    grape.model._import_open_clip(
-        use_transformers=False, model_name=model_name,
-    )
+    grape.model.preload_weights(model_name, pretrained)
     return grape.model
 
 
@@ -701,7 +704,7 @@ def _run_pipeline(
     # All converge at _score_all.
 
     # Branch 1: model module import -> weight loading -> text encoding
-    model_module = _import_model_module(model_name)
+    model_module = _import_model_module(model_name, pretrained)
     model = _load_model(model_module, model_name, pretrained, quiet)
     text_emb = _encode_keywords(model, score_keywords, prompt_templates)
 

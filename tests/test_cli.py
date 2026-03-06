@@ -285,7 +285,7 @@ def _stub_pipeline(monkeypatch, score=0.75):
     import grape.cli as cli_mod
 
     @dask.delayed
-    def _fake_import_model_module(model_name):
+    def _fake_import_model_module(model_name, pretrained):
         return object()
 
     @dask.delayed
