@@ -17,6 +17,7 @@ from dask.threaded import get as _dask_threaded_get
 
 from grape.search import (
     ScoredImage,
+    is_image,
     iter_image_records,
 )
 
@@ -345,6 +346,15 @@ def _scan_files(
                 f"[{st.st_size}, {st.st_mtime_ns},"
                 f" {st.st_ino}, {st.st_dev}, {st.st_ctime_ns}]"
             )
+            cache_key = (path_key, file_stat)
+            if not_image_hits is not None and cache_key in not_image_hits:
+                continue
+            if (
+                image_hits is None or cache_key not in image_hits
+            ) and not is_image(
+                target, cache, path_key=path_key, file_stat=file_stat,
+            ):
+                continue
             items.append(_ScannedImage(
                 path=target, path_key=path_key, file_stat=file_stat,
             ))

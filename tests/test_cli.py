@@ -197,7 +197,7 @@ def test_bad_model_format(monkeypatch):
 
 def test_empty_keywords_errors(tmp_path, monkeypatch):
     image_path = tmp_path / "empty keywords.jpg"
-    image_path.write_bytes(b"unused")
+    Image.new("RGB", (1, 1)).save(image_path)
     _, err, code = run_main(["-q", "-k", ",,,", str(image_path)], monkeypatch)
     assert code != 0
     assert "keyword" in err.lower() or "--like" in err.lower()
@@ -205,7 +205,7 @@ def test_empty_keywords_errors(tmp_path, monkeypatch):
 
 def test_empty_exclude_keywords_errors(tmp_path, monkeypatch):
     image_path = tmp_path / "empty exclude.jpg"
-    image_path.write_bytes(b"unused")
+    Image.new("RGB", (1, 1)).save(image_path)
     _stub_pipeline(monkeypatch)
     out, _, code = run_main(
         ["-q", "-s", "-x", ",,,", "-k", "dog", str(image_path)],
@@ -218,7 +218,7 @@ def test_empty_exclude_keywords_errors(tmp_path, monkeypatch):
 def test_exclude_only_without_include_or_like_is_error(tmp_path, monkeypatch):
     """Exclude-only queries are nonsensical (ranks by least similar)."""
     image_path = tmp_path / "my photo.jpg"
-    image_path.write_bytes(b"unused")
+    Image.new("RGB", (1, 1)).save(image_path)
     _, err, code = run_main(
         ["-q", "-x", "cat", str(image_path)],
         monkeypatch,
@@ -229,7 +229,7 @@ def test_exclude_only_without_include_or_like_is_error(tmp_path, monkeypatch):
 
 def test_both_keyword_lists_empty_is_error(tmp_path, monkeypatch):
     image_path = tmp_path / "my photo.jpg"
-    image_path.write_bytes(b"unused")
+    Image.new("RGB", (1, 1)).save(image_path)
     _, err, code = run_main(
         ["-q", "-x", ",,,", "-k", ",,,", str(image_path)],
         monkeypatch,
@@ -354,7 +354,7 @@ def _stub_pipeline(monkeypatch, score=0.75):
 
 def test_default_output_shell_quotes_paths(tmp_path, monkeypatch):
     image_path = tmp_path / "my photo.jpg"
-    image_path.write_bytes(b"unused")
+    Image.new("RGB", (1, 1)).save(image_path)
     _stub_pipeline(monkeypatch)
     out, _, code = run_main(["-q", "-k", "dog", str(image_path)], monkeypatch)
     assert code == 0
@@ -363,7 +363,7 @@ def test_default_output_shell_quotes_paths(tmp_path, monkeypatch):
 
 def test_print0_outputs_raw_nul_terminated_paths(tmp_path, monkeypatch):
     image_path = tmp_path / "my photo.jpg"
-    image_path.write_bytes(b"unused")
+    Image.new("RGB", (1, 1)).save(image_path)
     _stub_pipeline(monkeypatch)
     out, _, code = run_main(
         ["-q", "-print0", "-k", "dog", str(image_path)], monkeypatch,
@@ -374,7 +374,7 @@ def test_print0_outputs_raw_nul_terminated_paths(tmp_path, monkeypatch):
 
 def test_scores_output_shell_quotes_paths(tmp_path, monkeypatch):
     image_path = tmp_path / "my photo.jpg"
-    image_path.write_bytes(b"unused")
+    Image.new("RGB", (1, 1)).save(image_path)
     _stub_pipeline(monkeypatch)
     out, _, code = run_main(["-q", "-s", "-k", "dog", str(image_path)], monkeypatch)
     assert code == 0
@@ -383,7 +383,7 @@ def test_scores_output_shell_quotes_paths(tmp_path, monkeypatch):
 
 def test_exclude_keywords_adjusts_output_score(tmp_path, monkeypatch):
     image_path = tmp_path / "my photo.jpg"
-    image_path.write_bytes(b"unused")
+    Image.new("RGB", (1, 1)).save(image_path)
 
     # Custom stub that returns different scores per keyword
     import grape.cli as cli_mod
@@ -415,7 +415,7 @@ def test_exclude_keywords_adjusts_output_score(tmp_path, monkeypatch):
 
 def test_exclude_alias_anti_is_rejected(tmp_path, monkeypatch):
     image_path = tmp_path / "my photo.jpg"
-    image_path.write_bytes(b"unused")
+    Image.new("RGB", (1, 1)).save(image_path)
     _, err, code = run_main(
         ["-q", "-s", "--anti", "cat", "-k", "dog", str(image_path)],
         monkeypatch,
@@ -426,7 +426,7 @@ def test_exclude_alias_anti_is_rejected(tmp_path, monkeypatch):
 
 def test_exclude_verbose_shows_not_keyword(tmp_path, monkeypatch):
     image_path = tmp_path / "my photo.jpg"
-    image_path.write_bytes(b"unused")
+    Image.new("RGB", (1, 1)).save(image_path)
 
     import grape.cli as cli_mod
 
@@ -456,7 +456,7 @@ def test_exclude_verbose_shows_not_keyword(tmp_path, monkeypatch):
 
 def test_ensemble_prompts_uses_default_template_set(tmp_path, monkeypatch):
     image_path = tmp_path / "my photo.jpg"
-    image_path.write_bytes(b"unused")
+    Image.new("RGB", (1, 1)).save(image_path)
     captured: dict[str, object] = {}
 
     import grape.cli as cli_mod
@@ -483,7 +483,7 @@ def test_ensemble_prompts_uses_default_template_set(tmp_path, monkeypatch):
 
 def test_ensemble_prompts_custom_templates_override_default(tmp_path, monkeypatch):
     image_path = tmp_path / "my photo.jpg"
-    image_path.write_bytes(b"unused")
+    Image.new("RGB", (1, 1)).save(image_path)
     captured: dict[str, object] = {}
 
     import grape.cli as cli_mod
@@ -524,7 +524,7 @@ def test_ensemble_prompts_template_without_placeholder_errors(monkeypatch):
 
 def test_view_calls_webview_with_html(tmp_path, monkeypatch):
     image_path = tmp_path / "my photo.jpg"
-    image_path.write_bytes(b"unused")
+    Image.new("RGB", (1, 1)).save(image_path)
     _stub_pipeline(monkeypatch)
     captured: list[str] = []
     monkeypatch.setattr("grape.cli._show_in_webview", captured.append)
@@ -645,7 +645,7 @@ def test_score_all_duplicate_like_paths_keep_separate_scores():
 def test_scan_files_includes_cache_metadata(tmp_path):
     """_scan_files returns items with cache metadata for plain files."""
     image_path = tmp_path / "a.jpg"
-    image_path.write_bytes(b"test")
+    Image.new("RGB", (1, 1)).save(image_path)
 
     from grape.cli import _scan_files
 
@@ -664,6 +664,30 @@ def test_scan_files_includes_cache_metadata(tmp_path):
     assert item.file_stat.endswith("]")
     assert done.image_count == 1
     assert done.error_message is None
+
+
+def test_scan_files_rejects_non_images_passed_directly(tmp_path):
+    """Non-image files passed as direct paths are filtered during scan.
+
+    Regression: previously _scan_files accepted any file passed directly
+    without checking _is_image, so videos/broken files showed up as
+    "uncached" and triggered an unnecessary model load.
+    """
+    from grape.cli import _scan_files
+
+    jpg = tmp_path / "real.jpg"
+    Image.new("RGB", (1, 1)).save(jpg)
+    mp4 = tmp_path / "video.mp4"
+    mp4.write_bytes(b"\x00\x00\x00\x1cftypisom")
+    txt = tmp_path / "readme.txt"
+    txt.write_text("not an image")
+
+    items, done = _scan_files(
+        [str(jpg), str(mp4), str(txt)], False, None,
+    ).compute()
+
+    assert done.image_count == 1
+    assert items[0].path == jpg
 
 
 # --- end-to-end with real model (slow) ---

@@ -42,7 +42,7 @@ def _stat_key_from_stat(st: os.stat_result) -> str:
     )
 
 
-def _is_image(
+def is_image(
     path: Path,
     cache: EmbeddingCache | None = None,
     *,
@@ -142,7 +142,7 @@ def iter_image_records(
                         file_stat=stat_key,
                     )
                     continue
-                if _is_image(
+                if is_image(
                     path,
                     cache,
                     path_key=entry.path,
