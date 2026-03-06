@@ -1,19 +1,19 @@
 import argparse
+import os
 import queue
 import shlex
 import sys
 import tempfile
-from dataclasses import dataclass
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_PROMPT_ENSEMBLE = [
     "a photo of a {}",
     "a photo of the {}",
-    "a close-up photo of a {}",
-    "a photo of one {}",
-    "a blurry photo of a {}",
+    "a photo of including {}",
 ]
 
 _HTML_TEMPLATE_TEXT = """
@@ -23,22 +23,39 @@ _HTML_TEMPLATE_TEXT = """
   <meta charset="utf-8">
   <title>grape results</title>
   <style>
+    body {
+      margin: 12px;
+    }
+    .meta {
+      font: 12px/1.3 sans-serif;
+      word-break: break-all;
+    }
+    .path {
+      margin: 0;
+    }
+    .scoreline {
+      margin: 0 0 4px 0;
+      color: #555;
+      font-size: 11px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
     img {
       display: block;
       max-width: 100%;
       width: auto;
       height: auto;
+      margin-bottom: 10px;
     }
   </style>
 </head>
 <body>
   <p>{{ count }} image(s) for {{ keywords }}</p>
   {% for row in rows %}
-  <p>{{ row.score }} {{ row.path_text }}</p>
+  <p class="meta path">{{ row.path_text }}</p>
+  <p class="meta scoreline" title="{{ row.score_line }}">{{ row.score_line }}</p>
   <img src="{{ row.image_src }}" alt="{{ row.path_text }}">
-  {% if row.breakdown %}
-  <p>{{ row.breakdown }}</p>
-  {% endif %}
   {% endfor %}
 </body>
 </html>
@@ -82,6 +99,16 @@ def _load_model(
         pretrained=pretrained,
         quiet=quiet,
     )
+
+
+def _resolve_model_id(
+    model_name: str,
+    pretrained: str,
+) -> str:
+    """Resolve model id without constructing/loading model weights."""
+    from grape.model import resolve_model_id
+
+    return resolve_model_id(model_name, pretrained)
 
 
 def find_images(*args, **kwargs):
@@ -194,22 +221,25 @@ def _format_html(
     verbose: bool,
 ) -> str:
     """Format results as simple HTML with file-backed <img> tags."""
+    del verbose  # View always shows compact per-keyword breakdown.
     rows: list[dict[str, str]] = []
     for r in results:
         image_path = Path(r["path"])
-        abs_path = image_path.resolve()
-        breakdown = ""
-        if verbose:
-            breakdown = " ".join(
-                f"{kw}: {score:.3f}"
-                for kw, score in r["scores"].items()
-            )
+        src_path = image_path
+        if not src_path.is_absolute():
+            src_path = src_path.absolute()
+        breakdown = " · ".join(
+            f"{kw}: {score:.3f}"
+            for kw, score in r["scores"].items()
+        )
+        score_line = f"score: {r['score']:.3f}"
+        if breakdown:
+            score_line = f"{score_line} · {breakdown}"
         rows.append(
             {
-                "image_src": abs_path.as_uri(),
-                "path_text": str(abs_path),
-                "score": f"{r['score']:.3f}",
-                "breakdown": breakdown,
+                "image_src": src_path.as_uri(),
+                "path_text": str(image_path),
+                "score_line": score_line,
             }
         )
     template = _get_html_template()
@@ -288,7 +318,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="show only top N results",
     )
     parser.add_argument(
-        "-x", "--exclude", "--anti",
+        "-x", "--exclude",
         dest="exclude",
         default=None,
         metavar="KEYWORDS",
@@ -421,7 +451,20 @@ _SCORE_BATCH_SIZE = 512
 _SCAN_QUEUE_BATCH_SIZE = _SCORE_BATCH_SIZE
 
 
-def _build_scan_indexes(cache) -> tuple[set[tuple[str, str]] | None, set[tuple[str, str]] | None]:
+def _file_cache_metadata(path: Path) -> tuple[str, str]:
+    """Return ``(realpath, file_stat_key)`` metadata for cache matching."""
+    path_key = os.path.realpath(path)
+    st = os.stat(path_key)
+    file_stat = (
+        f"[{st.st_size}, {st.st_mtime_ns},"
+        f" {st.st_ino}, {st.st_dev}, {st.st_ctime_ns}]"
+    )
+    return path_key, file_stat
+
+
+def _build_scan_indexes(
+    cache,
+) -> tuple[set[tuple[str, str]] | None, set[tuple[str, str]] | None]:
     """Fetch cache indexes once for fast, DB-free scan membership checks."""
     if cache is None:
         return None, None
@@ -451,7 +494,14 @@ def _scan_paths_worker(
         for p in path_args:
             target = Path(p)
             if target.is_file():
-                batch.append(_ScannedImage(path=target))
+                path_key, file_stat = _file_cache_metadata(target)
+                batch.append(
+                    _ScannedImage(
+                        path=target,
+                        path_key=path_key,
+                        file_stat=file_stat,
+                    )
+                )
                 image_count += 1
                 if len(batch) >= _SCAN_QUEUE_BATCH_SIZE:
                     _flush_batch()
@@ -495,21 +545,9 @@ def _format_query_summary(
         query_parts.append(", ".join(keywords))
     if exclude_keywords:
         query_parts.append(f"excluding: {', '.join(exclude_keywords)}")
-    return "; ".join(query_parts) if query_parts else "(no keywords)"
-
-
-def _build_scored_result(
-    path: Path,
-    keywords: list[str],
-    sims,
-) -> dict:
-    """Build a score dict from similarity values."""
-    return {
-        "path": path,
-        "scores": {kw: float(s) for kw, s in zip(keywords, sims)},
-        "score": float(sims.mean()),
-        "min_score": float(sims.min()),
-    }
+    if query_parts:
+        return "; ".join(query_parts)
+    return "(no keywords)"
 
 
 def _score_batch(
@@ -520,38 +558,81 @@ def _score_batch(
     text_emb,
     cache,
     model_id: str | None,
+    cached_index: Mapping[tuple[str, str], object] | None,
     quiet: bool,
 ) -> list[dict]:
     """Score a batch of scanned images with batched cache lookups."""
     if not batch:
         return []
 
-    cached_vectors: dict[str, object] = {}
-    if cache is not None and model_id is not None:
-        path_stats = {
-            item.path_key: item.file_stat
-            for item in batch
-            if item.path_key is not None and item.file_stat is not None
-        }
-        if path_stats:
-            cached_vectors = cache.get_many_for_paths(model_id, path_stats)
-
     cached_items: list[_ScannedImage] = []
+    cached_vectors: list[object] = []
     uncached_items: list[_ScannedImage] = []
-    for item in batch:
-        if item.path_key is not None and item.path_key in cached_vectors:
+
+    if cached_index is not None:
+        for item in batch:
+            if item.path_key is None or item.file_stat is None:
+                uncached_items.append(item)
+                continue
+            emb = cached_index.get((item.path_key, item.file_stat))
+            if emb is None:
+                uncached_items.append(item)
+                continue
             cached_items.append(item)
-        else:
-            uncached_items.append(item)
+            cached_vectors.append(emb)
+    else:
+        batched_cache_hits: dict[str, object] = {}
+        if cache is not None and model_id is not None:
+            path_stats = {
+                item.path_key: item.file_stat
+                for item in batch
+                if item.path_key is not None and item.file_stat is not None
+            }
+            if path_stats:
+                batched_cache_hits = cache.get_many_for_paths(model_id, path_stats)
+
+        for item in batch:
+            if item.path_key is not None and item.path_key in batched_cache_hits:
+                cached_items.append(item)
+                cached_vectors.append(batched_cache_hits[item.path_key])
+            else:
+                uncached_items.append(item)
 
     results: list[dict] = []
     if cached_items:
         import numpy as np
 
-        image_emb = np.vstack([cached_vectors[item.path_key] for item in cached_items])
+        image_emb = np.vstack(cached_vectors)
         sims_matrix = image_emb @ text_emb.T
-        for item, sims in zip(cached_items, sims_matrix):
-            results.append(_build_scored_result(item.path, score_keywords, sims))
+        if sims_matrix.shape[1] == 1:
+            keyword = score_keywords[0]
+            scores_1d = sims_matrix[:, 0]
+            for item, score in zip(cached_items, scores_1d):
+                s = float(score)
+                results.append(
+                    {
+                        "path": item.path,
+                        "scores": {keyword: s},
+                        "score": s,
+                        "min_score": s,
+                    }
+                )
+        else:
+            means = sims_matrix.mean(axis=1)
+            mins = sims_matrix.min(axis=1)
+            for idx, item in enumerate(cached_items):
+                sims = sims_matrix[idx]
+                results.append(
+                    {
+                        "path": item.path,
+                        "scores": {
+                            kw: float(s)
+                            for kw, s in zip(score_keywords, sims)
+                        },
+                        "score": float(means[idx]),
+                        "min_score": float(mins[idx]),
+                    }
+                )
 
     for item in uncached_items:
         try:
@@ -577,6 +658,7 @@ def _score_or_stub_results(
     score_keywords: list[str],
     model_future,
     cache,
+    preloaded_model_id: str | None,
     prompt_templates: list[str],
     quiet: bool,
     path_args: list[str],
@@ -608,13 +690,29 @@ def _score_or_stub_results(
         path_queue,
     )
 
+    if cache is not None:
+        model_id = preloaded_model_id
+    else:
+        model_id = None
+    cached_index = None
+    if cache is not None and model_id is not None:
+        # Start cache materialization as soon as model_id is known.
+        cached_index = cache.embedding_index_for_model(model_id)
+
     model = model_future.result()
-    text_emb = encode_keywords(
+    if cache is not None and model_id is None:
+        model_id = model.model_id()
+    text_emb_future = executor.submit(
+        encode_keywords,
         model,
         score_keywords,
         prompt_templates=prompt_templates,
     )
-    model_id = model.model_id() if cache is not None else None
+    if cache is not None and model_id is not None and cached_index is None:
+        # Fallback when model id could not be resolved early.
+        cached_index = cache.embedding_index_for_model(model_id)
+    text_emb = text_emb_future.result()
+
     results: list[dict] = []
     image_count = 0
     scan_done: _ScanDone | None = None
@@ -634,6 +732,7 @@ def _score_or_stub_results(
                 text_emb=text_emb,
                 cache=cache,
                 model_id=model_id,
+                cached_index=cached_index,
                 quiet=quiet,
             )
         )
@@ -684,7 +783,9 @@ def main():
 
     args = parser.parse_args()
     keywords = parse_keywords(args.keywords)
-    exclude_keywords = parse_keywords(args.exclude) if args.exclude else []
+    exclude_keywords: list[str] = []
+    if args.exclude:
+        exclude_keywords = parse_keywords(args.exclude)
     prompt_templates = _parse_prompt_templates(parser, args.ensemble_prompts)
     model_name, pretrained = _validate_model_arg(parser, args.model)
     score_keywords = keywords + exclude_keywords
@@ -704,18 +805,17 @@ def main():
         max_workers = 2
     else:
         max_workers = 1
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Start model loading so it overlaps with image scanning below.
-        model_future = (
-            executor.submit(
+        model_future = None
+        if score_keywords:
+            model_future = executor.submit(
                 _load_model,
                 model_name=model_name,
                 pretrained=pretrained,
                 quiet=args.quiet,
             )
-            if score_keywords
-            else None
-        )
         if args.view:
             view_prep_future = executor.submit(_preload_view_modules)
         else:
@@ -723,6 +823,10 @@ def main():
 
         with cache_cm as cache:
             image_hits, not_image_hits = _build_scan_indexes(cache)
+            if score_keywords and cache is not None:
+                model_id_hint = _resolve_model_id(model_name, pretrained)
+            else:
+                model_id_hint = None
             if score_keywords:
                 images = None
             else:
@@ -736,6 +840,7 @@ def main():
                 score_keywords=score_keywords,
                 model_future=model_future,
                 cache=cache,
+                preloaded_model_id=model_id_hint,
                 prompt_templates=prompt_templates,
                 quiet=args.quiet,
                 path_args=args.path,

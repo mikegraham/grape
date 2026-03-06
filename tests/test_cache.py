@@ -106,6 +106,35 @@ def test_get_many_for_paths_filters_stale_stats(cache, img):
     assert got == {}
 
 
+def test_embedding_index_for_model_returns_all_rows(cache, img, tmp_path):
+    img2 = tmp_path / "image2.jpg"
+    img2.write_bytes(b"\xff\xd8\xff\xe0" + b"\x11" * 80)
+    emb1 = _rand_embedding(23)
+    emb2 = _rand_embedding(24)
+    emb_other = _rand_embedding(25)
+    cache.put(img, "model-a", emb1)
+    cache.put(img2, "model-a", emb2)
+    cache.put(img, "model-b", emb_other)
+
+    index = cache.embedding_index_for_model("model-a")
+    rows = cache._conn.execute(
+        "SELECT path, file_stat FROM embeddings WHERE model = ?",
+        ("model-a",),
+    ).fetchall()
+    expected_by_path = {
+        str(img.resolve()): emb1,
+        str(img2.resolve()): emb2,
+    }
+    assert len(index) == 2
+    for path, file_stat in rows:
+        key = (path, file_stat)
+        assert key in index
+        np.testing.assert_array_equal(
+            index[key].reshape(1, -1),
+            expected_by_path[path],
+        )
+
+
 # --- image-hit tracking ---
 
 def test_has_any_embedding_roundtrip(cache, img):

@@ -3,7 +3,6 @@
 import os
 from types import SimpleNamespace
 
-import grape.model as model_mod
 from grape.model import (
     _has_cached_weights,
     _temporary_env,
@@ -28,15 +27,13 @@ def test_has_cached_weights_true_when_any_file_cached(monkeypatch):
             get_pretrained_cfg=lambda *_args, **_kw: {"hf_hub": "repo/id"},
         ),
     )
-
-    def _fake_try_to_load_from_cache(repo_id, filename):
-        if repo_id == "repo/id" and filename == "open_clip_pytorch_model.bin":
-            return "/tmp/cached-model.bin"
-        return None
-
     monkeypatch.setattr(
-        "grape.model.try_to_load_from_cache",
-        _fake_try_to_load_from_cache,
+        "grape.model._cached_file_from_repo",
+        lambda repo_id, filename: (
+            "/tmp/cached-model.bin"
+            if repo_id == "repo/id" and filename == "open_clip_pytorch_model.bin"
+            else None
+        ),
     )
     assert _has_cached_weights("ViT-B-16", "laion2b_s34b_b88k") is True
 
@@ -57,9 +54,6 @@ def test_temporary_env_restores_existing_var(monkeypatch):
 
 def test_temporary_hf_hub_offline_sets_and_restores(monkeypatch):
     monkeypatch.setenv("HF_HUB_OFFLINE", "0")
-    monkeypatch.setattr("grape.model.hf_constants.HF_HUB_OFFLINE", False)
     with _temporary_hf_hub_offline():
         assert os.environ["HF_HUB_OFFLINE"] == "1"
-        assert bool(model_mod.hf_constants.HF_HUB_OFFLINE)
     assert os.environ["HF_HUB_OFFLINE"] == "0"
-    assert bool(model_mod.hf_constants.HF_HUB_OFFLINE) is False

@@ -1,5 +1,6 @@
 """Tests for CLI argument parsing, formatting, and error handling."""
 
+import queue
 import shlex
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -12,6 +13,9 @@ from grape.cli import (
     _apply_excluded_keywords,
     _format_html,
     _format_results,
+    _scan_paths_worker,
+    _ScannedImage,
+    _score_batch,
     _show_in_webview,
     main,
     parse_keywords,
@@ -155,8 +159,26 @@ def test_format_html_verbose_shows_breakdown(tmp_path):
     ]
 
     html_doc = _format_html(results, ["dog", "cat"], verbose=True)
+    assert "score: 0.750" in html_doc
     assert "dog: 0.750" in html_doc
     assert "cat: 0.250" in html_doc
+
+
+def test_format_html_shows_original_path_text(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    image_path = Path("relative name.jpg")
+    Image.new("RGB", (1, 1)).save(image_path, format="JPEG")
+    results = [
+        {
+            "score": 0.75,
+            "path": image_path,
+            "scores": {"dog": 0.75},
+        },
+    ]
+
+    html_doc = _format_html(results, ["dog"], verbose=False)
+    assert "<p class=\"meta path\">relative name.jpg</p>" in html_doc
+    assert str((tmp_path / image_path).as_uri()) in html_doc
 
 
 def test_show_in_webview_calls_create_window_and_start(monkeypatch):
@@ -339,26 +361,15 @@ def test_exclude_keywords_adjusts_output_score(tmp_path, monkeypatch):
     assert shlex.quote(str(image_path)) in out
 
 
-def test_exclude_alias_anti_works(tmp_path, monkeypatch):
+def test_exclude_alias_anti_is_rejected(tmp_path, monkeypatch):
     image_path = tmp_path / "my photo.jpg"
     image_path.write_bytes(b"unused")
-    monkeypatch.setattr("grape.cli._load_model", lambda *args, **kwargs: object())
-    monkeypatch.setattr("grape.cli.encode_keywords", lambda *args, **kwargs: object())
-    monkeypatch.setattr(
-        "grape.cli.score_image_with_text_embeddings",
-        lambda model, image_path, keywords, text_emb, cache=None: {
-            "score": 0.0,
-            "path": image_path,
-            "scores": {"dog": 0.9, "cat": 0.2},
-            "min_score": 0.2,
-        },
-    )
-    out, _, code = run_main(
+    _, err, code = run_main(
         ["-q", "-s", "--anti", "cat", "dog", str(image_path)],
         monkeypatch,
     )
-    assert code == 0
-    assert "0.700" in out
+    assert code != 0
+    assert "unrecognized arguments: --anti" in err
 
 
 def test_exclude_verbose_shows_not_keyword(tmp_path, monkeypatch):
@@ -425,7 +436,7 @@ def test_ensemble_prompts_uses_default_template_set(tmp_path, monkeypatch):
     assert code == 0
     assert out == f"{shlex.quote(str(image_path))}\n"
     assert captured["prompt_templates"] == DEFAULT_PROMPT_ENSEMBLE
-    assert len(DEFAULT_PROMPT_ENSEMBLE) >= 5
+    assert len(DEFAULT_PROMPT_ENSEMBLE) == 3
 
 
 def test_ensemble_prompts_custom_templates_override_default(tmp_path, monkeypatch):
@@ -501,6 +512,70 @@ def test_view_calls_webview_with_html(tmp_path, monkeypatch):
     assert image_path.resolve().as_uri() in html_doc
     assert str(image_path.resolve()) in html_doc
     assert html_doc.index("0.750") < html_doc.index("<img ")
+
+
+def test_score_batch_uses_in_memory_cache_index():
+    import numpy as np
+
+    class _NoDbCache:
+        def get_many_for_paths(self, *_args, **_kwargs):
+            raise AssertionError("DB batch lookup should not be called")
+
+    batch = [
+        _ScannedImage(
+            path=Path("/tmp/a.jpg"),
+            path_key="/tmp/a.jpg",
+            file_stat="stat-a",
+        )
+    ]
+    cached_index = {
+        ("/tmp/a.jpg", "stat-a"): np.array([1.0, 0.0], dtype=np.float32)
+    }
+    text_emb = np.array([[1.0, 0.0]], dtype=np.float32)
+    results = _score_batch(
+        batch=batch,
+        model=object(),
+        score_keywords=["dog"],
+        text_emb=text_emb,
+        cache=_NoDbCache(),
+        model_id="model-id",
+        cached_index=cached_index,
+        quiet=True,
+    )
+
+    assert len(results) == 1
+    assert results[0]["path"] == Path("/tmp/a.jpg")
+    assert results[0]["scores"]["dog"] == pytest.approx(1.0)
+    assert results[0]["score"] == pytest.approx(1.0)
+    assert results[0]["min_score"] == pytest.approx(1.0)
+
+
+def test_scan_paths_worker_file_includes_cache_metadata(tmp_path):
+    image_path = tmp_path / "a.jpg"
+    image_path.write_bytes(b"test")
+    out_q: queue.Queue = queue.Queue()
+
+    _scan_paths_worker(
+        path_args=[str(image_path)],
+        recursive=False,
+        image_hits=None,
+        not_image_hits=None,
+        out_queue=out_q,
+    )
+
+    batch = out_q.get_nowait()
+    done = out_q.get_nowait()
+    assert isinstance(batch, list)
+    assert len(batch) == 1
+    item = batch[0]
+    assert isinstance(item, _ScannedImage)
+    assert item.path == image_path
+    assert item.path_key == str(image_path.resolve())
+    assert item.file_stat is not None
+    assert item.file_stat.startswith("[")
+    assert item.file_stat.endswith("]")
+    assert done.image_count == 1
+    assert done.error_message is None
 
 
 # --- end-to-end with real model (slow) ---

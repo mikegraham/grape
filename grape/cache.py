@@ -6,7 +6,7 @@ Avoids redundant CLIP encoding by caching embeddings keyed on
 
 import os
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import numpy as np
@@ -126,6 +126,20 @@ class EmbeddingCache:
                 out[row_path] = np.frombuffer(blob, dtype=np.float32).copy()
         return out
 
+    def embedding_index_for_model(
+        self,
+        model_id: str,
+    ) -> dict[tuple[str, str], NDArray[np.float32]]:
+        """Return in-memory ``(path, file_stat) -> embedding`` for a model."""
+        rows = self._conn.execute(
+            "SELECT path, file_stat, embedding FROM embeddings WHERE model = ?",
+            (model_id,),
+        ).fetchall()
+        return {
+            (path, file_stat): np.frombuffer(blob, dtype=np.float32).copy()
+            for path, file_stat, blob in rows
+        }
+
     def has_any_embedding(
         self,
         path: Path,
@@ -175,6 +189,22 @@ class EmbeddingCache:
             (resolved, stat_key,
              model_id, embedding.tobytes()),
         )
+        self._conn.commit()
+
+    def put_many(
+        self,
+        model_id: str,
+        rows: Sequence[tuple[Path, NDArray[np.float32], str | None, str | None]],
+    ) -> None:
+        """Insert or replace multiple embeddings in one transaction."""
+        payload: list[tuple[str, str, str, bytes]] = []
+        for path, embedding, path_key, file_stat in rows:
+            resolved = path_key or os.path.realpath(path)
+            stat_key = file_stat or _stat_key(resolved)
+            payload.append((resolved, stat_key, model_id, embedding.tobytes()))
+        if not payload:
+            return
+        self._conn.executemany(_INSERT, payload)
         self._conn.commit()
 
     def is_not_image(
