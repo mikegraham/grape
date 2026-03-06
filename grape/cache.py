@@ -32,11 +32,11 @@ CREATE TABLE IF NOT EXISTS not_images (
 )
 """
 
-_CREATE_MODEL_HF_HUB = """\
-CREATE TABLE IF NOT EXISTS model_hf_hub (
+_CREATE_MODEL_IDS = """\
+CREATE TABLE IF NOT EXISTS model_ids (
     model_name TEXT NOT NULL,
     pretrained TEXT NOT NULL,
-    hf_hub     TEXT NOT NULL,
+    model_id   TEXT NOT NULL,
     PRIMARY KEY (model_name, pretrained)
 )
 """
@@ -86,7 +86,7 @@ class EmbeddingCache:
             self._conn.execute(_CREATE_EMBEDDINGS)
             self._conn.execute(_CREATE_NOT_IMAGES)
             self._conn.execute(_CREATE_TEXT_EMBEDDINGS)
-            self._conn.execute(_CREATE_MODEL_HF_HUB)
+            self._conn.execute(_CREATE_MODEL_IDS)
             self._conn.commit()
 
     def get(
@@ -324,33 +324,33 @@ class EmbeddingCache:
             self._conn.executemany(sql, payload)
             self._conn.commit()
 
-    def get_hf_hub(
+    def get_model_id(
         self,
         model_name: str,
         pretrained: str,
     ) -> str | None:
-        """Return cached hf_hub repo string, or None on first use."""
+        """Return cached model_id, or None on first use."""
         with self._lock:
             row = self._conn.execute(
-                "SELECT hf_hub FROM model_hf_hub"
+                "SELECT model_id FROM model_ids"
                 " WHERE model_name = ? AND pretrained = ?",
                 (model_name, pretrained),
             ).fetchone()
         return row[0] if row else None
 
-    def put_hf_hub(
+    def put_model_id(
         self,
         model_name: str,
         pretrained: str,
-        hf_hub: str,
+        model_id: str,
     ) -> None:
-        """Cache the hf_hub repo string for (model_name, pretrained)."""
+        """Cache the model_id for (model_name, pretrained)."""
         with self._lock:
             self._conn.execute(
-                "INSERT OR REPLACE INTO model_hf_hub"
-                " (model_name, pretrained, hf_hub)"
+                "INSERT OR REPLACE INTO model_ids"
+                " (model_name, pretrained, model_id)"
                 " VALUES (?, ?, ?)",
-                (model_name, pretrained, hf_hub),
+                (model_name, pretrained, model_id),
             )
             self._conn.commit()
 

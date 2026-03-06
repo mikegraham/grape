@@ -49,10 +49,14 @@ def _is_image(
     path_key: str | None = None,
     file_stat: str | None = None,
 ) -> bool:
-    """Check whether a file is a recognized image format.
+    """Check whether a file is a recognized, loadable image.
 
     When a cache is provided, consults and updates it to avoid
     re-opening files already known not to be images.
+
+    Uses ``im.load()`` instead of ``im.verify()`` because verify only
+    checks headers -- truncated images and some video containers pass
+    verify but fail when actual pixel data is decoded later.
     """
     if cache is not None and cache.is_not_image(
         path, path_key=path_key, file_stat=file_stat
@@ -60,8 +64,15 @@ def _is_image(
         return False
     try:
         with Image.open(path) as im:
-            im.verify()
+            # load() decodes pixel data, catching truncated files and
+            # formats that verify() lets through (e.g. some .mp4 files).
+            im.load()
         return True
+    except SyntaxError:
+        # PIL raises SyntaxError for some corrupt/unrecognized formats.
+        if cache is not None:
+            cache.put_not_image(path, path_key=path_key, file_stat=file_stat)
+        return False
     except OSError as e:
         # PIL raises OSError with errno=None for unrecognized formats.
         # Real filesystem errors (EACCES, ENOENT, etc.) have an errno set.

@@ -1,5 +1,6 @@
 import argparse
 import importlib.util
+import logging
 import os
 import shlex
 import sys
@@ -22,6 +23,8 @@ from grape.search import (
 if TYPE_CHECKING:
     from grape.cache import EmbeddingCache
     from grape.model import CLIPModel
+
+log = logging.getLogger("grape")
 
 DEFAULT_MODEL = "ViT-B-16/laion2b_s34b_b88k"
 
@@ -111,20 +114,17 @@ def _get_webview() -> Any:
 #   accesses the model (i.e. cache miss).  When everything is cached,
 #   no import happens and _scan_files runs uncontested by the GIL.
 # - _resolve_and_index_cache caches model_id in SQLite so it can skip
-#   the open_clip import on warm-cache runs.
+#   the open_clip import on warm-cache runs.  An assert in
+#   _encode_keywords verifies the cached model_id when the model loads.
 # ---------------------------------------------------------------------------
 
 
 class _LazyModel:
-    """Deferred model loader: only constructs CLIPModel on first use.
-
-    Handles the full import-and-init lifecycle internally: imports
-    grape.model (pulling in torch/open_clip), kicks off background
-    weight preloading, then constructs CLIPModel.
+    """Deferred model loader: imports torch/open_clip only on first use.
 
     When all embeddings (text + image) are cached, the model is never
-    accessed and none of that happens -- saving ~1.5s of import + init.
-    Thread-safe for concurrent dask tasks.
+    accessed and no heavy import happens -- keeping scan_files free
+    from GIL contention.  Thread-safe for concurrent dask tasks.
     """
 
     def __init__(
@@ -161,12 +161,11 @@ def _load_model(
     pretrained: str,
     quiet: bool,
 ) -> Any:
-    """Return a lazy model proxy; the real work is deferred.
+    """Return a lazy model proxy -- no import until first access.
 
-    Creates a _LazyModel that only imports torch/open_clip and loads
-    weights when a downstream node actually accesses it (cache miss).
-    When everything is cached, this is the only model-related work
-    that runs -- and it takes ~0ms.
+    When everything is cached, no downstream node touches the model
+    and torch/open_clip are never imported.  scan_files runs without
+    GIL contention.
     """
     return _LazyModel(model_name, pretrained, quiet)
 
@@ -207,6 +206,10 @@ def _encode_keywords(
         cached_prompts = cache.get_text_embeddings(model_id, all_prompts)
 
     uncached_prompts = [p for p in all_prompts if p not in cached_prompts]
+    log.debug(
+        "text prompts: %d total, %d cached, %d to encode",
+        len(all_prompts), len(cached_prompts), len(uncached_prompts),
+    )
 
     if uncached_prompts:
         # Encode only uncached prompts through the model.
@@ -294,32 +297,26 @@ def _resolve_and_index_cache(
 ) -> tuple[str | None, dict[tuple[str, str], Any] | None]:
     """Resolve model_id and materialize the cache index.
 
-    Uses the cached hf_hub string + lightweight filesystem probing
-    to resolve model_id without importing torch/open_clip.  Falls
-    back to the full import only on first use with a new model.
+    Caches model_id in SQLite so subsequent runs skip the torch import.
+    On first use, imports grape.model to resolve the id.
     """
     if cache is None:
         return None, None
 
-    from grape.hf_cache import resolve_model_id as _resolve_from_hf_hub
-
-    hf_hub = cache.get_hf_hub(model_name, pretrained)
-    if hf_hub is not None:
-        # Warm path: resolve from filesystem, no torch import.
-        if hf_hub:
-            model_id = _resolve_from_hf_hub(hf_hub)
-        else:
-            # Model has no hf_hub config (e.g. custom weights).
-            model_id = f"{model_name}/{pretrained}"
-    else:
-        # Cold path (first run): must import to get hf_hub string.
+    model_id = cache.get_model_id(model_name, pretrained)
+    if model_id is None:
+        # First run with this model -- must import to resolve.
+        # _LazyModel is already loading in a background thread, so
+        # grape.model may or may not be imported yet.
         import grape.model
         model_id = grape.model.resolve_model_id(model_name, pretrained)
-        # Extract hf_hub from the pretrained config and cache it.
-        hf_hub = grape.model.get_hf_hub(model_name, pretrained)
-        cache.put_hf_hub(model_name, pretrained, hf_hub)
+        cache.put_model_id(model_name, pretrained, model_id)
+        log.debug("model_id resolved fresh: %s", model_id)
+    else:
+        log.debug("model_id from cache: %s", model_id)
 
     cached_index = cache.embedding_index_for_model(model_id)
+    log.debug("cache index: %d image embeddings", len(cached_index))
     return model_id, cached_index
 
 
@@ -372,6 +369,7 @@ def _scan_files(
         error_message = f"grape: {p}: No such file or directory"
         break
 
+    log.debug("scan_files: %d images found", len(items))
     return items, _ScanDone(
         image_count=len(items), error_message=error_message,
     )
@@ -408,6 +406,10 @@ def _prepare_cached_embeddings(
     else:
         uncached_items = items
 
+    log.debug(
+        "prepare: %d cached, %d uncached images",
+        len(cached_items), len(uncached_items),
+    )
     image_emb = np.vstack(cached_vectors) if cached_vectors else None
     return image_emb, cached_items, uncached_items, scan_done
 
@@ -456,16 +458,34 @@ def _score_all(
             results.append(_make_result(item.path, sims_matrix[idx]))
 
     # Slow path: encode uncached images through the model one at a time.
+    if uncached_items:
+        log.debug("score_all: encoding %d uncached images", len(uncached_items))
     for item in uncached_items:
         try:
             img_emb = _get_embedding(model, item.path, cache)
             sims = (img_emb @ text_emb.T)[0]
             results.append(_make_result(item.path, sims))
+        except SyntaxError as e:
+            if not quiet:
+                print(f"  skipping {item.path}: {e}", file=sys.stderr)
+            if cache is not None:
+                cache.put_not_image(
+                    item.path,
+                    path_key=item.path_key,
+                    file_stat=item.file_stat,
+                )
         except OSError as e:
             if e.errno is not None:
                 raise
             if not quiet:
                 print(f"  skipping {item.path}: {e}", file=sys.stderr)
+            # Record as not-image so future scans skip this file.
+            if cache is not None:
+                cache.put_not_image(
+                    item.path,
+                    path_key=item.path_key,
+                    file_stat=item.file_stat,
+                )
 
     return results, scan_done
 
@@ -998,6 +1018,17 @@ def main() -> None:
     parser = _build_parser()
 
     args = parser.parse_args()
+
+    if args.verbose:
+        logging.basicConfig(
+            level=logging.DEBUG, format="%(name)s: %(message)s",
+            stream=sys.stderr,
+        )
+    elif not args.quiet:
+        logging.basicConfig(
+            level=logging.INFO, format="%(name)s: %(message)s",
+            stream=sys.stderr,
+        )
     keywords = parse_keywords(args.keywords) if args.keywords else []
     exclude_keywords: list[str] = []
     if args.exclude:

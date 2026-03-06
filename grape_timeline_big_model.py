@@ -75,9 +75,9 @@ def run_case(image_dir: str, cache_db: str, name: str) -> None:
     cli._show_in_webview = lambda html_doc: None
 
     argv = [
-        "grape", "-q", "--view", "--cache", cache_db,
+        "grape", "-v", "--view", "--cache", cache_db,
         "--model", "ViT-L-14/laion2b_s32b_b82k",
-        "-k", "dog,puppy,pet,cat", "-R", image_dir,
+        "-k", "dog,puppy,pet,cat,iguana,rabbit,bunny,hare", "-R", image_dir,
     ]
 
     mark("main", "start")
