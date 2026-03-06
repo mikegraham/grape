@@ -132,6 +132,22 @@ def test_find_images_real_filesystem_error_propagates(tmp_path):
         img.chmod(0o644)
 
 
+def test_recursive_symlink_cycle_terminates(tmp_path):
+    """Symlink cycles must not cause infinite traversal."""
+    sub_a = tmp_path / "a"
+    sub_b = tmp_path / "a" / "b"
+    sub_a.mkdir()
+    sub_b.mkdir()
+    # Create a cycle: a/b/loop -> a
+    (sub_b / "loop").symlink_to(sub_a)
+    Image.new("RGB", (1, 1)).save(sub_a / "img.jpg", format="JPEG")
+
+    images = find_images(str(tmp_path), recursive=True)
+    # The image should appear exactly once, not infinitely.
+    names = [p.name for p in images]
+    assert names.count("img.jpg") == 1
+
+
 def test_score_image_prompt_ensemble_averages_templates(tmp_path):
     """Prompt ensembling should average text embeddings per keyword."""
 

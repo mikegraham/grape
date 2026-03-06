@@ -28,6 +28,7 @@ class ImageRecord(NamedTuple):
 class ScoredImage:
     path: Path
     scores: dict[str, float] = field(default_factory=dict)
+    like_scores: list[tuple[str, float]] = field(default_factory=list)
     score: float = 0.0
 
 
@@ -98,6 +99,9 @@ def iter_image_records(
         image_hits = cache.image_hit_index()
     if not_image_hits is None and cache is not None:
         not_image_hits = cache.not_image_index()
+    # Track visited real directory paths to avoid infinite loops from
+    # symlink cycles (e.g. a -> b -> a).
+    seen_dirs: set[str] = {str(root)}
     stack = [root]
     while stack:
         current = stack.pop()
@@ -107,7 +111,10 @@ def iter_image_records(
                 # On large flat trees this removes a costly extra syscall.
                 if not entry.is_file():
                     if recursive and entry.is_dir():
-                        stack.append(Path(entry.path))
+                        real = os.path.realpath(entry.path)
+                        if real not in seen_dirs:
+                            seen_dirs.add(real)
+                            stack.append(Path(entry.path))
                     continue
                 path = Path(entry.path)
                 stat_key = _stat_key_from_stat(entry.stat())
