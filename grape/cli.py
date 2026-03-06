@@ -602,7 +602,10 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="SCORE",
         help="only show results >= SCORE"
-             " (0.0-1.0, higher is stricter)",
+             " (cosine similarity, not a probability;"
+             " even strong matches rarely exceed 0.35;"
+             " scores are not comparable across models;"
+             " use -s to see scores and pick a threshold)",
     )
     parser.add_argument(
         "-n", "--top",
