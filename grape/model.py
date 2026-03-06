@@ -114,27 +114,75 @@ def _cached_file_from_repo(repo_id: str, filename: str) -> str | None:
     return str(newest)
 
 
+def _make_stub(name: str, doc: str, **attrs: Any) -> types.ModuleType:
+    """Create a stub module with a docstring explaining why it exists."""
+    stub = types.ModuleType(name, doc)
+    for attr, val in attrs.items():
+        setattr(stub, attr, val)
+    return stub
+
+
+def _model_needs_timm(model_name: str) -> bool:
+    """Check whether a model architecture requires timm.
+
+    Reads the JSON config from open_clip's installed model_configs directory
+    without importing open_clip itself. Returns True (safe default) if the
+    config can't be found.
+    """
+    oc_init = sys.modules.get("open_clip", None)
+    if oc_init is not None and getattr(oc_init, "__file__", None) is not None:
+        cfg_dir = Path(oc_init.__file__).parent / "model_configs"  # type: ignore[arg-type]
+    else:
+        import importlib.util
+        spec = importlib.util.find_spec("open_clip")
+        if spec is None or spec.origin is None:
+            return True  # can't tell, assume yes (safe)
+        cfg_dir = Path(spec.origin).parent / "model_configs"
+    cfg_file = cfg_dir / f"{model_name}.json"
+    if not cfg_file.is_file():
+        return True  # unknown model, assume yes (safe)
+    import json
+    cfg = json.loads(cfg_file.read_text())
+    vcfg = cfg.get("vision_cfg", {})
+    return isinstance(vcfg, dict) and "timm_model_name" in vcfg
+
+
 @contextmanager
-def _temporary_import_stubs():
+def _temporary_import_stubs(*, stub_timm: bool = True):
     """Stub out heavy modules that open_clip imports eagerly but we don't need.
 
-    HACK: We inject stub modules for ``transformers`` and ``open_clip.coca_model``
-    so that ``import open_clip`` skips the CoCa model class (~1.7s) and the
-    transformers stack. Plain CLIP/ViT models never touch these code paths.
-    Breaks when the chosen model genuinely needs CoCa or a HF text tower.
-    Callers detect that failure and retry with a full open_clip import.
+    HACK: We inject stub modules for ``transformers``, ``open_clip.coca_model``,
+    and optionally ``open_clip.timm_model`` so that ``import open_clip`` skips
+    the CoCa class (~1.7s), the transformers stack, and timm (~0.25s).
+    Plain CLIP/ViT models never touch these code paths.
+    Breaks when the chosen model genuinely needs CoCa, a HF text tower, or
+    a timm vision backbone. Callers detect that failure and retry with a full
+    open_clip import.
     """
     saved: dict[str, Any] = {}
-    stub_prefixes = ("transformers", "open_clip.coca_model")
+    stub_prefixes = ["transformers", "open_clip.coca_model"]
+    if stub_timm:
+        stub_prefixes.append("open_clip.timm_model")
     for key in list(sys.modules):
         if any(key == p or key.startswith(p + ".") for p in stub_prefixes):
             saved[key] = sys.modules.pop(key)
-    sys.modules["transformers"] = types.ModuleType("transformers")
-    # Stub coca_model with a dummy CoCa attribute so open_clip's
-    # ``from .coca_model import CoCa`` succeeds at import time.
-    coca_stub = types.ModuleType("open_clip.coca_model")
-    coca_stub.CoCa = None  # type: ignore[attr-defined]
-    sys.modules["open_clip.coca_model"] = coca_stub
+    sys.modules["transformers"] = _make_stub(
+        "transformers",
+        "grape startup stub: blocks heavy transformers import",
+    )
+    sys.modules["open_clip.coca_model"] = _make_stub(
+        "open_clip.coca_model",
+        "grape startup stub: CoCa model class not needed for plain CLIP",
+        CoCa="STUBBED by grape/model.py: CoCa not needed for this model",
+    )
+    if stub_timm:
+        sys.modules["open_clip.timm_model"] = _make_stub(
+            "open_clip.timm_model",
+            "grape startup stub: timm vision backbone not needed"
+            " for this model architecture",
+            TimmModel="STUBBED by grape/model.py: timm not needed"
+            " for this model",
+        )
     try:
         yield
     finally:
@@ -144,7 +192,11 @@ def _temporary_import_stubs():
         sys.modules.update(saved)
 
 
-def _import_open_clip(*, use_transformers: bool):
+def _import_open_clip(
+    *,
+    use_transformers: bool,
+    model_name: str | None = None,
+):
     """Import open_clip, optionally skipping transformers-heavy code paths."""
     global _open_clip_fast_path, _open_clip_module
     if _open_clip_module is not None:
@@ -166,7 +218,9 @@ def _import_open_clip(*, use_transformers: bool):
         _open_clip_fast_path = False
         return _open_clip_module
 
-    with _temporary_import_stubs():
+    # Only stub timm when we know the model doesn't need it.
+    stub_timm = model_name is not None and not _model_needs_timm(model_name)
+    with _temporary_import_stubs(stub_timm=stub_timm):
         _open_clip_module = importlib.import_module("open_clip")
     _open_clip_fast_path = True
     return _open_clip_module

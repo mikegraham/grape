@@ -89,10 +89,10 @@ def _get_webview() -> Any:
 # in _run_pipeline(). A single dask.compute() call runs three branches
 # concurrently on a thread pool:
 #
-#   _import_model_module ─┬─ _load_model ─ _encode_keywords ─┐
-#                         └─ _resolve_and_index_cache ─┐     │
-#   _scan_files ───────────────────────────────────────┴─ _prepare
-#       └─ _score_all ─ _filter_and_sort ─ _emit
+#   _import_model_module --+-- _load_model -- _encode_keywords --+
+#                          \-- _resolve_and_index_cache --+      |
+#   _scan_files --------------------------------------+-- _prepare
+#       \-- _score_all -- _filter_and_sort -- _emit
 #
 # Performance notes:
 # - The scheduler is passed as a function (dask.threaded.get) not a string
@@ -102,18 +102,20 @@ def _get_webview() -> Any:
 #   paid concurrently with file scanning, rather than inside _load_model.
 # - _resolve_and_index_cache depends on _import_model_module (not a root
 #   node) because open_clip's import uses global state that is not
-#   thread-safe — it must finish before other threads call into it.
+#   thread-safe -- it must finish before other threads call into it.
 # ---------------------------------------------------------------------------
 
 @dask.delayed
-def _import_model_module() -> Any:
-    """Import grape.model and open_clip (pulls in torch — slow).
+def _import_model_module(model_name: str) -> Any:
+    """Import grape.model and open_clip (pulls in torch -- slow).
 
     Eagerly triggers the open_clip import so that the ~1s cost is paid
     here (concurrent with file scanning) rather than inside _load_model.
     """
     import grape.model
-    grape.model._import_open_clip(use_transformers=False)
+    grape.model._import_open_clip(
+        use_transformers=False, model_name=model_name,
+    )
     return grape.model
 
 
@@ -156,7 +158,7 @@ def _resolve_and_index_cache(
 ) -> tuple[str | None, dict[tuple[str, str], Any] | None]:
     """Resolve model_id and materialize the cache index.
 
-    Depends on model_module to ensure open_clip is already imported —
+    Depends on model_module to ensure open_clip is already imported --
     open_clip's import machinery is not thread-safe, so we must not
     race with _load_model which also uses it.  Once open_clip is
     imported, resolve_model_id only reads config + probes the HF
@@ -231,7 +233,7 @@ def _prepare_cached_embeddings(
 ) -> "tuple[Any, list[_ScannedImage], list[_ScannedImage], _ScanDone]":
     """Split scanned images into cached/uncached and vstack cached vectors.
 
-    Runs as soon as scanning and cache indexing finish — does not wait for
+    Runs as soon as scanning and cache indexing finish -- does not wait for
     model loading or text encoding, so the ~23ms vstack overlaps with those.
     Returns (image_emb_matrix | None, cached_items, uncached_items, scan_done).
     """
@@ -352,7 +354,7 @@ def _emit(
 ) -> int:
     """Format and output results. Returns count of emitted rows."""
     if not results:
-        # Always print — this is a result status, not a progress message.
+        # Always print -- this is a result status, not a progress message.
         print("grape: no images above threshold", file=sys.stderr)
         return 0
 
@@ -393,7 +395,7 @@ class _ScannedImage:
 
 
 # ---------------------------------------------------------------------------
-# Pure helpers (not delayed — used inside delayed tasks or at parse time)
+# Pure helpers (not delayed -- used inside delayed tasks or at parse time)
 # ---------------------------------------------------------------------------
 
 def parse_keywords(raw: str) -> list[str]:
@@ -467,13 +469,13 @@ def _format_html(
         src_path = r.path
         if not src_path.is_absolute():
             src_path = src_path.absolute()
-        breakdown = " · ".join(
+        breakdown = " \N{MIDDLE DOT} ".join(
             f"{kw}: {score:.3f}"
             for kw, score in r.scores.items()
         )
         score_line = f"score: {r.score:.3f}"
         if breakdown:
-            score_line = f"{score_line} · {breakdown}"
+            score_line = f"{score_line} \N{MIDDLE DOT} {breakdown}"
         rows.append(
             {
                 "image_src": src_path.as_uri(),
@@ -693,17 +695,17 @@ def _run_pipeline(
     """Build and execute the dask task graph for the full CLI pipeline."""
     # --- Build the task graph ---
     # Three independent roots run concurrently:
-    #   1. model import → weight loading → text encoding
-    #   2. model import → model_id resolution + cache index
+    #   1. model import -> weight loading -> text encoding
+    #   2. model import -> model_id resolution + cache index
     #   3. file scanning (builds scan indexes, then walks paths)
     # All converge at _score_all.
 
-    # Branch 1: model module import → weight loading → text encoding
-    model_module = _import_model_module()
+    # Branch 1: model module import -> weight loading -> text encoding
+    model_module = _import_model_module(model_name)
     model = _load_model(model_module, model_name, pretrained, quiet)
     text_emb = _encode_keywords(model, score_keywords, prompt_templates)
 
-    # Branch 2: model module import → model_id resolution + cache index
+    # Branch 2: model module import -> model_id resolution + cache index
     cache_context = _resolve_and_index_cache(
         model_module, model_name, pretrained, cache,
     )
@@ -734,7 +736,7 @@ def _run_pipeline(
         scores, verbose, print0, view, quiet,
     )
 
-    # Single compute call — dask resolves the whole graph.
+    # Single compute call -- dask resolves the whole graph.
     # Pass the get function directly to avoid dask.distributed import (~0.2s).
     dask.compute(emitted_count, scheduler=_dask_threaded_get)
 

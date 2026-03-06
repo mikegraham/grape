@@ -38,7 +38,7 @@ def test_different_images_produce_different_embeddings(clip_model, fixtures_dir)
 
 # --- semantic matching ---
 
-# (query, image that should rank FIRST) — things a human would get right.
+# (query, image that should rank FIRST) -- things a human would get right.
 POSITIVE_MATCHES = [
     ("dog", "dog.jpg"),
     ("cat", "cat.jpg"),
@@ -55,7 +55,7 @@ POSITIVE_MATCHES = [
     ("restaurant", "toms_diner.jpg"),
 ]
 
-# (query, image that should NOT rank first) — things a human would never confuse.
+# (query, image that should NOT rank first) -- things a human would never confuse.
 NEGATIVE_MATCHES = [
     ("dog", "teapot.png"),
     ("beach", "mnist.png"),
@@ -82,7 +82,7 @@ def test_semantic_ranking(clip_model, fixtures_dir):
         ok = top_name == expected_name
         correct += ok
         checks.append(ok)
-        details.append(f"  {'ok' if ok else 'MISS':4s}  +{keyword:25s} → {top_name}"
+        details.append(f"  {'ok' if ok else 'MISS':4s}  +{keyword:25s} -> {top_name}"
                         + (f" (expected {expected_name})" if not ok else ""))
 
     for keyword, wrong_name in NEGATIVE_MATCHES:
@@ -92,7 +92,7 @@ def test_semantic_ranking(clip_model, fixtures_dir):
         ok = top_name != wrong_name
         correct += ok
         checks.append(ok)
-        details.append(f"  {'ok' if ok else 'MISS':4s}  -{keyword:25s} ≠ {wrong_name}"
+        details.append(f"  {'ok' if ok else 'MISS':4s}  -{keyword:25s} != {wrong_name}"
                         + (f" (but got {top_name})" if not ok else ""))
 
     summary = "\n".join(details)

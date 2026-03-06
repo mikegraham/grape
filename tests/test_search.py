@@ -41,11 +41,11 @@ def test_returns_sorted(fixtures_dir):
 
 def test_detects_by_content_not_extension(tmp_path):
     """Files are identified as images by content, not extension."""
-    # Real image, wrong extension — should be found
+    # Real image, wrong extension -- should be found
     Image.new("RGB", (1, 1)).save(tmp_path / "photo.dat", format="JPEG")
-    # Text file with image extension — should be skipped
+    # Text file with image extension -- should be skipped
     (tmp_path / "fake.jpg").write_bytes(b"not an image at all")
-    # Plain text — should be skipped
+    # Plain text -- should be skipped
     (tmp_path / "notes.txt").write_bytes(b"hello world")
 
     images = find_images(str(tmp_path))
