@@ -5,7 +5,6 @@ import shlex
 import sys
 import tempfile
 from collections.abc import Mapping
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -653,10 +652,43 @@ def _score_batch(
     return results
 
 
+def _collect_scanned_batches(
+    path_args: list[str],
+    recursive: bool,
+    image_hits: set[tuple[str, str]] | None,
+    not_image_hits: set[tuple[str, str]] | None,
+) -> tuple[list[list[_ScannedImage]], _ScanDone]:
+    """Run scan worker and collect emitted batches into a list."""
+    path_queue: queue.Queue = queue.Queue()
+    _scan_paths_worker(
+        path_args,
+        recursive,
+        image_hits,
+        not_image_hits,
+        path_queue,
+    )
+    batches: list[list[_ScannedImage]] = []
+    scan_done: _ScanDone | None = None
+    while scan_done is None:
+        item = path_queue.get()
+        if isinstance(item, _ScanDone):
+            scan_done = item
+            continue
+        assert isinstance(item, list)
+        batches.append(item)
+    return batches, scan_done
+
+
+def _model_id_from_model(model) -> str:
+    """Return stable model id from a loaded model object."""
+    return model.model_id()
+
+
 def _score_or_stub_results(
     images: list[Path] | None,
     score_keywords: list[str],
-    model_future,
+    model_name: str,
+    pretrained: str,
     cache,
     preloaded_model_id: str | None,
     prompt_templates: list[str],
@@ -665,7 +697,6 @@ def _score_or_stub_results(
     recursive: bool,
     image_hits: set[tuple[str, str]] | None,
     not_image_hits: set[tuple[str, str]] | None,
-    executor: ThreadPoolExecutor,
 ) -> list[dict]:
     """Score images when keywords are present; otherwise emit neutral rows."""
     if not score_keywords:
@@ -680,53 +711,56 @@ def _score_or_stub_results(
             for path in images
         ]
 
-    path_queue: queue.Queue = queue.Queue()
-    scan_future = executor.submit(
-        _scan_paths_worker,
+    from dask import compute, delayed
+
+    scan_payload_task = delayed(_collect_scanned_batches)(
         path_args,
         recursive,
         image_hits,
         not_image_hits,
-        path_queue,
     )
-
-    if cache is not None:
-        model_id = preloaded_model_id
-    else:
-        model_id = None
-    cached_index = None
-    if cache is not None and model_id is not None:
-        # Start cache materialization as soon as model_id is known.
-        cached_index = cache.embedding_index_for_model(model_id)
-
-    model = model_future.result()
-    if cache is not None and model_id is None:
-        model_id = model.model_id()
-    text_emb_future = executor.submit(
-        encode_keywords,
-        model,
+    model_task = delayed(_load_model)(
+        model_name=model_name,
+        pretrained=pretrained,
+        quiet=quiet,
+    )
+    text_emb_task = delayed(encode_keywords)(
+        model_task,
         score_keywords,
         prompt_templates=prompt_templates,
     )
-    if cache is not None and model_id is not None and cached_index is None:
-        # Fallback when model id could not be resolved early.
+
+    if cache is None:
+        scan_payload, model, text_emb = compute(
+            scan_payload_task,
+            model_task,
+            text_emb_task,
+            scheduler="threads",
+        )
+        model_id = None
+        cached_index = None
+    else:
+        if preloaded_model_id is not None:
+            model_id = preloaded_model_id
+        else:
+            model_id = None
+
+        scan_payload, model, text_emb = compute(
+            scan_payload_task,
+            model_task,
+            text_emb_task,
+            scheduler="threads",
+        )
+        if model_id is None:
+            model_id = _model_id_from_model(model)
         cached_index = cache.embedding_index_for_model(model_id)
-    text_emb = text_emb_future.result()
 
     results: list[dict] = []
-    image_count = 0
-    scan_done: _ScanDone | None = None
-    while scan_done is None:
-        item = path_queue.get()
-        if isinstance(item, _ScanDone):
-            scan_done = item
-            continue
-
-        assert isinstance(item, list)
-        image_count += len(item)
+    batches, scan_done = scan_payload
+    for batch in batches:
         results.extend(
             _score_batch(
-                batch=item,
+                batch=batch,
                 model=model,
                 score_keywords=score_keywords,
                 text_emb=text_emb,
@@ -737,11 +771,10 @@ def _score_or_stub_results(
             )
         )
 
-    scan_future.result()
     if scan_done.error_message:
         print(scan_done.error_message, file=sys.stderr)
         sys.exit(1)
-    if image_count == 0:
+    if scan_done.image_count == 0:
         print("grape: no images found", file=sys.stderr)
         sys.exit(1)
     return results
@@ -752,13 +785,10 @@ def _emit_results(
     results: list[dict],
     keywords: list[str],
     exclude_keywords: list[str],
-    view_prep_future,
 ) -> None:
     """Print or render results based on output mode flags."""
     show_scores = args.scores or args.verbose
     if args.view:
-        if view_prep_future is not None:
-            view_prep_future.result()
         display_keywords = keywords + [f"not:{kw}" for kw in exclude_keywords]
         html_doc = _format_html(results, display_keywords, verbose=args.verbose)
         _show_in_webview(html_doc)
@@ -799,63 +829,41 @@ def main():
     else:
         cache_cm = nullcontext()
 
-    if score_keywords and args.view:
-        max_workers = 3
-    elif score_keywords:
-        max_workers = 2
-    else:
-        max_workers = 1
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Start model loading so it overlaps with image scanning below.
-        model_future = None
-        if score_keywords:
-            model_future = executor.submit(
-                _load_model,
-                model_name=model_name,
-                pretrained=pretrained,
-                quiet=args.quiet,
-            )
-        if args.view:
-            view_prep_future = executor.submit(_preload_view_modules)
+    with cache_cm as cache:
+        image_hits, not_image_hits = _build_scan_indexes(cache)
+        if score_keywords and cache is not None:
+            model_id_hint = _resolve_model_id(model_name, pretrained)
         else:
-            view_prep_future = None
+            model_id_hint = None
+        if score_keywords:
+            images = None
+        else:
+            images = _collect_images(args.path, args.recursive, cache)
+            if not images:
+                print("grape: no images found", file=sys.stderr)
+                sys.exit(1)
 
-        with cache_cm as cache:
-            image_hits, not_image_hits = _build_scan_indexes(cache)
-            if score_keywords and cache is not None:
-                model_id_hint = _resolve_model_id(model_name, pretrained)
-            else:
-                model_id_hint = None
-            if score_keywords:
-                images = None
-            else:
-                images = _collect_images(args.path, args.recursive, cache)
-                if not images:
-                    print("grape: no images found", file=sys.stderr)
-                    sys.exit(1)
-
-            results = _score_or_stub_results(
-                images=images,
-                score_keywords=score_keywords,
-                model_future=model_future,
-                cache=cache,
-                preloaded_model_id=model_id_hint,
-                prompt_templates=prompt_templates,
-                quiet=args.quiet,
-                path_args=args.path,
-                recursive=args.recursive,
-                image_hits=image_hits,
-                not_image_hits=not_image_hits,
-                executor=executor,
+        results = _score_or_stub_results(
+            images=images,
+            score_keywords=score_keywords,
+            model_name=model_name,
+            pretrained=pretrained,
+            cache=cache,
+            preloaded_model_id=model_id_hint,
+            prompt_templates=prompt_templates,
+            quiet=args.quiet,
+            path_args=args.path,
+            recursive=args.recursive,
+            image_hits=image_hits,
+            not_image_hits=not_image_hits,
+        )
+        if not args.quiet:
+            n = len(results)
+            query_text = _format_query_summary(keywords, exclude_keywords)
+            print(
+                f"{n} image{'s' * (n != 1)}, {query_text}",
+                file=sys.stderr,
             )
-            if not args.quiet:
-                n = len(results)
-                query_text = _format_query_summary(keywords, exclude_keywords)
-                print(
-                    f"{n} image{'s' * (n != 1)}, {query_text}",
-                    file=sys.stderr,
-                )
 
     if exclude_keywords:
         _apply_excluded_keywords(results, keywords, exclude_keywords)
@@ -887,5 +895,4 @@ def main():
         results=results,
         keywords=keywords,
         exclude_keywords=exclude_keywords,
-        view_prep_future=view_prep_future,
     )
