@@ -154,4 +154,4 @@ def test_score_image_prompt_ensemble_averages_templates(tmp_path):
         ["dog"],
         prompt_templates=["a photo of a {}", "a close-up photo of a {}"],
     )
-    assert result["score"] == pytest.approx(2 ** -0.5, rel=1e-5)
+    assert result.score == pytest.approx(2 ** -0.5, rel=1e-5)

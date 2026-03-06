@@ -115,30 +115,33 @@ def _cached_file_from_repo(repo_id: str, filename: str) -> str | None:
 
 
 @contextmanager
-def _temporary_transformers_stub():
-    """Temporarily make ``import transformers`` fail fast during open_clip import.
+def _temporary_import_stubs():
+    """Stub out heavy modules that open_clip imports eagerly but we don't need.
 
-    HACK: We inject a stub module to avoid importing the heavy transformers
-    stack when loading plain CLIP models.
-    Breaks when the chosen open_clip model genuinely needs transformers
-    (for example CoCa/HF text tower paths). Callers detect that failure and
-    retry with a full open_clip import.
+    HACK: We inject stub modules for ``transformers`` and ``open_clip.coca_model``
+    so that ``import open_clip`` skips the CoCa model class (~1.7s) and the
+    transformers stack. Plain CLIP/ViT models never touch these code paths.
+    Breaks when the chosen model genuinely needs CoCa or a HF text tower.
+    Callers detect that failure and retry with a full open_clip import.
     """
-    saved_transformers: dict[str, Any] = {}
+    saved: dict[str, Any] = {}
+    stub_prefixes = ("transformers", "open_clip.coca_model")
     for key in list(sys.modules):
-        if key == "transformers" or key.startswith("transformers."):
-            saved_transformers[key] = sys.modules.pop(key)
-    # HACK: open_clip eagerly imports CoCa/HF modules at import time.
-    # Most models in this app do not need transformers; this keeps startup
-    # on a cheap path unless we detect a real transformers dependency.
+        if any(key == p or key.startswith(p + ".") for p in stub_prefixes):
+            saved[key] = sys.modules.pop(key)
     sys.modules["transformers"] = types.ModuleType("transformers")
+    # Stub coca_model with a dummy CoCa attribute so open_clip's
+    # ``from .coca_model import CoCa`` succeeds at import time.
+    coca_stub = types.ModuleType("open_clip.coca_model")
+    coca_stub.CoCa = None  # type: ignore[attr-defined]
+    sys.modules["open_clip.coca_model"] = coca_stub
     try:
         yield
     finally:
         for key in list(sys.modules):
-            if key == "transformers" or key.startswith("transformers."):
+            if any(key == p or key.startswith(p + ".") for p in stub_prefixes):
                 del sys.modules[key]
-        sys.modules.update(saved_transformers)
+        sys.modules.update(saved)
 
 
 def _import_open_clip(*, use_transformers: bool):
@@ -163,7 +166,7 @@ def _import_open_clip(*, use_transformers: bool):
         _open_clip_fast_path = False
         return _open_clip_module
 
-    with _temporary_transformers_stub():
+    with _temporary_import_stubs():
         _open_clip_module = importlib.import_module("open_clip")
     _open_clip_fast_path = True
     return _open_clip_module

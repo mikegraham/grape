@@ -77,8 +77,8 @@ def test_semantic_ranking(clip_model, fixtures_dir):
 
     for keyword, expected_name in POSITIVE_MATCHES:
         results = score_images(clip_model, images, [keyword], quiet=True)
-        results.sort(key=lambda r: r["score"], reverse=True)
-        top_name = results[0]["path"].name
+        results.sort(key=lambda r: r.score, reverse=True)
+        top_name = results[0].path.name
         ok = top_name == expected_name
         correct += ok
         checks.append(ok)
@@ -87,8 +87,8 @@ def test_semantic_ranking(clip_model, fixtures_dir):
 
     for keyword, wrong_name in NEGATIVE_MATCHES:
         results = score_images(clip_model, images, [keyword], quiet=True)
-        results.sort(key=lambda r: r["score"], reverse=True)
-        top_name = results[0]["path"].name
+        results.sort(key=lambda r: r.score, reverse=True)
+        top_name = results[0].path.name
         ok = top_name != wrong_name
         correct += ok
         checks.append(ok)
@@ -105,11 +105,10 @@ def test_semantic_ranking(clip_model, fixtures_dir):
 
 # --- score_image / score_images ---
 
-def test_score_image_mean_and_min(clip_model, fixtures_dir):
+def test_score_image_mean_matches_keyword_average(clip_model, fixtures_dir):
     result = score_image(clip_model, fixtures_dir / "dog.jpg", ["dog", "cat", "car"])
-    scores = list(result["scores"].values())
-    np.testing.assert_allclose(result["score"], np.mean(scores), atol=1e-7)
-    np.testing.assert_allclose(result["min_score"], min(scores), atol=1e-7)
+    scores = list(result.scores.values())
+    np.testing.assert_allclose(result.score, np.mean(scores), atol=1e-7)
 
 
 def test_score_images_skips_unreadable(clip_model, tmp_path):
@@ -123,7 +122,7 @@ def test_score_images_skips_unreadable(clip_model, tmp_path):
 
     results = score_images(clip_model, [good, bad], ["dog"], quiet=True)
     assert len(results) == 1
-    assert results[0]["path"] == good
+    assert results[0].path == good
 
 
 # --- model metadata ---

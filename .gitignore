@@ -27,6 +27,9 @@ env/
 
 # Local editor backup/temp files
 *.un~
+*.swp
+*.swo
 
 # Local benchmarking artifacts
 benchmarks/
+grape_timeline_dask.py

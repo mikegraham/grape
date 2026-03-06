@@ -1,13 +1,26 @@
 import argparse
 import os
-import queue
 import shlex
 import sys
 import tempfile
-from collections.abc import Mapping
 from contextlib import closing, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+import dask
+from dask.threaded import get as _dask_threaded_get
+
+from grape.search import (
+    ScoredImage,
+    encode_keywords,
+    iter_image_records,
+    score_image_with_text_embeddings,
+)
+
+if TYPE_CHECKING:
+    from grape.cache import EmbeddingCache
+    from grape.model import CLIPModel
 
 DEFAULT_PROMPT_ENSEMBLE = [
     "a photo of a {}",
@@ -59,105 +72,329 @@ _HTML_TEMPLATE_TEXT = """
 </body>
 </html>
 """.strip()
-_html_template = None
 
 
-def _get_html_template():
-    """Lazily compile the HTML template."""
-    global _html_template
-    if _html_template is None:
-        from jinja2 import Template
 
-        _html_template = Template(_HTML_TEMPLATE_TEXT, autoescape=True)
-    return _html_template
-
-
-def _get_webview():
+def _get_webview() -> Any:
     """Lazily import pywebview for --view mode only."""
     import webview
 
     return webview
 
 
-def _preload_view_modules() -> None:
-    """Warm view-only imports so they are off the tail latency path."""
-    _get_html_template()
-    _get_webview()
+# ---------------------------------------------------------------------------
+# Dask delayed building blocks
+#
+# Each @dask.delayed function is a node in the task graph, wired together
+# in _run_pipeline(). A single dask.compute() call runs three branches
+# concurrently on a thread pool:
+#
+#   _import_model_module ─┬─ _load_model ─ _encode_keywords ─┐
+#                         └─ _resolve_and_index_cache ─┐     │
+#   _scan_files ───────────────────────────────────────┴─ _prepare
+#       └─ _score_all ─ _filter_and_sort ─ _emit
+#
+# Performance notes:
+# - The scheduler is passed as a function (dask.threaded.get) not a string
+#   ("threads") to avoid a ~0.2s lazy import of dask.distributed that
+#   happens inside dask's get_scheduler() lookup.
+# - _import_model_module eagerly imports open_clip (~1s) so that cost is
+#   paid concurrently with file scanning, rather than inside _load_model.
+# - _resolve_and_index_cache depends on _import_model_module (not a root
+#   node) because open_clip's import uses global state that is not
+#   thread-safe — it must finish before other threads call into it.
+# ---------------------------------------------------------------------------
+
+@dask.delayed
+def _import_model_module() -> Any:
+    """Import grape.model and open_clip (pulls in torch — slow).
+
+    Eagerly triggers the open_clip import so that the ~1s cost is paid
+    here (concurrent with file scanning) rather than inside _load_model.
+    """
+    import grape.model
+    grape.model._import_open_clip(use_transformers=False)
+    return grape.model
 
 
+@dask.delayed
 def _load_model(
+    model_module: Any,
     model_name: str,
     pretrained: str,
     quiet: bool,
-):
-    """Load and return a CLIPModel instance."""
-    from grape.model import CLIPModel
-
-    return CLIPModel(
+) -> Any:
+    """Load CLIP model weights."""
+    return model_module.CLIPModel(
         model_name=model_name,
         pretrained=pretrained,
         quiet=quiet,
     )
 
 
-def _resolve_model_id(
+@dask.delayed
+def _encode_keywords(
+    model: "CLIPModel",
+    score_keywords: list[str],
+    prompt_templates: list[str],
+) -> Any:
+    """Encode keyword prompts into text embeddings."""
+    return encode_keywords(
+        model,
+        score_keywords,
+        prompt_templates=prompt_templates,
+    )
+
+
+
+@dask.delayed
+def _resolve_and_index_cache(
+    model_module: Any,
     model_name: str,
     pretrained: str,
-) -> str:
-    """Resolve model id without constructing/loading model weights."""
-    from grape.model import resolve_model_id
+    cache: "EmbeddingCache | None",
+) -> tuple[str | None, dict[tuple[str, str], Any] | None]:
+    """Resolve model_id and materialize the cache index.
 
-    return resolve_model_id(model_name, pretrained)
-
-
-def find_images(*args, **kwargs):
-    """Lazily import and call grape.search.find_images."""
-    from grape.search import find_images as _find_images
-
-    return _find_images(*args, **kwargs)
-
-
-def score_image(*args, **kwargs):
-    """Lazily import and call grape.search.score_image."""
-    from grape.search import score_image as _score_image
-
-    return _score_image(*args, **kwargs)
+    Depends on model_module to ensure open_clip is already imported —
+    open_clip's import machinery is not thread-safe, so we must not
+    race with _load_model which also uses it.  Once open_clip is
+    imported, resolve_model_id only reads config + probes the HF
+    filesystem cache (no weight loading), so this still runs
+    concurrently with _load_model.
+    """
+    if cache is None:
+        return None, None
+    model_id = model_module.resolve_model_id(model_name, pretrained)
+    cached_index = cache.embedding_index_for_model(model_id)
+    return model_id, cached_index
 
 
-def score_images(*args, **kwargs):
-    """Lazily import and call grape.search.score_images."""
-    from grape.search import score_images as _score_images
+@dask.delayed
+def _scan_files(
+    path_args: list[str],
+    recursive: bool,
+    cache: "EmbeddingCache | None",
+) -> "tuple[list[_ScannedImage], _ScanDone]":
+    """Discover image files from CLI paths. Independent of model loading."""
+    if cache is not None:
+        image_hits = cache.image_hit_index()
+        not_image_hits = cache.not_image_index()
+    else:
+        image_hits = None
+        not_image_hits = None
+    items: list[_ScannedImage] = []
+    error_message: str | None = None
 
-    return _score_images(*args, **kwargs)
+    for p in path_args:
+        target = Path(p)
+        if target.is_file():
+            path_key = os.path.realpath(target)
+            st = os.stat(path_key)
+            file_stat = (
+                f"[{st.st_size}, {st.st_mtime_ns},"
+                f" {st.st_ino}, {st.st_dev}, {st.st_ctime_ns}]"
+            )
+            items.append(_ScannedImage(
+                path=target, path_key=path_key, file_stat=file_stat,
+            ))
+            continue
+        if target.is_dir():
+            if not recursive:
+                print(f"grape: {p}: Is a directory", file=sys.stderr)
+                continue
+            for record in iter_image_records(
+                str(target),
+                recursive=True,
+                cache=None,
+                image_hits=image_hits,
+                not_image_hits=not_image_hits,
+            ):
+                items.append(_ScannedImage(
+                    path=record.path,
+                    path_key=record.path_key,
+                    file_stat=record.file_stat,
+                ))
+            continue
+        error_message = f"grape: {p}: No such file or directory"
+        break
+
+    return items, _ScanDone(
+        image_count=len(items), error_message=error_message,
+    )
 
 
-def iter_images(*args, **kwargs):
-    """Lazily import and call grape.search.iter_images."""
-    from grape.search import iter_images as _iter_images
+@dask.delayed
+def _prepare_cached_embeddings(
+    scan_result: "tuple[list[_ScannedImage], _ScanDone]",
+    cache_context: tuple[str | None, dict[tuple[str, str], Any] | None],
+) -> "tuple[Any, list[_ScannedImage], list[_ScannedImage], _ScanDone]":
+    """Split scanned images into cached/uncached and vstack cached vectors.
 
-    return _iter_images(*args, **kwargs)
+    Runs as soon as scanning and cache indexing finish — does not wait for
+    model loading or text encoding, so the ~23ms vstack overlaps with those.
+    Returns (image_emb_matrix | None, cached_items, uncached_items, scan_done).
+    """
+    import numpy as np
+
+    _model_id, cached_index = cache_context
+    items, scan_done = scan_result
+
+    cached_items: list[_ScannedImage] = []
+    cached_vectors: list[Any] = []
+    uncached_items: list[_ScannedImage] = []
+
+    if cached_index is not None:
+        for item in items:
+            emb = cached_index.get((item.path_key, item.file_stat))
+            if emb is not None:
+                cached_items.append(item)
+                cached_vectors.append(emb)
+            else:
+                uncached_items.append(item)
+    else:
+        uncached_items = items
+
+    image_emb = np.vstack(cached_vectors) if cached_vectors else None
+    return image_emb, cached_items, uncached_items, scan_done
 
 
-def iter_image_records(*args, **kwargs):
-    """Lazily import and call grape.search.iter_image_records."""
-    from grape.search import iter_image_records as _iter_image_records
+@dask.delayed
+def _score_all(
+    prepared: "tuple[Any, list[_ScannedImage], list[_ScannedImage], _ScanDone]",
+    model: "CLIPModel",
+    score_keywords: list[str],
+    text_emb: Any,
+    cache: "EmbeddingCache | None",
+    quiet: bool,
+) -> "tuple[list[ScoredImage], _ScanDone]":
+    """Score all scanned images against text embeddings."""
+    image_emb, cached_items, uncached_items, scan_done = prepared
 
-    return _iter_image_records(*args, **kwargs)
+    results: list[ScoredImage] = []
+
+    # Fast path: score cached items via a single matrix multiply.
+    if image_emb is not None:
+        sims_matrix = image_emb @ text_emb.T
+        means = sims_matrix.mean(axis=1)
+        for idx, item in enumerate(cached_items):
+            sims = sims_matrix[idx]
+            results.append(ScoredImage(
+                path=item.path,
+                scores={kw: float(s) for kw, s in zip(score_keywords, sims)},
+                score=float(means[idx]),
+            ))
+
+    # Slow path: encode uncached images through the model one at a time.
+    for item in uncached_items:
+        try:
+            results.append(score_image_with_text_embeddings(
+                model, item.path, score_keywords, text_emb, cache=cache,
+            ))
+        except OSError as e:
+            if e.errno is not None:
+                raise
+            if not quiet:
+                print(f"  skipping {item.path}: {e}", file=sys.stderr)
+
+    return results, scan_done
 
 
-def encode_keywords(*args, **kwargs):
-    """Lazily import and call grape.search.encode_keywords."""
-    from grape.search import encode_keywords as _encode_keywords
+@dask.delayed
+def _filter_and_sort(
+    score_result: "tuple[list[ScoredImage], _ScanDone]",
+    keywords: list[str],
+    exclude_keywords: list[str],
+    threshold: float | None,
+    top: int | None,
+    quiet: bool,
+) -> list[ScoredImage]:
+    """Apply excludes, sort, threshold, top-N, and validate scan status."""
+    results, scan_done = score_result
 
-    return _encode_keywords(*args, **kwargs)
+    if scan_done.error_message:
+        print(scan_done.error_message, file=sys.stderr)
+        sys.exit(1)
+    if scan_done.image_count == 0:
+        print("grape: no images found", file=sys.stderr)
+        sys.exit(1)
+
+    if not quiet:
+        n = len(results)
+        query_text = _format_query_summary(keywords, exclude_keywords)
+        print(
+            f"{n} image{'s' * (n != 1)}, {query_text}",
+            file=sys.stderr,
+        )
+
+    if exclude_keywords:
+        _apply_excluded_keywords(results, keywords, exclude_keywords)
+
+    results.sort(key=lambda r: r.score, reverse=True)
+
+    if threshold is not None:
+        results = [r for r in results if r.score >= threshold]
+    if top is not None:
+        results = results[:top]
+    return results
 
 
-def score_image_with_text_embeddings(*args, **kwargs):
-    """Lazily import and call grape.search.score_image_with_text_embeddings."""
-    from grape.search import score_image_with_text_embeddings as _score
+@dask.delayed
+def _emit(
+    results: list[ScoredImage],
+    keywords: list[str],
+    exclude_keywords: list[str],
+    scores: bool,
+    verbose: bool,
+    print0: bool,
+    view: bool,
+    quiet: bool,
+) -> int:
+    """Format and output results. Returns count of emitted rows."""
+    if not results:
+        # Always print — this is a result status, not a progress message.
+        print("grape: no images above threshold", file=sys.stderr)
+        return 0
 
-    return _score(*args, **kwargs)
+    show_scores = scores or verbose
+    if view:
+        display_keywords = keywords + [f"not:{kw}" for kw in exclude_keywords]
+        html_doc = _format_html(results, display_keywords)
+        _show_in_webview(html_doc)
+        return len(results)
+    if show_scores:
+        print(_format_results(results, verbose=verbose))
+        return len(results)
+    if print0:
+        for r in results:
+            sys.stdout.write(f"{r.path}\0")
+        sys.stdout.flush()
+        return len(results)
+    for r in results:
+        print(shlex.quote(str(r.path)))
+    return len(results)
 
+
+# ---------------------------------------------------------------------------
+# Data types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _ScanDone:
+    image_count: int
+    error_message: str | None = None
+
+
+@dataclass
+class _ScannedImage:
+    path: Path
+    path_key: str
+    file_stat: str
+
+
+# ---------------------------------------------------------------------------
+# Pure helpers (not delayed — used inside delayed tasks or at parse time)
+# ---------------------------------------------------------------------------
 
 def parse_keywords(raw: str) -> list[str]:
     """Split a keyword string on commas. Strips whitespace from each keyword."""
@@ -169,25 +406,25 @@ def parse_prompt_templates(raw: str) -> list[str]:
     return [t.strip() for t in raw.split(",") if t.strip()]
 
 
-def _format_results(results: list[dict], verbose: bool) -> str:
+def _format_results(results: list[ScoredImage], verbose: bool) -> str:
     """Format scored results for display."""
     lines = []
     for r in results:
-        lines.append(f"{r['score']:.3f}  {shlex.quote(str(r['path']))}")
+        lines.append(f"{r.score:.3f}  {shlex.quote(str(r.path))}")
         if verbose:
-            parts = [f"  {kw}: {s:.3f}" for kw, s in r["scores"].items()]
+            parts = [f"  {kw}: {s:.3f}" for kw, s in r.scores.items()]
             lines.append("".join(parts))
     return "\n".join(lines)
 
 
 def _apply_excluded_keywords(
-    results: list[dict],
+    results: list[ScoredImage],
     include_keywords: list[str],
     exclude_keywords: list[str],
 ) -> None:
     """Adjust result scores using include-vs-exclude keyword means."""
     for result in results:
-        raw_scores: dict[str, float] = result["scores"]
+        raw_scores = result.scores
         if include_keywords:
             include_mean = sum(raw_scores[kw] for kw in include_keywords) / len(
                 include_keywords
@@ -201,9 +438,7 @@ def _apply_excluded_keywords(
         else:
             exclude_components = []
             exclude_mean = 0.0
-        result["score"] = float(include_mean - exclude_mean)
-        result["include_score"] = float(include_mean)
-        result["exclude_score"] = float(exclude_mean)
+        result.score = float(include_mean - exclude_mean)
 
         # Keep verbose output readable by labeling excluded keywords.
         labeled_scores: dict[str, float] = {}
@@ -211,42 +446,47 @@ def _apply_excluded_keywords(
             labeled_scores[kw] = raw_scores[kw]
         for kw, component in zip(exclude_keywords, exclude_components):
             labeled_scores[f"not:{kw}"] = component
-        result["scores"] = labeled_scores
+        result.scores = labeled_scores
+
+
+_html_template_cache: Any = None
 
 
 def _format_html(
-    results: list[dict],
+    results: list[ScoredImage],
     keywords: list[str],
-    verbose: bool,
 ) -> str:
     """Format results as simple HTML with file-backed <img> tags."""
-    del verbose  # View always shows compact per-keyword breakdown.
+    global _html_template_cache  # noqa: PLW0603
+    if _html_template_cache is None:
+        from jinja2 import Template
+        _html_template_cache = Template(_HTML_TEMPLATE_TEXT, autoescape=True)
+    template = _html_template_cache
     rows: list[dict[str, str]] = []
     for r in results:
-        image_path = Path(r["path"])
-        src_path = image_path
+        src_path = r.path
         if not src_path.is_absolute():
             src_path = src_path.absolute()
         breakdown = " · ".join(
             f"{kw}: {score:.3f}"
-            for kw, score in r["scores"].items()
+            for kw, score in r.scores.items()
         )
-        score_line = f"score: {r['score']:.3f}"
+        score_line = f"score: {r.score:.3f}"
         if breakdown:
             score_line = f"{score_line} · {breakdown}"
         rows.append(
             {
                 "image_src": src_path.as_uri(),
-                "path_text": str(image_path),
+                "path_text": str(r.path),
                 "score_line": score_line,
             }
         )
-    template = _get_html_template()
-    return template.render(
+    result: str = template.render(
         count=len(results),
         keywords=", ".join(keywords),
         rows=rows,
     )
+    return result
 
 
 def _show_in_webview(html_doc: str) -> None:
@@ -269,6 +509,28 @@ def _show_in_webview(html_doc: str) -> None:
         )
         webview.start(debug=True)
 
+
+def _format_query_summary(
+    keywords: list[str],
+    exclude_keywords: list[str],
+) -> str:
+    """Build status text shown before scoring."""
+    query_parts: list[str] = []
+    if keywords:
+        query_parts.append(", ".join(keywords))
+    if exclude_keywords:
+        query_parts.append(f"excluding: {', '.join(exclude_keywords)}")
+    if query_parts:
+        return "; ".join(query_parts)
+    return "(no keywords)"
+
+
+
+
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
 
 def _build_parser() -> argparse.ArgumentParser:
     """Construct and return the CLI parser."""
@@ -345,12 +607,6 @@ def _build_parser() -> argparse.ArgumentParser:
              " (implies -s)",
     )
     output_group = parser.add_mutually_exclusive_group()
-    output_group.add_argument(
-        "-c", "--count",
-        action="store_true",
-        help="print only the count of matching images"
-             " (like grep -c)",
-    )
     parser.add_argument(
         "-q", "--quiet",
         action="store_true",
@@ -393,7 +649,8 @@ def _validate_model_arg(parser: argparse.ArgumentParser, model: str) -> tuple[st
             " expected format model_name/pretrained"
             " (e.g. ViT-B-16/laion2b_s34b_b88k)"
         )
-    return model.split("/", 1)
+    model_name, pretrained = model.split("/", 1)
+    return model_name, pretrained
 
 
 def _parse_prompt_templates(
@@ -410,405 +667,79 @@ def _parse_prompt_templates(
     return templates
 
 
-def _collect_images(
-    path_args: list[str],
-    recursive: bool,
-    cache,
-) -> list[Path]:
-    """Collect image paths from CLI path arguments."""
-    images: list[Path] = []
-    for p in path_args:
-        target = Path(p)
-        if target.is_file():
-            images.append(target)
-            continue
-        if target.is_dir():
-            if not recursive:
-                print(f"grape: {p}: Is a directory", file=sys.stderr)
-                continue
-            images.extend(find_images(str(target), recursive=True, cache=cache))
-            continue
-        print(f"grape: {p}: No such file or directory", file=sys.stderr)
-        sys.exit(1)
-    return images
+# ---------------------------------------------------------------------------
+# Pipeline assembly
+# ---------------------------------------------------------------------------
 
-
-@dataclass
-class _ScanDone:
-    image_count: int
-    error_message: str | None = None
-
-
-@dataclass
-class _ScannedImage:
-    path: Path
-    path_key: str | None = None
-    file_stat: str | None = None
-
-
-_SCORE_BATCH_SIZE = 512
-_SCAN_QUEUE_BATCH_SIZE = _SCORE_BATCH_SIZE
-
-
-def _file_cache_metadata(path: Path) -> tuple[str, str]:
-    """Return ``(realpath, file_stat_key)`` metadata for cache matching."""
-    path_key = os.path.realpath(path)
-    st = os.stat(path_key)
-    file_stat = (
-        f"[{st.st_size}, {st.st_mtime_ns},"
-        f" {st.st_ino}, {st.st_dev}, {st.st_ctime_ns}]"
-    )
-    return path_key, file_stat
-
-
-def _build_scan_indexes(
-    cache,
-) -> tuple[set[tuple[str, str]] | None, set[tuple[str, str]] | None]:
-    """Fetch cache indexes once for fast, DB-free scan membership checks."""
-    if cache is None:
-        return None, None
-    return cache.image_hit_index(), cache.not_image_index()
-
-
-def _scan_paths_worker(
-    path_args: list[str],
-    recursive: bool,
-    image_hits: set[tuple[str, str]] | None,
-    not_image_hits: set[tuple[str, str]] | None,
-    out_queue: queue.Queue,
-) -> None:
-    """Scan input paths and stream image batches into *out_queue*."""
-    image_count = 0
-    error_message: str | None = None
-    batch: list[_ScannedImage] = []
-
-    def _flush_batch() -> None:
-        nonlocal batch
-        if not batch:
-            return
-        out_queue.put(batch)
-        batch = []
-
-    try:
-        for p in path_args:
-            target = Path(p)
-            if target.is_file():
-                path_key, file_stat = _file_cache_metadata(target)
-                batch.append(
-                    _ScannedImage(
-                        path=target,
-                        path_key=path_key,
-                        file_stat=file_stat,
-                    )
-                )
-                image_count += 1
-                if len(batch) >= _SCAN_QUEUE_BATCH_SIZE:
-                    _flush_batch()
-                continue
-            if target.is_dir():
-                if not recursive:
-                    print(f"grape: {p}: Is a directory", file=sys.stderr)
-                    continue
-                for record in iter_image_records(
-                    str(target),
-                    recursive=True,
-                    cache=None,
-                    image_hits=image_hits,
-                    not_image_hits=not_image_hits,
-                ):
-                    batch.append(
-                        _ScannedImage(
-                            path=record.path,
-                            path_key=record.path_key,
-                            file_stat=record.file_stat,
-                        )
-                    )
-                    image_count += 1
-                    if len(batch) >= _SCAN_QUEUE_BATCH_SIZE:
-                        _flush_batch()
-                continue
-            error_message = f"grape: {p}: No such file or directory"
-            break
-    finally:
-        _flush_batch()
-        out_queue.put(_ScanDone(image_count=image_count, error_message=error_message))
-
-
-def _format_query_summary(
+def _run_pipeline(
+    *,
+    score_keywords: list[str],
     keywords: list[str],
     exclude_keywords: list[str],
-) -> str:
-    """Build status text shown before scoring."""
-    query_parts: list[str] = []
-    if keywords:
-        query_parts.append(", ".join(keywords))
-    if exclude_keywords:
-        query_parts.append(f"excluding: {', '.join(exclude_keywords)}")
-    if query_parts:
-        return "; ".join(query_parts)
-    return "(no keywords)"
-
-
-def _score_batch(
-    *,
-    batch: list[_ScannedImage],
-    model,
-    score_keywords: list[str],
-    text_emb,
-    cache,
-    model_id: str | None,
-    cached_index: Mapping[tuple[str, str], object] | None,
-    quiet: bool,
-) -> list[dict]:
-    """Score a batch of scanned images with batched cache lookups."""
-    if not batch:
-        return []
-
-    cached_items: list[_ScannedImage] = []
-    cached_vectors: list[object] = []
-    uncached_items: list[_ScannedImage] = []
-
-    if cached_index is not None:
-        for item in batch:
-            if item.path_key is None or item.file_stat is None:
-                uncached_items.append(item)
-                continue
-            emb = cached_index.get((item.path_key, item.file_stat))
-            if emb is None:
-                uncached_items.append(item)
-                continue
-            cached_items.append(item)
-            cached_vectors.append(emb)
-    else:
-        batched_cache_hits: dict[str, object] = {}
-        if cache is not None and model_id is not None:
-            path_stats = {
-                item.path_key: item.file_stat
-                for item in batch
-                if item.path_key is not None and item.file_stat is not None
-            }
-            if path_stats:
-                batched_cache_hits = cache.get_many_for_paths(model_id, path_stats)
-
-        for item in batch:
-            if item.path_key is not None and item.path_key in batched_cache_hits:
-                cached_items.append(item)
-                cached_vectors.append(batched_cache_hits[item.path_key])
-            else:
-                uncached_items.append(item)
-
-    results: list[dict] = []
-    if cached_items:
-        import numpy as np
-
-        image_emb = np.vstack(cached_vectors)
-        sims_matrix = image_emb @ text_emb.T
-        if sims_matrix.shape[1] == 1:
-            keyword = score_keywords[0]
-            scores_1d = sims_matrix[:, 0]
-            for item, score in zip(cached_items, scores_1d):
-                s = float(score)
-                results.append(
-                    {
-                        "path": item.path,
-                        "scores": {keyword: s},
-                        "score": s,
-                        "min_score": s,
-                    }
-                )
-        else:
-            means = sims_matrix.mean(axis=1)
-            mins = sims_matrix.min(axis=1)
-            for idx, item in enumerate(cached_items):
-                sims = sims_matrix[idx]
-                results.append(
-                    {
-                        "path": item.path,
-                        "scores": {
-                            kw: float(s)
-                            for kw, s in zip(score_keywords, sims)
-                        },
-                        "score": float(means[idx]),
-                        "min_score": float(mins[idx]),
-                    }
-                )
-
-    for item in uncached_items:
-        try:
-            results.append(
-                score_image_with_text_embeddings(
-                    model,
-                    item.path,
-                    score_keywords,
-                    text_emb,
-                    cache=cache,
-                )
-            )
-        except OSError as e:
-            if e.errno is not None:
-                raise
-            if not quiet:
-                print(f"  skipping {item.path}: {e}", file=sys.stderr)
-    return results
-
-
-def _collect_scanned_batches(
-    path_args: list[str],
-    recursive: bool,
-    image_hits: set[tuple[str, str]] | None,
-    not_image_hits: set[tuple[str, str]] | None,
-) -> tuple[list[list[_ScannedImage]], _ScanDone]:
-    """Run scan worker and collect emitted batches into a list."""
-    path_queue: queue.Queue = queue.Queue()
-    _scan_paths_worker(
-        path_args,
-        recursive,
-        image_hits,
-        not_image_hits,
-        path_queue,
-    )
-    batches: list[list[_ScannedImage]] = []
-    scan_done: _ScanDone | None = None
-    while scan_done is None:
-        item = path_queue.get()
-        if isinstance(item, _ScanDone):
-            scan_done = item
-            continue
-        assert isinstance(item, list)
-        batches.append(item)
-    return batches, scan_done
-
-
-def _model_id_from_model(model) -> str:
-    """Return stable model id from a loaded model object."""
-    return model.model_id()
-
-
-def _score_or_stub_results(
-    images: list[Path] | None,
-    score_keywords: list[str],
     model_name: str,
     pretrained: str,
-    cache,
-    preloaded_model_id: str | None,
     prompt_templates: list[str],
+    cache: "EmbeddingCache | None",
     quiet: bool,
     path_args: list[str],
     recursive: bool,
-    image_hits: set[tuple[str, str]] | None,
-    not_image_hits: set[tuple[str, str]] | None,
-) -> list[dict]:
-    """Score images when keywords are present; otherwise emit neutral rows."""
-    if not score_keywords:
-        assert images is not None
-        return [
-            {
-                "path": path,
-                "scores": {},
-                "score": 0.0,
-                "min_score": 0.0,
-            }
-            for path in images
-        ]
-
-    from dask import compute, delayed
-
-    scan_payload_task = delayed(_collect_scanned_batches)(
-        path_args,
-        recursive,
-        image_hits,
-        not_image_hits,
-    )
-    model_task = delayed(_load_model)(
-        model_name=model_name,
-        pretrained=pretrained,
-        quiet=quiet,
-    )
-    text_emb_task = delayed(encode_keywords)(
-        model_task,
-        score_keywords,
-        prompt_templates=prompt_templates,
-    )
-
-    if cache is None:
-        scan_payload, model, text_emb = compute(
-            scan_payload_task,
-            model_task,
-            text_emb_task,
-            scheduler="threads",
-        )
-        model_id = None
-        cached_index = None
-    else:
-        if preloaded_model_id is not None:
-            model_id = preloaded_model_id
-        else:
-            model_id = None
-
-        scan_payload, model, text_emb = compute(
-            scan_payload_task,
-            model_task,
-            text_emb_task,
-            scheduler="threads",
-        )
-        if model_id is None:
-            model_id = _model_id_from_model(model)
-        cached_index = cache.embedding_index_for_model(model_id)
-
-    results: list[dict] = []
-    batches, scan_done = scan_payload
-    for batch in batches:
-        results.extend(
-            _score_batch(
-                batch=batch,
-                model=model,
-                score_keywords=score_keywords,
-                text_emb=text_emb,
-                cache=cache,
-                model_id=model_id,
-                cached_index=cached_index,
-                quiet=quiet,
-            )
-        )
-
-    if scan_done.error_message:
-        print(scan_done.error_message, file=sys.stderr)
-        sys.exit(1)
-    if scan_done.image_count == 0:
-        print("grape: no images found", file=sys.stderr)
-        sys.exit(1)
-    return results
-
-
-def _emit_results(
-    args: argparse.Namespace,
-    results: list[dict],
-    keywords: list[str],
-    exclude_keywords: list[str],
+    threshold: float | None,
+    top: int | None,
+    scores: bool,
+    verbose: bool,
+    print0: bool,
+    view: bool,
 ) -> None:
-    """Print or render results based on output mode flags."""
-    show_scores = args.scores or args.verbose
-    if args.view:
-        display_keywords = keywords + [f"not:{kw}" for kw in exclude_keywords]
-        html_doc = _format_html(results, display_keywords, verbose=args.verbose)
-        _show_in_webview(html_doc)
-        return
-    if args.count:
-        print(len(results))
-        return
-    if show_scores:
-        print(_format_results(results, verbose=args.verbose))
-        return
-    if args.print0:
-        for r in results:
-            sys.stdout.write(f"{r['path']}\0")
-        sys.stdout.flush()
-        return
-    for r in results:
-        print(shlex.quote(str(r["path"])))
+    """Build and execute the dask task graph for the full CLI pipeline."""
+    # --- Build the task graph ---
+    # Three independent roots run concurrently:
+    #   1. model import → weight loading → text encoding
+    #   2. model import → model_id resolution + cache index
+    #   3. file scanning (builds scan indexes, then walks paths)
+    # All converge at _score_all.
+
+    # Branch 1: model module import → weight loading → text encoding
+    model_module = _import_model_module()
+    model = _load_model(model_module, model_name, pretrained, quiet)
+    text_emb = _encode_keywords(model, score_keywords, prompt_templates)
+
+    # Branch 2: model module import → model_id resolution + cache index
+    cache_context = _resolve_and_index_cache(
+        model_module, model_name, pretrained, cache,
+    )
+
+    # Branch 3: file scanning (IO-bound, fully independent root)
+    scan_result = _scan_files(path_args, recursive, cache)
+
+    # Runs as soon as scan + cache index are ready (no model/text dependency).
+    # The vstack of cached embeddings (~23ms at 10k images) overlaps with
+    # model loading and text encoding.
+    prepared = _prepare_cached_embeddings(scan_result, cache_context)
+
+    # Convergence: scoring needs prepared embeddings + text embeddings + model
+    score_result = _score_all(
+        prepared, model, score_keywords, text_emb,
+        cache, quiet,
+    )
+
+    # Depends on score_result
+    filtered = _filter_and_sort(
+        score_result, keywords, exclude_keywords,
+        threshold, top, quiet,
+    )
+
+    # Depends on filtered
+    emitted_count = _emit(
+        filtered, keywords, exclude_keywords,
+        scores, verbose, print0, view, quiet,
+    )
+
+    # Single compute call — dask resolves the whole graph.
+    # Pass the get function directly to avoid dask.distributed import (~0.2s).
+    dask.compute(emitted_count, scheduler=_dask_threaded_get)
 
 
-def main():
+def main() -> None:
     parser = _build_parser()
 
     args = parser.parse_args()
@@ -822,6 +753,7 @@ def main():
 
     # Open cache (if requested) before scanning so find_images can
     # skip files already known not to be images.
+    cache_cm: Any
     if args.cache:
         from grape.cache import EmbeddingCache
 
@@ -829,70 +761,27 @@ def main():
     else:
         cache_cm = nullcontext()
 
-    with cache_cm as cache:
-        image_hits, not_image_hits = _build_scan_indexes(cache)
-        if score_keywords and cache is not None:
-            model_id_hint = _resolve_model_id(model_name, pretrained)
-        else:
-            model_id_hint = None
-        if score_keywords:
-            images = None
-        else:
-            images = _collect_images(args.path, args.recursive, cache)
-            if not images:
-                print("grape: no images found", file=sys.stderr)
-                sys.exit(1)
+    if not score_keywords:
+        parser.error("at least one keyword is required")
 
-        results = _score_or_stub_results(
-            images=images,
+    with cache_cm as cache:
+        _run_pipeline(
             score_keywords=score_keywords,
+            keywords=keywords,
+            exclude_keywords=exclude_keywords,
             model_name=model_name,
             pretrained=pretrained,
-            cache=cache,
-            preloaded_model_id=model_id_hint,
             prompt_templates=prompt_templates,
+            cache=cache,
             quiet=args.quiet,
             path_args=args.path,
             recursive=args.recursive,
-            image_hits=image_hits,
-            not_image_hits=not_image_hits,
+            threshold=args.threshold,
+            top=args.top,
+            scores=args.scores,
+            verbose=args.verbose,
+            print0=args.print0,
+            view=args.view,
         )
-        if not args.quiet:
-            n = len(results)
-            query_text = _format_query_summary(keywords, exclude_keywords)
-            print(
-                f"{n} image{'s' * (n != 1)}, {query_text}",
-                file=sys.stderr,
-            )
 
-    if exclude_keywords:
-        _apply_excluded_keywords(results, keywords, exclude_keywords)
 
-    # Sort by score descending (best matches first)
-    results.sort(key=lambda r: r["score"], reverse=True)
-
-    # Filter
-    if args.threshold is not None:
-        results = [
-            r for r in results if r["score"] >= args.threshold
-        ]
-
-    if args.top is not None:
-        results = results[: args.top]
-
-    if not results:
-        if args.count:
-            print(0)
-        else:
-            print(
-                "grape: no images above threshold",
-                file=sys.stderr,
-            )
-        sys.exit(0)
-
-    _emit_results(
-        args=args,
-        results=results,
-        keywords=keywords,
-        exclude_keywords=exclude_keywords,
-    )

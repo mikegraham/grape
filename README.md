@@ -35,7 +35,6 @@ Images are ranked by average cosine similarity across positive keywords. With `-
 | `--ensemble-prompts TEMPLATES` | Comma-separated prompt templates for ensembling (default: built-in set; each template must include `{}`) |
 | `-s, --scores` | Show similarity scores alongside paths |
 | `-v, --verbose` | Show per-keyword score breakdown (implies `-s`) |
-| `-c, --count` | Print only the count of matching images (like `grep -c`) |
 | `-q, --quiet` | Suppress progress and status messages on stderr |
 | `-print0` | Print matching paths as raw NUL-terminated records |
 | `--view` | Open results in a native webview window using simple HTML with `<img>` tags |
@@ -67,9 +66,6 @@ grape dog ~/Pictures/*.jpg
 
 # Override with custom prompt templates
 grape --ensemble-prompts 'a photo of {},a sketch of {}' dog ~/Pictures/*.jpg
-
-# Count matching images (like grep -c)
-grape -c -t 0.20 sunset ~/Pictures
 
 # Emit raw NUL-delimited paths for xargs -0
 grape -print0 dog ~/Pictures/*.jpg | xargs -0 -n1 echo

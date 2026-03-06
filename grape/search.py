@@ -3,8 +3,9 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Iterator
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 import numpy as np
 from PIL import Image
@@ -21,6 +22,13 @@ class ImageRecord(NamedTuple):
     path: Path
     path_key: str
     file_stat: str
+
+
+@dataclass
+class ScoredImage:
+    path: Path
+    scores: dict[str, float] = field(default_factory=dict)
+    score: float = 0.0
 
 
 def _stat_key_from_stat(st: os.stat_result) -> str:
@@ -105,7 +113,11 @@ def iter_image_records(
                 stat_key = _stat_key_from_stat(entry.stat())
                 cache_key = (entry.path, stat_key)
                 if image_hits is not None and cache_key in image_hits:
-                    yield ImageRecord(path=path, path_key=entry.path, file_stat=stat_key)
+                    yield ImageRecord(
+                        path=path,
+                        path_key=entry.path,
+                        file_stat=stat_key,
+                    )
                     continue
                 if not_image_hits is not None and cache_key in not_image_hits:
                     continue
@@ -115,7 +127,11 @@ def iter_image_records(
                     path_key=entry.path,
                     file_stat=stat_key,
                 ):
-                    yield ImageRecord(path=path, path_key=entry.path, file_stat=stat_key)
+                    yield ImageRecord(
+                        path=path,
+                        path_key=entry.path,
+                        file_stat=stat_key,
+                    )
 
 
 def iter_images(
@@ -141,13 +157,12 @@ def _build_result(
     path: Path,
     keywords: list[str],
     sims: np.ndarray,
-) -> dict:
-    return {
-        "path": path,
-        "scores": {kw: float(s) for kw, s in zip(keywords, sims)},
-        "score": float(sims.mean()),
-        "min_score": float(sims.min()),
-    }
+) -> ScoredImage:
+    return ScoredImage(
+        path=path,
+        scores={kw: float(s) for kw, s in zip(keywords, sims)},
+        score=float(sims.mean()),
+    )
 
 
 def _get_embedding(
@@ -192,7 +207,7 @@ def _encode_keyword_embeddings(
     merged = reshaped.mean(axis=1)
     norms = np.linalg.norm(merged, axis=1, keepdims=True)
     merged = merged / np.clip(norms, 1e-12, None)
-    return merged.astype(np.float32)
+    return cast(np.ndarray, merged.astype(np.float32))
 
 
 def encode_keywords(
@@ -216,7 +231,7 @@ def score_image_with_text_embeddings(
     keywords: list[str],
     text_emb: np.ndarray,
     cache: EmbeddingCache | None = None,
-) -> dict:
+) -> ScoredImage:
     """Score a single image using precomputed keyword embeddings."""
     img_emb = _get_embedding(model, image_path, cache)
     sims = (img_emb @ text_emb.T)[0]
@@ -230,7 +245,7 @@ def score_image(
     prompt_template: str = "a photo of {}",
     prompt_templates: list[str] | None = None,
     cache: EmbeddingCache | None = None,
-) -> dict:
+) -> ScoredImage:
     """Score a single image against all keywords."""
     text_emb = encode_keywords(
         model,
@@ -255,15 +270,8 @@ def score_images(
     prompt_templates: list[str] | None = None,
     quiet: bool = False,
     cache: EmbeddingCache | None = None,
-) -> list[dict]:
-    """Score each image against all keywords.
-
-    Returns a list of dicts with:
-      - path: image file path
-      - scores: {keyword: cosine_similarity}
-      - score: arithmetic mean of cosine similarities (primary ranking)
-      - min_score: minimum similarity across keywords
-    """
+) -> list[ScoredImage]:
+    """Score each image against all keywords."""
     text_emb = encode_keywords(
         model,
         keywords,

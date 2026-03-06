@@ -1,10 +1,11 @@
 """Tests for CLI argument parsing, formatting, and error handling."""
 
-import queue
 import shlex
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+import dask
+import numpy as np
 import pytest
 from PIL import Image
 
@@ -13,13 +14,12 @@ from grape.cli import (
     _apply_excluded_keywords,
     _format_html,
     _format_results,
-    _scan_paths_worker,
     _ScannedImage,
-    _score_batch,
     _show_in_webview,
     main,
     parse_keywords,
 )
+from grape.search import ScoredImage
 
 
 def run_main(args, monkeypatch):
@@ -70,8 +70,8 @@ def test_parse_keywords_empty():
 
 def test_format_results_shows_score_and_path():
     results = [
-        {"score": 0.85, "path": Path("/a/dog.jpg"), "scores": {"dog": 0.85}},
-        {"score": 0.42, "path": Path("/a/cat.jpg"), "scores": {"dog": 0.42}},
+        ScoredImage(path=Path("/a/dog.jpg"), scores={"dog": 0.85}, score=0.85),
+        ScoredImage(path=Path("/a/cat.jpg"), scores={"dog": 0.42}, score=0.42),
     ]
     output = _format_results(results, verbose=False)
     lines = output.strip().split("\n")
@@ -83,11 +83,10 @@ def test_format_results_shows_score_and_path():
 
 def test_format_results_verbose_shows_breakdown():
     results = [
-        {
-            "score": 0.6,
-            "path": Path("/a/img.jpg"),
-            "scores": {"dog": 0.8, "cat": 0.4},
-        },
+        ScoredImage(
+            path=Path("/a/img.jpg"),
+            scores={"dog": 0.8, "cat": 0.4}, score=0.6,
+        ),
     ]
     output = _format_results(results, verbose=True)
     assert "dog: 0.800" in output
@@ -96,49 +95,31 @@ def test_format_results_verbose_shows_breakdown():
 
 def test_apply_excluded_keywords_adjusts_score_and_labels():
     results = [
-        {
-            "score": 0.0,
-            "path": Path("/a/img.jpg"),
-            "scores": {"dog": 0.9, "cat": 0.2},
-            "min_score": 0.2,
-        },
+        ScoredImage(path=Path("/a/img.jpg"), scores={"dog": 0.9, "cat": 0.2}),
     ]
     _apply_excluded_keywords(results, ["dog"], ["cat"])
-    assert results[0]["score"] == pytest.approx(0.7)
-    assert results[0]["include_score"] == pytest.approx(0.9)
-    assert results[0]["exclude_score"] == pytest.approx(0.2)
-    assert results[0]["scores"]["dog"] == pytest.approx(0.9)
-    assert results[0]["scores"]["not:cat"] == pytest.approx(0.2)
+    assert results[0].score == pytest.approx(0.7)
+    assert results[0].scores["dog"] == pytest.approx(0.9)
+    assert results[0].scores["not:cat"] == pytest.approx(0.2)
 
 
 def test_apply_excluded_keywords_with_empty_include():
     results = [
-        {
-            "score": 0.0,
-            "path": Path("/a/img.jpg"),
-            "scores": {"cat": 0.2},
-            "min_score": 0.2,
-        },
+        ScoredImage(path=Path("/a/img.jpg"), scores={"cat": 0.2}),
     ]
     _apply_excluded_keywords(results, [], ["cat"])
-    assert results[0]["score"] == pytest.approx(-0.2)
-    assert results[0]["include_score"] == pytest.approx(0.0)
-    assert results[0]["exclude_score"] == pytest.approx(0.2)
-    assert results[0]["scores"]["not:cat"] == pytest.approx(0.2)
+    assert results[0].score == pytest.approx(-0.2)
+    assert results[0].scores["not:cat"] == pytest.approx(0.2)
 
 
 def test_format_html_embeds_images(tmp_path):
     image_path = tmp_path / "my photo.jpg"
     Image.new("RGB", (1, 1)).save(image_path, format="JPEG")
     results = [
-        {
-            "score": 0.75,
-            "path": image_path,
-            "scores": {"dog": 0.75},
-        },
+        ScoredImage(path=image_path, scores={"dog": 0.75}, score=0.75),
     ]
 
-    html_doc = _format_html(results, ["dog"], verbose=False)
+    html_doc = _format_html(results, ["dog"])
     assert "max-width: 100%" in html_doc
     assert "<img " in html_doc
     assert image_path.resolve().as_uri() in html_doc
@@ -151,14 +132,10 @@ def test_format_html_verbose_shows_breakdown(tmp_path):
     image_path = tmp_path / "my photo.jpg"
     Image.new("RGB", (1, 1)).save(image_path, format="JPEG")
     results = [
-        {
-            "score": 0.75,
-            "path": image_path,
-            "scores": {"dog": 0.75, "cat": 0.25},
-        },
+        ScoredImage(path=image_path, scores={"dog": 0.75, "cat": 0.25}, score=0.75),
     ]
 
-    html_doc = _format_html(results, ["dog", "cat"], verbose=True)
+    html_doc = _format_html(results, ["dog", "cat"])
     assert "score: 0.750" in html_doc
     assert "dog: 0.750" in html_doc
     assert "cat: 0.250" in html_doc
@@ -169,14 +146,10 @@ def test_format_html_shows_original_path_text(monkeypatch, tmp_path):
     image_path = Path("relative name.jpg")
     Image.new("RGB", (1, 1)).save(image_path, format="JPEG")
     results = [
-        {
-            "score": 0.75,
-            "path": image_path,
-            "scores": {"dog": 0.75},
-        },
+        ScoredImage(path=image_path, scores={"dog": 0.75}, score=0.75),
     ]
 
-    html_doc = _format_html(results, ["dog"], verbose=False)
+    html_doc = _format_html(results, ["dog"])
     assert "<p class=\"meta path\">relative name.jpg</p>" in html_doc
     assert str((tmp_path / image_path).as_uri()) in html_doc
 
@@ -225,15 +198,15 @@ def test_bad_model_format(monkeypatch):
 def test_empty_keywords_errors(tmp_path, monkeypatch):
     image_path = tmp_path / "empty keywords.jpg"
     image_path.write_bytes(b"unused")
-    out, _, code = run_main(["-q", ",,,", str(image_path)], monkeypatch)
-    assert code == 0
-    assert out == f"{shlex.quote(str(image_path))}\n"
+    _, err, code = run_main(["-q", ",,,", str(image_path)], monkeypatch)
+    assert code != 0
+    assert "keyword" in err.lower()
 
 
 def test_empty_exclude_keywords_errors(tmp_path, monkeypatch):
     image_path = tmp_path / "empty exclude.jpg"
     image_path.write_bytes(b"unused")
-    _stub_single_file_scoring(monkeypatch)
+    _stub_pipeline(monkeypatch)
     out, _, code = run_main(
         ["-q", "-s", "-x", ",,,", "dog", str(image_path)],
         monkeypatch,
@@ -242,23 +215,27 @@ def test_empty_exclude_keywords_errors(tmp_path, monkeypatch):
     assert "0.750" in out
 
 
-def test_both_keyword_lists_empty_is_allowed(tmp_path, monkeypatch):
+def test_both_keyword_lists_empty_is_error(tmp_path, monkeypatch):
     image_path = tmp_path / "my photo.jpg"
     image_path.write_bytes(b"unused")
-    out, _, code = run_main(
+    _, err, code = run_main(
         ["-q", "-x", ",,,", ",,,", str(image_path)],
         monkeypatch,
     )
-    assert code == 0
-    assert out == f"{shlex.quote(str(image_path))}\n"
-
-
-def test_view_rejects_count(monkeypatch):
-    _, err, code = run_main(["--view", "-c", "dog", "x.jpg"], monkeypatch)
     assert code != 0
-    assert "not allowed with argument" in err
-    assert "--view" in err
-    assert "--count" in err
+    assert "keyword" in err.lower()
+
+
+def test_count_short_flag_is_rejected(monkeypatch):
+    _, err, code = run_main(["-c", "dog", "x.jpg"], monkeypatch)
+    assert code != 0
+    assert "unrecognized arguments: -c" in err
+
+
+def test_count_long_flag_is_rejected(monkeypatch):
+    _, err, code = run_main(["--count", "dog", "x.jpg"], monkeypatch)
+    assert code != 0
+    assert "unrecognized arguments: --count" in err
 
 
 def test_view_rejects_print0(monkeypatch):
@@ -272,6 +249,7 @@ def test_view_rejects_print0(monkeypatch):
 # --- error paths ---
 
 def test_nonexistent_path_errors(monkeypatch):
+    _stub_pipeline(monkeypatch)
     _, err, code = run_main(
         ["-q", "dog", "/tmp/grape_nonexistent_path_xyz"],
         monkeypatch,
@@ -283,38 +261,79 @@ def test_nonexistent_path_errors(monkeypatch):
 def test_dir_without_r_warns(tmp_path, monkeypatch):
     """Passing a directory without -r warns and finds no images."""
     Image.new("RGB", (1, 1)).save(tmp_path / "img.jpg", format="JPEG")
+    _stub_pipeline(monkeypatch)
     _, err, code = run_main(["-q", "dog", str(tmp_path)], monkeypatch)
     assert "Is a directory" in err
 
 
 def test_no_images_exits(tmp_path, monkeypatch):
     """Empty directory with -r exits with an error."""
+    _stub_pipeline(monkeypatch)
     _, err, code = run_main(["-q", "-r", "dog", str(tmp_path)], monkeypatch)
     assert code != 0
     assert "no images found" in err
 
 
-def _stub_single_file_scoring(monkeypatch, score=0.75):
-    monkeypatch.setattr("grape.cli._load_model", lambda *args, **kwargs: object())
+def _stub_pipeline(monkeypatch, score=0.75):
+    """Stub the delayed pipeline tasks so tests don't load the real model.
+
+    Replaces _import_model_module, _load_model, _encode_keywords, and
+    _resolve_model_id with plain @dask.delayed stubs that return
+    lightweight fake objects. _score_all is replaced with a version that
+    scores each scanned image using the fixed score value.
+    """
+    import grape.cli as cli_mod
+
+    @dask.delayed
+    def _fake_import_model_module():
+        return object()
+
+    @dask.delayed
+    def _fake_load_model(model_module, model_name, pretrained, quiet):
+        return object()
+
+    @dask.delayed
+    def _fake_encode_keywords(model, score_keywords, prompt_templates):
+        return object()
+
+    @dask.delayed
+    def _fake_resolve_and_index_cache(model_module, model_name, pretrained, cache):
+        return (None, None)
+
+    @dask.delayed
+    def _fake_prepare_cached_embeddings(scan_result, cache_context):
+        items, scan_done = scan_result
+        return (None, [], items, scan_done)
+
+    @dask.delayed
+    def _fake_score_all(
+        prepared, model, score_keywords, text_emb,
+        cache, quiet,
+    ):
+        _image_emb, _cached_items, uncached_items, scan_done = prepared
+        results = [
+            ScoredImage(path=item.path, score=score,
+                        scores={kw: score for kw in score_keywords})
+            for item in uncached_items
+        ]
+        return results, scan_done
+
+    monkeypatch.setattr(cli_mod, "_import_model_module", _fake_import_model_module)
+    monkeypatch.setattr(cli_mod, "_load_model", _fake_load_model)
+    monkeypatch.setattr(cli_mod, "_encode_keywords", _fake_encode_keywords)
     monkeypatch.setattr(
-        "grape.cli.encode_keywords",
-        lambda *args, **kwargs: object(),
+        cli_mod, "_resolve_and_index_cache", _fake_resolve_and_index_cache,
     )
     monkeypatch.setattr(
-        "grape.cli.score_image_with_text_embeddings",
-        lambda model, image_path, keywords, text_emb, cache=None: {
-            "score": score,
-            "path": image_path,
-            "scores": {kw: score for kw in keywords},
-            "min_score": score,
-        },
+        cli_mod, "_prepare_cached_embeddings", _fake_prepare_cached_embeddings,
     )
+    monkeypatch.setattr(cli_mod, "_score_all", _fake_score_all)
 
 
 def test_default_output_shell_quotes_paths(tmp_path, monkeypatch):
     image_path = tmp_path / "my photo.jpg"
     image_path.write_bytes(b"unused")
-    _stub_single_file_scoring(monkeypatch)
+    _stub_pipeline(monkeypatch)
     out, _, code = run_main(["-q", "dog", str(image_path)], monkeypatch)
     assert code == 0
     assert out == f"{shlex.quote(str(image_path))}\n"
@@ -323,7 +342,7 @@ def test_default_output_shell_quotes_paths(tmp_path, monkeypatch):
 def test_print0_outputs_raw_nul_terminated_paths(tmp_path, monkeypatch):
     image_path = tmp_path / "my photo.jpg"
     image_path.write_bytes(b"unused")
-    _stub_single_file_scoring(monkeypatch)
+    _stub_pipeline(monkeypatch)
     out, _, code = run_main(["-q", "-print0", "dog", str(image_path)], monkeypatch)
     assert code == 0
     assert out == f"{image_path}\0"
@@ -332,7 +351,7 @@ def test_print0_outputs_raw_nul_terminated_paths(tmp_path, monkeypatch):
 def test_scores_output_shell_quotes_paths(tmp_path, monkeypatch):
     image_path = tmp_path / "my photo.jpg"
     image_path.write_bytes(b"unused")
-    _stub_single_file_scoring(monkeypatch)
+    _stub_pipeline(monkeypatch)
     out, _, code = run_main(["-q", "-s", "dog", str(image_path)], monkeypatch)
     assert code == 0
     assert shlex.quote(str(image_path)) in out
@@ -341,17 +360,26 @@ def test_scores_output_shell_quotes_paths(tmp_path, monkeypatch):
 def test_exclude_keywords_adjusts_output_score(tmp_path, monkeypatch):
     image_path = tmp_path / "my photo.jpg"
     image_path.write_bytes(b"unused")
-    monkeypatch.setattr("grape.cli._load_model", lambda *args, **kwargs: object())
-    monkeypatch.setattr("grape.cli.encode_keywords", lambda *args, **kwargs: object())
-    monkeypatch.setattr(
-        "grape.cli.score_image_with_text_embeddings",
-        lambda model, image_path, keywords, text_emb, cache=None: {
-            "score": 0.0,
-            "path": image_path,
-            "scores": {"dog": 0.9, "cat": 0.2},
-            "min_score": 0.2,
-        },
-    )
+
+    # Custom stub that returns different scores per keyword
+    import grape.cli as cli_mod
+
+    @dask.delayed
+    def _fake_score_all(
+        prepared, model, score_keywords, text_emb,
+        cache, quiet,
+    ):
+        _image_emb, _cached_items, uncached_items, scan_done = prepared
+        results = [
+            ScoredImage(path=item.path,
+                        scores={"dog": 0.9, "cat": 0.2})
+            for item in uncached_items
+        ]
+        return results, scan_done
+
+    _stub_pipeline(monkeypatch)
+    monkeypatch.setattr(cli_mod, "_score_all", _fake_score_all)
+
     out, _, code = run_main(
         ["-q", "-s", "-x", "cat", "dog", str(image_path)],
         monkeypatch,
@@ -375,17 +403,25 @@ def test_exclude_alias_anti_is_rejected(tmp_path, monkeypatch):
 def test_exclude_verbose_shows_not_keyword(tmp_path, monkeypatch):
     image_path = tmp_path / "my photo.jpg"
     image_path.write_bytes(b"unused")
-    monkeypatch.setattr("grape.cli._load_model", lambda *args, **kwargs: object())
-    monkeypatch.setattr("grape.cli.encode_keywords", lambda *args, **kwargs: object())
-    monkeypatch.setattr(
-        "grape.cli.score_image_with_text_embeddings",
-        lambda model, image_path, keywords, text_emb, cache=None: {
-            "score": 0.0,
-            "path": image_path,
-            "scores": {"dog": 0.9, "cat": 0.2},
-            "min_score": 0.2,
-        },
-    )
+
+    import grape.cli as cli_mod
+
+    @dask.delayed
+    def _fake_score_all(
+        prepared, model, score_keywords, text_emb,
+        cache, quiet,
+    ):
+        _image_emb, _cached_items, uncached_items, scan_done = prepared
+        results = [
+            ScoredImage(path=item.path,
+                        scores={"dog": 0.9, "cat": 0.2})
+            for item in uncached_items
+        ]
+        return results, scan_done
+
+    _stub_pipeline(monkeypatch)
+    monkeypatch.setattr(cli_mod, "_score_all", _fake_score_all)
+
     out, _, code = run_main(
         ["-q", "-v", "-x", "cat", "dog", str(image_path)],
         monkeypatch,
@@ -397,38 +433,18 @@ def test_exclude_verbose_shows_not_keyword(tmp_path, monkeypatch):
 def test_ensemble_prompts_uses_default_template_set(tmp_path, monkeypatch):
     image_path = tmp_path / "my photo.jpg"
     image_path.write_bytes(b"unused")
-    monkeypatch.setattr("grape.cli._load_model", lambda *args, **kwargs: object())
     captured: dict[str, object] = {}
 
-    def _fake_encode_keywords(
-        model,
-        keywords,
-        prompt_template="a photo of {}",
-        prompt_templates=None,
-    ):
-        captured["prompt_template"] = prompt_template
+    import grape.cli as cli_mod
+
+    @dask.delayed
+    def _fake_encode_keywords(model, score_keywords, prompt_templates):
         captured["prompt_templates"] = prompt_templates
         return object()
 
-    def _fake_score_with_text_emb(
-        model,
-        image_path,
-        keywords,
-        text_emb,
-        cache=None,
-    ):
-        return {
-            "score": 0.75,
-            "path": image_path,
-            "scores": {"dog": 0.75},
-            "min_score": 0.75,
-        }
+    _stub_pipeline(monkeypatch)
+    monkeypatch.setattr(cli_mod, "_encode_keywords", _fake_encode_keywords)
 
-    monkeypatch.setattr("grape.cli.encode_keywords", _fake_encode_keywords)
-    monkeypatch.setattr(
-        "grape.cli.score_image_with_text_embeddings",
-        _fake_score_with_text_emb,
-    )
     out, _, code = run_main(
         ["-q", "dog", str(image_path)],
         monkeypatch,
@@ -442,37 +458,18 @@ def test_ensemble_prompts_uses_default_template_set(tmp_path, monkeypatch):
 def test_ensemble_prompts_custom_templates_override_default(tmp_path, monkeypatch):
     image_path = tmp_path / "my photo.jpg"
     image_path.write_bytes(b"unused")
-    monkeypatch.setattr("grape.cli._load_model", lambda *args, **kwargs: object())
     captured: dict[str, object] = {}
 
-    def _fake_encode_keywords(
-        model,
-        keywords,
-        prompt_template="a photo of {}",
-        prompt_templates=None,
-    ):
+    import grape.cli as cli_mod
+
+    @dask.delayed
+    def _fake_encode_keywords(model, score_keywords, prompt_templates):
         captured["prompt_templates"] = prompt_templates
         return object()
 
-    def _fake_score_with_text_emb(
-        model,
-        image_path,
-        keywords,
-        text_emb,
-        cache=None,
-    ):
-        return {
-            "score": 0.75,
-            "path": image_path,
-            "scores": {"dog": 0.75},
-            "min_score": 0.75,
-        }
+    _stub_pipeline(monkeypatch)
+    monkeypatch.setattr(cli_mod, "_encode_keywords", _fake_encode_keywords)
 
-    monkeypatch.setattr("grape.cli.encode_keywords", _fake_encode_keywords)
-    monkeypatch.setattr(
-        "grape.cli.score_image_with_text_embeddings",
-        _fake_score_with_text_emb,
-    )
     out, _, code = run_main(
         [
             "-q",
@@ -500,7 +497,7 @@ def test_ensemble_prompts_template_without_placeholder_errors(monkeypatch):
 def test_view_calls_webview_with_html(tmp_path, monkeypatch):
     image_path = tmp_path / "my photo.jpg"
     image_path.write_bytes(b"unused")
-    _stub_single_file_scoring(monkeypatch)
+    _stub_pipeline(monkeypatch)
     captured: list[str] = []
     monkeypatch.setattr("grape.cli._show_in_webview", captured.append)
     out, _, code = run_main(["-q", "--view", "dog", str(image_path)], monkeypatch)
@@ -514,14 +511,18 @@ def test_view_calls_webview_with_html(tmp_path, monkeypatch):
     assert html_doc.index("0.750") < html_doc.index("<img ")
 
 
-def test_score_batch_uses_in_memory_cache_index():
-    import numpy as np
+def test_score_all_uses_in_memory_cache_index():
+    from grape.cli import (
+        _prepare_cached_embeddings,
+        _ScanDone,
+        _score_all,
+    )
 
     class _NoDbCache:
         def get_many_for_paths(self, *_args, **_kwargs):
             raise AssertionError("DB batch lookup should not be called")
 
-    batch = [
+    items = [
         _ScannedImage(
             path=Path("/tmp/a.jpg"),
             path_key="/tmp/a.jpg",
@@ -532,42 +533,38 @@ def test_score_batch_uses_in_memory_cache_index():
         ("/tmp/a.jpg", "stat-a"): np.array([1.0, 0.0], dtype=np.float32)
     }
     text_emb = np.array([[1.0, 0.0]], dtype=np.float32)
-    results = _score_batch(
-        batch=batch,
-        model=object(),
-        score_keywords=["dog"],
-        text_emb=text_emb,
-        cache=_NoDbCache(),
-        model_id="model-id",
-        cached_index=cached_index,
-        quiet=True,
-    )
+    scan_result = (items, _ScanDone(image_count=1))
+    cache_context = ("model-id", cached_index)
+
+    prepared = _prepare_cached_embeddings(
+        scan_result, cache_context,
+    ).compute()
+
+    results, _done = _score_all(
+        prepared, object(), ["dog"], text_emb,
+        _NoDbCache(), True,
+    ).compute()
 
     assert len(results) == 1
-    assert results[0]["path"] == Path("/tmp/a.jpg")
-    assert results[0]["scores"]["dog"] == pytest.approx(1.0)
-    assert results[0]["score"] == pytest.approx(1.0)
-    assert results[0]["min_score"] == pytest.approx(1.0)
+    assert results[0].path == Path("/tmp/a.jpg")
+    assert results[0].scores["dog"] == pytest.approx(1.0)
+    assert results[0].score == pytest.approx(1.0)
 
 
-def test_scan_paths_worker_file_includes_cache_metadata(tmp_path):
+def test_scan_files_includes_cache_metadata(tmp_path):
+    """_scan_files returns items with cache metadata for plain files."""
     image_path = tmp_path / "a.jpg"
     image_path.write_bytes(b"test")
-    out_q: queue.Queue = queue.Queue()
 
-    _scan_paths_worker(
-        path_args=[str(image_path)],
-        recursive=False,
-        image_hits=None,
-        not_image_hits=None,
-        out_queue=out_q,
-    )
+    from grape.cli import _scan_files
 
-    batch = out_q.get_nowait()
-    done = out_q.get_nowait()
-    assert isinstance(batch, list)
-    assert len(batch) == 1
-    item = batch[0]
+    # _scan_files is @dask.delayed, so .compute() to get the result
+    items, done = _scan_files(
+        [str(image_path)], False, None,
+    ).compute()
+
+    assert len(items) == 1
+    item = items[0]
     assert isinstance(item, _ScannedImage)
     assert item.path == image_path
     assert item.path_key == str(image_path.resolve())
@@ -612,16 +609,6 @@ def test_e2e_scores_mode(monkeypatch):
 
 
 @pytest.mark.slow
-def test_e2e_count_mode(monkeypatch):
-    """--count prints the number of matching images."""
-    out, _, code = run_main(
-        ["-q", "-c", "-r", "dog", str(FIXTURES)], monkeypatch,
-    )
-    assert code == 0
-    assert int(out.strip()) > 0
-
-
-@pytest.mark.slow
 def test_e2e_top_n(monkeypatch):
     """--top 1 limits output to a single result."""
     out, _, code = run_main(
@@ -639,16 +626,6 @@ def test_e2e_threshold_filters(monkeypatch):
     )
     assert code == 0
     assert "no images above threshold" in err
-
-
-@pytest.mark.slow
-def test_e2e_threshold_count(monkeypatch):
-    """--threshold 1.0 with --count prints 0."""
-    out, _, code = run_main(
-        ["-q", "-c", "-t", "1.0", "dog", str(FIXTURES / "dog.jpg")], monkeypatch,
-    )
-    assert code == 0
-    assert out.strip() == "0"
 
 
 @pytest.mark.slow

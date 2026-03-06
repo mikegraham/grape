@@ -6,6 +6,7 @@ Avoids redundant CLIP encoding by caching embeddings keyed on
 
 import os
 import sqlite3
+import threading
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -58,11 +59,13 @@ class EmbeddingCache:
     """Read-through cache for CLIP image embeddings stored in SQLite."""
 
     def __init__(self, db_path: str | Path) -> None:
-        self._conn = sqlite3.connect(db_path)
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute(_CREATE_EMBEDDINGS)
-        self._conn.execute(_CREATE_NOT_IMAGES)
-        self._conn.commit()
+        self._lock = threading.RLock()
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        with self._lock:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute(_CREATE_EMBEDDINGS)
+            self._conn.execute(_CREATE_NOT_IMAGES)
+            self._conn.commit()
 
     def get(
         self,
@@ -74,11 +77,12 @@ class EmbeddingCache:
     ) -> NDArray[np.float32] | None:
         """Return the cached embedding, or ``None`` on miss/stale."""
         resolved = path_key or os.path.realpath(path)
-        row = self._conn.execute(
-            "SELECT file_stat, embedding FROM embeddings"
-            " WHERE path = ? AND model = ?",
-            (resolved, model_id),
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT file_stat, embedding FROM embeddings"
+                " WHERE path = ? AND model = ?",
+                (resolved, model_id),
+            ).fetchone()
         if row is None:
             return None
         stored_stat, blob = row
@@ -118,7 +122,8 @@ class EmbeddingCache:
                 " WHERE model = ? AND path IN ({})"
             ).format(placeholders)
             params = [model_id, *chunk]
-            rows = self._conn.execute(sql, params).fetchall()
+            with self._lock:
+                rows = self._conn.execute(sql, params).fetchall()
             for row_path, row_stat, blob in rows:
                 expected_stat = path_stats.get(row_path)
                 if expected_stat is None or row_stat != expected_stat:
@@ -131,10 +136,11 @@ class EmbeddingCache:
         model_id: str,
     ) -> dict[tuple[str, str], NDArray[np.float32]]:
         """Return in-memory ``(path, file_stat) -> embedding`` for a model."""
-        rows = self._conn.execute(
-            "SELECT path, file_stat, embedding FROM embeddings WHERE model = ?",
-            (model_id,),
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT path, file_stat, embedding FROM embeddings WHERE model = ?",
+                (model_id,),
+            ).fetchall()
         return {
             (path, file_stat): np.frombuffer(blob, dtype=np.float32).copy()
             for path, file_stat, blob in rows
@@ -150,26 +156,29 @@ class EmbeddingCache:
         """Return ``True`` if any cached embedding matches current file stat."""
         resolved = path_key or os.path.realpath(path)
         stat_key = file_stat or _stat_key(resolved)
-        row = self._conn.execute(
-            "SELECT 1 FROM embeddings"
-            " WHERE path = ? AND file_stat = ?"
-            " LIMIT 1",
-            (resolved, stat_key),
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM embeddings"
+                " WHERE path = ? AND file_stat = ?"
+                " LIMIT 1",
+                (resolved, stat_key),
+            ).fetchone()
         return row is not None
 
     def image_hit_index(self) -> set[tuple[str, str]]:
         """Return ``(path, file_stat)`` pairs known to have embeddings."""
-        rows = self._conn.execute(
-            "SELECT DISTINCT path, file_stat FROM embeddings"
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT path, file_stat FROM embeddings"
+            ).fetchall()
         return {(path, file_stat) for path, file_stat in rows}
 
     def not_image_index(self) -> set[tuple[str, str]]:
         """Return ``(path, file_stat)`` pairs known to be non-images."""
-        rows = self._conn.execute(
-            "SELECT path, file_stat FROM not_images"
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT path, file_stat FROM not_images"
+            ).fetchall()
         return {(path, file_stat) for path, file_stat in rows}
 
     def put(
@@ -184,12 +193,13 @@ class EmbeddingCache:
         """Insert or replace the cached embedding for *(path, model)*."""
         resolved = path_key or os.path.realpath(path)
         stat_key = file_stat or _stat_key(resolved)
-        self._conn.execute(
-            _INSERT,
-            (resolved, stat_key,
-             model_id, embedding.tobytes()),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                _INSERT,
+                (resolved, stat_key,
+                 model_id, embedding.tobytes()),
+            )
+            self._conn.commit()
 
     def put_many(
         self,
@@ -204,8 +214,9 @@ class EmbeddingCache:
             payload.append((resolved, stat_key, model_id, embedding.tobytes()))
         if not payload:
             return
-        self._conn.executemany(_INSERT, payload)
-        self._conn.commit()
+        with self._lock:
+            self._conn.executemany(_INSERT, payload)
+            self._conn.commit()
 
     def is_not_image(
         self,
@@ -216,10 +227,11 @@ class EmbeddingCache:
     ) -> bool:
         """Return ``True`` if *path* was previously recorded as not an image."""
         resolved = path_key or os.path.realpath(path)
-        row = self._conn.execute(
-            "SELECT file_stat FROM not_images WHERE path = ?",
-            (resolved,),
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT file_stat FROM not_images WHERE path = ?",
+                (resolved,),
+            ).fetchone()
         if row is None:
             return False
         stored_stat: str = row[0]
@@ -236,13 +248,15 @@ class EmbeddingCache:
         """Record that *path* is not a valid image."""
         resolved = path_key or os.path.realpath(path)
         stat_key = file_stat or _stat_key(resolved)
-        self._conn.execute(
-            "INSERT OR REPLACE INTO not_images (path, file_stat)"
-            " VALUES (?, ?)",
-            (resolved, stat_key),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO not_images (path, file_stat)"
+                " VALUES (?, ?)",
+                (resolved, stat_key),
+            )
+            self._conn.commit()
 
     def close(self) -> None:
         """Close the database connection."""
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
