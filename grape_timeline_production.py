@@ -100,14 +100,11 @@ def run_case(image_dir: str, cache_db: str, name: str) -> None:
     argv = [
         "grape",
         "-q",
-        "--model",
-	"ViT-L-14/laion2b_s32b_b82k",
         "--view",
         "--cache",
         cache_db,
-        "-n", "500",
         "-r",
-        "dog,cat,pet,fish,iguana,lizard,bunny,rabbit,puppy",
+        "dog",
         image_dir,
     ]
 
