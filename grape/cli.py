@@ -4,6 +4,7 @@ import os
 import shlex
 import sys
 import tempfile
+import threading
 from contextlib import closing, nullcontext
 from dataclasses import dataclass
 from importlib.metadata import version as _pkg_version
@@ -15,7 +16,6 @@ from dask.threaded import get as _dask_threaded_get
 
 from grape.search import (
     ScoredImage,
-    encode_keywords,
     iter_image_records,
 )
 
@@ -130,6 +130,36 @@ def _import_model_module(model_name: str, pretrained: str) -> Any:
     return grape.model
 
 
+class _LazyModel:
+    """Deferred model loader: only constructs CLIPModel on first use.
+
+    When all embeddings (text + image) are cached, the model is never
+    accessed and CLIPModel.__init__ never runs -- saving ~1s of
+    weight loading.  Thread-safe for concurrent dask tasks.
+    """
+
+    def __init__(
+        self, model_module: Any, model_name: str,
+        pretrained: str, quiet: bool,
+    ) -> None:
+        self._loader_args = (model_module, model_name, pretrained, quiet)
+        self._model: Any = None
+        self._lock = threading.Lock()
+
+    def _ensure_loaded(self) -> Any:
+        if self._model is None:
+            with self._lock:
+                if self._model is None:
+                    mm, mn, pt, q = self._loader_args
+                    self._model = mm.CLIPModel(
+                        model_name=mn, pretrained=pt, quiet=q,
+                    )
+        return self._model
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._ensure_loaded(), name)
+
+
 @dask.delayed
 def _load_model(
     model_module: Any,
@@ -137,12 +167,13 @@ def _load_model(
     pretrained: str,
     quiet: bool,
 ) -> Any:
-    """Load CLIP model weights."""
-    return model_module.CLIPModel(
-        model_name=model_name,
-        pretrained=pretrained,
-        quiet=quiet,
-    )
+    """Return a lazy model proxy; actual weight loading is deferred.
+
+    CLIPModel.__init__ only runs when a downstream dask node actually
+    accesses the model (e.g. to encode uncached keywords or images).
+    When everything is cached, the model is never loaded.
+    """
+    return _LazyModel(model_module, model_name, pretrained, quiet)
 
 
 @dask.delayed
@@ -155,39 +186,60 @@ def _encode_keywords(
 ) -> Any:
     """Encode keyword prompts into text embeddings.
 
-    Uses cached text embeddings when available, only encoding uncached
-    keywords through the model.  Stores new embeddings back to cache.
+    Caches at the prompt level (the actual text sent to the model), not
+    at the keyword level.  This means "a photo of a dog" is cached once
+    and reused regardless of which template set generated it.
+
+    With ensembling, each keyword produces N prompts.  We cache each
+    prompt individually, then average + renormalize per keyword.
     """
+    from typing import cast
+
     import numpy as np
 
     model_id = cache_context[0] if cache_context else None
 
-    # Try cache first.
-    cached: dict[str, Any] = {}
+    # Build all prompts: one per (keyword, template) pair.
+    all_prompts = [
+        template.format(kw)
+        for kw in score_keywords
+        for template in prompt_templates
+    ]
+
+    # Check cache for each prompt.
+    cached_prompts: dict[str, Any] = {}
     if cache is not None and model_id is not None:
-        templates_key = cache.text_templates_key(prompt_templates)
-        cached = cache.get_text_embeddings(
-            model_id, score_keywords, templates_key,
-        )
+        cached_prompts = cache.get_text_embeddings(model_id, all_prompts)
 
-    uncached = [kw for kw in score_keywords if kw not in cached]
+    uncached_prompts = [p for p in all_prompts if p not in cached_prompts]
 
-    if uncached:
-        # Encode only the uncached keywords.
-        fresh = encode_keywords(
-            model, uncached, prompt_templates=prompt_templates,
-        )
-        # Store each keyword's embedding individually.
+    if uncached_prompts:
+        # Encode only uncached prompts through the model.
+        fresh = model.encode_texts(uncached_prompts)
         new_pairs: list[tuple[str, Any]] = []
-        for i, kw in enumerate(uncached):
+        for i, prompt in enumerate(uncached_prompts):
             emb = fresh[i : i + 1]
-            cached[kw] = emb
-            new_pairs.append((kw, emb))
+            cached_prompts[prompt] = emb
+            new_pairs.append((prompt, emb))
         if cache is not None and model_id is not None:
-            cache.put_text_embeddings(model_id, templates_key, new_pairs)
+            cache.put_text_embeddings(model_id, new_pairs)
 
-    # Reassemble in original keyword order.
-    return np.vstack([cached[kw] for kw in score_keywords])
+    # Reassemble per-keyword embeddings: average across templates,
+    # then L2-normalize (same logic as _encode_keyword_embeddings).
+    n_templates = len(prompt_templates)
+    keyword_embs: list[Any] = []
+    for kw in score_keywords:
+        prompts = [t.format(kw) for t in prompt_templates]
+        embs = np.vstack([cached_prompts[p] for p in prompts])
+        if n_templates == 1:
+            keyword_embs.append(embs)
+        else:
+            merged = embs.mean(axis=0, keepdims=True)
+            norm = np.linalg.norm(merged)
+            merged = merged / max(norm, 1e-12)
+            keyword_embs.append(cast(np.ndarray, merged.astype(np.float32)))
+
+    return np.vstack(keyword_embs)
 
 
 

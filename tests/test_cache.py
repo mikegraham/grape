@@ -188,46 +188,47 @@ def test_not_image_index_contains_cached_non_image(cache, img):
 def test_text_embedding_roundtrip(cache):
     emb_cat = _rand_embedding(40)
     emb_dog = _rand_embedding(41)
-    templates = ["a photo of a {}", "a photo of the {}"]
-    tkey = cache.text_templates_key(templates)
 
-    cache.put_text_embeddings("model-a", tkey, [("cat", emb_cat), ("dog", emb_dog)])
-    got = cache.get_text_embeddings("model-a", ["cat", "dog"], tkey)
+    cache.put_text_embeddings("model-a", [
+        ("a photo of a cat", emb_cat),
+        ("a photo of a dog", emb_dog),
+    ])
+    got = cache.get_text_embeddings(
+        "model-a", ["a photo of a cat", "a photo of a dog"],
+    )
     assert len(got) == 2
-    np.testing.assert_array_equal(got["cat"], emb_cat)
-    np.testing.assert_array_equal(got["dog"], emb_dog)
+    np.testing.assert_array_equal(got["a photo of a cat"], emb_cat)
+    np.testing.assert_array_equal(got["a photo of a dog"], emb_dog)
 
 
 def test_text_embedding_miss_returns_empty(cache):
-    templates_key = cache.text_templates_key(["a photo of a {}"])
-    got = cache.get_text_embeddings("model-a", ["cat"], templates_key)
+    got = cache.get_text_embeddings("model-a", ["a photo of a cat"])
     assert got == {}
 
 
 def test_text_embedding_per_model(cache):
     emb_a = _rand_embedding(42)
     emb_b = _rand_embedding(43)
-    tkey = cache.text_templates_key(["a photo of a {}"])
 
-    cache.put_text_embeddings("model-a", tkey, [("cat", emb_a)])
-    cache.put_text_embeddings("model-b", tkey, [("cat", emb_b)])
+    cache.put_text_embeddings("model-a", [("a photo of a cat", emb_a)])
+    cache.put_text_embeddings("model-b", [("a photo of a cat", emb_b)])
 
-    got_a = cache.get_text_embeddings("model-a", ["cat"], tkey)
-    got_b = cache.get_text_embeddings("model-b", ["cat"], tkey)
-    np.testing.assert_array_equal(got_a["cat"], emb_a)
-    np.testing.assert_array_equal(got_b["cat"], emb_b)
+    got_a = cache.get_text_embeddings("model-a", ["a photo of a cat"])
+    got_b = cache.get_text_embeddings("model-b", ["a photo of a cat"])
+    np.testing.assert_array_equal(got_a["a photo of a cat"], emb_a)
+    np.testing.assert_array_equal(got_b["a photo of a cat"], emb_b)
 
 
-def test_text_embedding_different_templates(cache):
+def test_text_embedding_same_keyword_different_templates(cache):
+    """Same keyword formatted with different templates produces distinct entries."""
     emb1 = _rand_embedding(44)
     emb2 = _rand_embedding(45)
-    tkey1 = cache.text_templates_key(["a photo of a {}"])
-    tkey2 = cache.text_templates_key(["a {} in the wild"])
 
-    cache.put_text_embeddings("model-a", tkey1, [("cat", emb1)])
-    cache.put_text_embeddings("model-a", tkey2, [("cat", emb2)])
+    cache.put_text_embeddings("model-a", [("a photo of a cat", emb1)])
+    cache.put_text_embeddings("model-a", [("a cat in the wild", emb2)])
 
-    got1 = cache.get_text_embeddings("model-a", ["cat"], tkey1)
-    got2 = cache.get_text_embeddings("model-a", ["cat"], tkey2)
-    np.testing.assert_array_equal(got1["cat"], emb1)
-    np.testing.assert_array_equal(got2["cat"], emb2)
+    got = cache.get_text_embeddings(
+        "model-a", ["a photo of a cat", "a cat in the wild"],
+    )
+    np.testing.assert_array_equal(got["a photo of a cat"], emb1)
+    np.testing.assert_array_equal(got["a cat in the wild"], emb2)
