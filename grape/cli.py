@@ -92,7 +92,10 @@ def _get_webview() -> Any:
 #   _import_model_module --+-- _load_model -- _encode_keywords --+
 #                          \-- _resolve_and_index_cache --+      |
 #   _scan_files --------------------------------------+-- _prepare
-#       \-- _score_all -- _filter_and_sort -- _emit
+#       \-- _score_all
+#
+# After dask.compute(), _filter_and_sort and _emit run on the main
+# thread (pywebview requires it, stdout is cleaner without interleaving).
 #
 # Performance notes:
 # - The scheduler is passed as a function (dask.threaded.get) not a string
@@ -305,7 +308,6 @@ def _score_all(
     return results, scan_done
 
 
-@dask.delayed
 def _filter_and_sort(
     score_result: "tuple[list[ScoredImage], _ScanDone]",
     keywords: list[str],
@@ -314,7 +316,10 @@ def _filter_and_sort(
     top: int | None,
     quiet: bool,
 ) -> list[ScoredImage]:
-    """Apply excludes, sort, threshold, top-N, and validate scan status."""
+    """Apply excludes, sort, threshold, top-N, and validate scan status.
+
+    Not a dask node -- runs on the main thread after dask.compute().
+    """
     results, scan_done = score_result
 
     if scan_done.error_message:
@@ -344,7 +349,6 @@ def _filter_and_sort(
     return results
 
 
-@dask.delayed
 def _emit(
     results: list[ScoredImage],
     keywords: list[str],
@@ -355,9 +359,12 @@ def _emit(
     view: bool,
     quiet: bool,
 ) -> int:
-    """Format and output results. Returns count of emitted rows."""
+    """Format and output results on the main thread.
+
+    Not a dask node -- runs after dask.compute() returns, so pywebview
+    and stdout output happen on the main thread where they belong.
+    """
     if not results:
-        # Always print -- this is a result status, not a progress message.
         print("grape: no images above threshold", file=sys.stderr)
         return 0
 
@@ -727,21 +734,22 @@ def _run_pipeline(
         cache, quiet,
     )
 
-    # Depends on score_result
-    filtered = _filter_and_sort(
-        score_result, keywords, exclude_keywords,
-        threshold, top, quiet,
-    )
-
-    # Depends on filtered
-    emitted_count = _emit(
-        filtered, keywords, exclude_keywords,
-        scores, verbose, print0, view, quiet,
-    )
-
     # Single compute call -- dask resolves the whole graph.
     # Pass the get function directly to avoid dask.distributed import (~0.2s).
-    dask.compute(emitted_count, scheduler=_dask_threaded_get)
+    (score_result_value,) = dask.compute(
+        score_result, scheduler=_dask_threaded_get,
+    )
+
+    # Post-processing and output run on the main thread (pywebview
+    # requires it, and stdout is cleaner without thread interleaving).
+    results = _filter_and_sort(
+        score_result_value, keywords, exclude_keywords,
+        threshold, top, quiet,
+    )
+    _emit(
+        results, keywords, exclude_keywords,
+        scores, verbose, print0, view, quiet,
+    )
 
 
 def main() -> None:
