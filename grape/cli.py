@@ -1,10 +1,12 @@
 import argparse
+import importlib.util
 import os
 import shlex
 import sys
 import tempfile
 from contextlib import closing, nullcontext
 from dataclasses import dataclass
+from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -15,12 +17,13 @@ from grape.search import (
     ScoredImage,
     encode_keywords,
     iter_image_records,
-    score_image_with_text_embeddings,
 )
 
 if TYPE_CHECKING:
     from grape.cache import EmbeddingCache
     from grape.model import CLIPModel
+
+DEFAULT_MODEL = "ViT-B-16/laion2b_s34b_b88k"
 
 DEFAULT_PROMPT_ENSEMBLE = [
     "a photo of a {}",
@@ -86,13 +89,15 @@ def _get_webview() -> Any:
 # Dask delayed building blocks
 #
 # Each @dask.delayed function is a node in the task graph, wired together
-# in _run_pipeline(). A single dask.compute() call runs three branches
+# in _run_pipeline(). A single dask.compute() call runs four branches
 # concurrently on a thread pool:
 #
-#   _import_model_module --+-- _load_model -- _encode_keywords --+
-#                          \-- _resolve_and_index_cache --+      |
-#   _scan_files --------------------------------------+-- _prepare
-#       \-- _score_all
+#   _import_model_module --+-- _load_model --+-- _encode_keywords ------+
+#                          |                 \-- _encode_like_images --+ |
+#                          |                                    _combine +
+#                          \-- _resolve_and_index_cache --+              |
+#   _scan_files --------------------------------------+-- _prepare      |
+#                                                         \-- _score_all
 #
 # After dask.compute(), _filter_and_sort and _emit run on the main
 # thread (pywebview requires it, stdout is cleaner without interleaving).
@@ -145,14 +150,83 @@ def _encode_keywords(
     model: "CLIPModel",
     score_keywords: list[str],
     prompt_templates: list[str],
+    cache_context: tuple[str | None, dict[tuple[str, str], Any] | None],
+    cache: "EmbeddingCache | None",
 ) -> Any:
-    """Encode keyword prompts into text embeddings."""
-    return encode_keywords(
-        model,
-        score_keywords,
-        prompt_templates=prompt_templates,
-    )
+    """Encode keyword prompts into text embeddings.
 
+    Uses cached text embeddings when available, only encoding uncached
+    keywords through the model.  Stores new embeddings back to cache.
+    """
+    import numpy as np
+
+    model_id = cache_context[0] if cache_context else None
+
+    # Try cache first.
+    cached: dict[str, Any] = {}
+    if cache is not None and model_id is not None:
+        templates_key = cache.text_templates_key(prompt_templates)
+        cached = cache.get_text_embeddings(
+            model_id, score_keywords, templates_key,
+        )
+
+    uncached = [kw for kw in score_keywords if kw not in cached]
+
+    if uncached:
+        # Encode only the uncached keywords.
+        fresh = encode_keywords(
+            model, uncached, prompt_templates=prompt_templates,
+        )
+        # Store each keyword's embedding individually.
+        new_pairs: list[tuple[str, Any]] = []
+        for i, kw in enumerate(uncached):
+            emb = fresh[i : i + 1]
+            cached[kw] = emb
+            new_pairs.append((kw, emb))
+        if cache is not None and model_id is not None:
+            cache.put_text_embeddings(model_id, templates_key, new_pairs)
+
+    # Reassemble in original keyword order.
+    return np.vstack([cached[kw] for kw in score_keywords])
+
+
+
+@dask.delayed
+def _encode_like_images(
+    model: "CLIPModel",
+    like_paths: list[str],
+    cache_context: tuple[str | None, dict[tuple[str, str], Any] | None],
+    cache: "EmbeddingCache | None",
+) -> Any:
+    """Encode --like reference images into query embeddings.
+
+    Uses cached embeddings when available so that --like self-matches
+    produce identical bytes (and therefore exactly 1.0 similarity).
+    Falls back to model.encode_image() on cache miss.
+    """
+    import numpy as np
+    model_id = cache_context[0] if cache_context else None
+    embeddings = []
+    for p in like_paths:
+        cached = None
+        if cache is not None and model_id is not None:
+            cached = cache.get(Path(p), model_id)
+        if cached is not None:
+            embeddings.append(cached)
+        else:
+            embeddings.append(model.encode_image(p))
+    return np.vstack(embeddings)
+
+
+@dask.delayed
+def _combine_query_embeddings(
+    text_emb: Any,
+    like_emb: Any,
+) -> Any:
+    """Stack text and --like image query embeddings into one matrix."""
+    import numpy as np
+    parts = [e for e in (text_emb, like_emb) if e is not None]
+    return np.vstack(parts)
 
 
 @dask.delayed
@@ -214,7 +288,7 @@ def _scan_files(
             for record in iter_image_records(
                 str(target),
                 recursive=True,
-                cache=None,
+                cache=cache,
                 image_hits=image_hits,
                 not_image_hits=not_image_hits,
             ):
@@ -272,33 +346,50 @@ def _score_all(
     prepared: "tuple[Any, list[_ScannedImage], list[_ScannedImage], _ScanDone]",
     model: "CLIPModel",
     score_keywords: list[str],
+    like_paths: list[str],
     text_emb: Any,
     cache: "EmbeddingCache | None",
     quiet: bool,
 ) -> "tuple[list[ScoredImage], _ScanDone]":
-    """Score all scanned images against text embeddings."""
+    """Score all scanned images against text embeddings.
+
+    ``score_keywords`` are text keyword labels (include + exclude).
+    ``like_paths`` are --like image paths.  Keeping them separate avoids
+    score-dict key collisions when basenames repeat or match a keyword.
+    """
+    from grape.search import _get_embedding
+
     image_emb, cached_items, uncached_items, scan_done = prepared
+    n_text = len(score_keywords)
+
+    def _make_result(path: Path, sims: Any) -> ScoredImage:
+        return ScoredImage(
+            path=path,
+            scores={
+                kw: float(s)
+                for kw, s in zip(score_keywords, sims[:n_text])
+            },
+            like_scores=[
+                (lp, float(s))
+                for lp, s in zip(like_paths, sims[n_text:])
+            ],
+            score=float(sims.mean()),
+        )
 
     results: list[ScoredImage] = []
 
     # Fast path: score cached items via a single matrix multiply.
     if image_emb is not None:
         sims_matrix = image_emb @ text_emb.T
-        means = sims_matrix.mean(axis=1)
         for idx, item in enumerate(cached_items):
-            sims = sims_matrix[idx]
-            results.append(ScoredImage(
-                path=item.path,
-                scores={kw: float(s) for kw, s in zip(score_keywords, sims)},
-                score=float(means[idx]),
-            ))
+            results.append(_make_result(item.path, sims_matrix[idx]))
 
     # Slow path: encode uncached images through the model one at a time.
     for item in uncached_items:
         try:
-            results.append(score_image_with_text_embeddings(
-                model, item.path, score_keywords, text_emb, cache=cache,
-            ))
+            img_emb = _get_embedding(model, item.path, cache)
+            sims = (img_emb @ text_emb.T)[0]
+            results.append(_make_result(item.path, sims))
         except OSError as e:
             if e.errno is not None:
                 raise
@@ -312,6 +403,7 @@ def _filter_and_sort(
     score_result: "tuple[list[ScoredImage], _ScanDone]",
     keywords: list[str],
     exclude_keywords: list[str],
+    like_names: list[str],
     threshold: float | None,
     top: int | None,
     quiet: bool,
@@ -331,14 +423,18 @@ def _filter_and_sort(
 
     if not quiet:
         n = len(results)
-        query_text = _format_query_summary(keywords, exclude_keywords)
+        query_text = _format_query_summary(
+            keywords, exclude_keywords, like_names,
+        )
         print(
             f"{n} image{'s' * (n != 1)}, {query_text}",
             file=sys.stderr,
         )
 
     if exclude_keywords:
-        _apply_excluded_keywords(results, keywords, exclude_keywords)
+        _apply_excluded_keywords(
+            results, keywords, exclude_keywords,
+        )
 
     results.sort(key=lambda r: r.score, reverse=True)
 
@@ -353,6 +449,7 @@ def _emit(
     results: list[ScoredImage],
     keywords: list[str],
     exclude_keywords: list[str],
+    like_names: list[str],
     scores: bool,
     verbose: bool,
     print0: bool,
@@ -370,7 +467,11 @@ def _emit(
 
     show_scores = scores or verbose
     if view:
-        display_keywords = keywords + [f"not:{kw}" for kw in exclude_keywords]
+        display_keywords = (
+            keywords
+            + [f"like:{name}" for name in like_names]
+            + [f"not:{kw}" for kw in exclude_keywords]
+        )
         html_doc = _format_html(results, display_keywords)
         _show_in_webview(html_doc)
         return len(results)
@@ -425,6 +526,8 @@ def _format_results(results: list[ScoredImage], verbose: bool) -> str:
         lines.append(f"{r.score:.3f}  {shlex.quote(str(r.path))}")
         if verbose:
             parts = [f"  {kw}: {s:.3f}" for kw, s in r.scores.items()]
+            for lp, s in r.like_scores:
+                parts.append(f"  like:{Path(lp).name}: {s:.3f}")
             lines.append("".join(parts))
     return "\n".join(lines)
 
@@ -434,15 +537,20 @@ def _apply_excluded_keywords(
     include_keywords: list[str],
     exclude_keywords: list[str],
 ) -> None:
-    """Adjust result scores using include-vs-exclude keyword means."""
+    """Adjust result scores using include-vs-exclude keyword means.
+
+    ``include_keywords`` are the text keywords to keep (not --like).
+    Like scores contribute to the include mean via ``result.like_scores``.
+    """
     for result in results:
         raw_scores = result.scores
-        if include_keywords:
-            include_mean = sum(raw_scores[kw] for kw in include_keywords) / len(
-                include_keywords
-            )
-        else:
-            include_mean = 0.0
+        include_values = [raw_scores[kw] for kw in include_keywords]
+        include_values += [s for _, s in result.like_scores]
+
+        include_mean = (
+            sum(include_values) / len(include_values)
+            if include_values else 0.0
+        )
 
         if exclude_keywords:
             exclude_components = [raw_scores[kw] for kw in exclude_keywords]
@@ -479,9 +587,12 @@ def _format_html(
         src_path = r.path
         if not src_path.is_absolute():
             src_path = src_path.absolute()
+        all_scores = list(r.scores.items()) + [
+            (f"like:{Path(lp).name}", s) for lp, s in r.like_scores
+        ]
         breakdown = " \N{MIDDLE DOT} ".join(
             f"{kw}: {score:.3f}"
-            for kw, score in r.scores.items()
+            for kw, score in all_scores
         )
         score_line = f"score: {r.score:.3f}"
         if breakdown:
@@ -525,11 +636,14 @@ def _show_in_webview(html_doc: str) -> None:
 def _format_query_summary(
     keywords: list[str],
     exclude_keywords: list[str],
+    like_names: list[str] | None = None,
 ) -> str:
     """Build status text shown before scoring."""
     query_parts: list[str] = []
     if keywords:
         query_parts.append(", ".join(keywords))
+    if like_names:
+        query_parts.append(f"like: {', '.join(like_names)}")
     if exclude_keywords:
         query_parts.append(f"excluding: {', '.join(exclude_keywords)}")
     if query_parts:
@@ -544,26 +658,6 @@ def _format_query_summary(
 # Argument parsing
 # ---------------------------------------------------------------------------
 
-def _format_model_list() -> str:
-    """Format the open_clip model list, grouped by architecture."""
-    import open_clip
-    groups: dict[str, list[str]] = {}
-    for model_name, pretrained in open_clip.list_pretrained():
-        groups.setdefault(model_name, []).append(pretrained)
-    lines = []
-    for model_name in sorted(groups):
-        tags = ", ".join(sorted(groups[model_name]))
-        lines.append(f"  {model_name}: {tags}")
-    return "\n".join(lines) + "\n"
-
-
-class _LazyHelpFormatter(argparse.RawDescriptionHelpFormatter):
-    """Formatter that appends the model list only when --help runs."""
-
-    def format_help(self) -> str:
-        base = super().format_help()
-        return base + "\navailable models:\n" + _format_model_list()
-
 
 def _build_parser() -> argparse.ArgumentParser:
     """Construct and return the CLI parser."""
@@ -572,30 +666,62 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="grape",
         description="Find images matching keywords using CLIP.",
         epilog="examples:\n"
-               "  grape sunset photo.jpg\n"
-               "  grape 'cat,dog' *.jpg\n"
-               "  grape -r 'golden retriever,tennis ball' ~/Pictures\n"
-               "  grape -v -t 0.25 sunset photo.jpg\n",
-        formatter_class=_LazyHelpFormatter,
+               "  grape -k sunset photo.jpg\n"
+               "  grape -k 'cat,dog' *.jpg\n"
+               "  grape -R -k 'golden retriever' ~/Pictures\n"
+               "  grape --like ref.jpg -R ~/Pictures\n"
+               "  grape -k dog --like ref.jpg -R ~/Pictures\n",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "keywords",
-        metavar="KEYWORDS",
-        help="comma-separated keywords"
-             " (e.g. 'cat,dog' or 'golden retriever,sunset')",
+        "--version",
+        action="version",
+        version=f"%(prog)s {_pkg_version('grape')}",
     )
+
+    # -- Positional ---------------------------------------------------------
     parser.add_argument(
         "path",
         nargs="+",
         metavar="PATH",
-        help="image file(s) or directory (with -r)",
+        help="image file(s) or directory (with -R)",
+    )
+
+    # -- Query: what to search for ------------------------------------------
+    parser.add_argument(
+        "-k", "--keywords",
+        default=None,
+        metavar="KEYWORDS",
+        help="comma-separated keywords to match"
+             " (e.g. 'cat,dog' or 'golden retriever,sunset')",
     )
     parser.add_argument(
-        "-r", "--recursive",
-        action="store_true",
-        default=False,
-        help="search directories recursively",
+        "-x", "--exclude",
+        dest="exclude",
+        default=None,
+        metavar="KEYWORDS",
+        help="comma-separated anti-match keywords to penalize"
+             " (score = include_mean - exclude_mean)",
     )
+    parser.add_argument(
+        "--like",
+        action="append",
+        default=[],
+        metavar="IMAGE",
+        help="reference image to find similar images"
+             " (repeatable; combined with keyword queries)",
+    )
+
+    # -- Input: where to search ---------------------------------------------
+    parser.add_argument(
+        "-R", "--dereference-recursive",
+        action="store_true",
+        dest="recursive",
+        default=False,
+        help="search directories recursively, following symlinks",
+    )
+
+    # -- Filtering -----------------------------------------------------------
     parser.add_argument(
         "-t", "--threshold",
         type=float,
@@ -614,27 +740,12 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="show only top N results",
     )
-    parser.add_argument(
-        "-x", "--exclude",
-        dest="exclude",
-        default=None,
-        metavar="KEYWORDS",
-        help="comma-separated anti-match keywords to penalize"
-             " (score = include_mean - exclude_mean)",
-    )
+
+    # -- Output format -------------------------------------------------------
     parser.add_argument(
         "-s", "--scores",
         action="store_true",
         help="show scores alongside paths",
-    )
-    parser.add_argument(
-        "--ensemble-prompts",
-        nargs="?",
-        const=",".join(DEFAULT_PROMPT_ENSEMBLE),
-        default=",".join(DEFAULT_PROMPT_ENSEMBLE),
-        metavar="TEMPLATES",
-        help="comma-separated prompt templates for keyword ensembling"
-             f" (default: {default_prompt_templates})",
     )
     parser.add_argument(
         "-v", "--verbose",
@@ -642,25 +753,32 @@ def _build_parser() -> argparse.ArgumentParser:
         help="show per-keyword score breakdown"
              " (implies -s)",
     )
-    output_group = parser.add_mutually_exclusive_group()
     parser.add_argument(
         "-q", "--quiet",
         action="store_true",
         help="suppress progress and status messages"
              " on stderr",
     )
+    output_group = parser.add_mutually_exclusive_group()
     output_group.add_argument(
         "-print0",
         action="store_true",
         help="print matching paths separated by NUL"
              " bytes (raw paths, no shell quoting)",
     )
-    output_group.add_argument(
-        "--view",
-        action="store_true",
-        help="open results in a native webview window"
-             " using simple HTML with <img> tags",
+    _has_view_deps = (
+        importlib.util.find_spec("webview") is not None
+        and importlib.util.find_spec("jinja2") is not None
     )
+    if _has_view_deps:
+        output_group.add_argument(
+            "--view",
+            action="store_true",
+            help="open results in a native webview window"
+                 " using simple HTML with <img> tags",
+        )
+
+    # -- Configuration -------------------------------------------------------
     parser.add_argument(
         "--cache",
         metavar="PATH",
@@ -670,9 +788,20 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model",
-        default="ViT-B-16/laion2b_s34b_b88k",
+        default=DEFAULT_MODEL,
         help="open_clip model/pretrained tag"
-             " (default: ViT-B-16/laion2b_s34b_b88k)",
+             f" (default: {DEFAULT_MODEL});"
+             " see https://github.com/mlfoundations/open_clip"
+             " for available models",
+    )
+    parser.add_argument(
+        "--ensemble-prompts",
+        nargs="?",
+        const=",".join(DEFAULT_PROMPT_ENSEMBLE),
+        default=",".join(DEFAULT_PROMPT_ENSEMBLE),
+        metavar="TEMPLATES",
+        help="comma-separated prompt templates for keyword ensembling"
+             f" (default: {default_prompt_templates})",
     )
     return parser
 
@@ -712,6 +841,7 @@ def _run_pipeline(
     score_keywords: list[str],
     keywords: list[str],
     exclude_keywords: list[str],
+    like_paths: list[str],
     model_name: str,
     pretrained: str,
     prompt_templates: list[str],
@@ -729,20 +859,37 @@ def _run_pipeline(
     """Build and execute the dask task graph for the full CLI pipeline."""
     # --- Build the task graph ---
     # Three independent roots run concurrently:
-    #   1. model import -> weight loading -> text encoding
+    #   1. model import -> weight loading -> query encoding
     #   2. model import -> model_id resolution + cache index
     #   3. file scanning (builds scan indexes, then walks paths)
     # All converge at _score_all.
 
-    # Branch 1: model module import -> weight loading -> text encoding
+    # Branch 1: model module import -> weight loading -> query encoding
     model_module = _import_model_module(model_name, pretrained)
     model = _load_model(model_module, model_name, pretrained, quiet)
-    text_emb = _encode_keywords(model, score_keywords, prompt_templates)
 
     # Branch 2: model module import -> model_id resolution + cache index
     cache_context = _resolve_and_index_cache(
         model_module, model_name, pretrained, cache,
     )
+
+    # Text keyword embeddings (None when no text keywords).
+    text_emb = (
+        _encode_keywords(
+            model, score_keywords, prompt_templates, cache_context, cache,
+        )
+        if score_keywords else None
+    )
+    # --like image embeddings (None when no --like).
+    # Depends on cache_context so we can reuse cached embeddings,
+    # ensuring --like self-matches produce exactly 1.0 similarity.
+    like_emb = (
+        _encode_like_images(model, like_paths, cache_context, cache)
+        if like_paths else None
+    )
+    # Combined query matrix: [text keywords..., like embeddings...].
+    query_emb = _combine_query_embeddings(text_emb, like_emb)
+    like_names = [Path(p).name for p in like_paths]
 
     # Branch 3: file scanning (IO-bound, fully independent root)
     scan_result = _scan_files(path_args, recursive, cache)
@@ -752,9 +899,9 @@ def _run_pipeline(
     # model loading and text encoding.
     prepared = _prepare_cached_embeddings(scan_result, cache_context)
 
-    # Convergence: scoring needs prepared embeddings + text embeddings + model
+    # Convergence: scoring needs prepared embeddings + query embeddings + model
     score_result = _score_all(
-        prepared, model, score_keywords, text_emb,
+        prepared, model, score_keywords, like_paths, query_emb,
         cache, quiet,
     )
 
@@ -767,11 +914,11 @@ def _run_pipeline(
     # Post-processing and output run on the main thread (pywebview
     # requires it, and stdout is cleaner without thread interleaving).
     results = _filter_and_sort(
-        score_result_value, keywords, exclude_keywords,
+        score_result_value, keywords, exclude_keywords, like_names,
         threshold, top, quiet,
     )
     _emit(
-        results, keywords, exclude_keywords,
+        results, keywords, exclude_keywords, like_names,
         scores, verbose, print0, view, quiet,
     )
 
@@ -780,13 +927,17 @@ def main() -> None:
     parser = _build_parser()
 
     args = parser.parse_args()
-    keywords = parse_keywords(args.keywords)
+    keywords = parse_keywords(args.keywords) if args.keywords else []
     exclude_keywords: list[str] = []
     if args.exclude:
         exclude_keywords = parse_keywords(args.exclude)
     prompt_templates = _parse_prompt_templates(parser, args.ensemble_prompts)
     model_name, pretrained = _validate_model_arg(parser, args.model)
     score_keywords = keywords + exclude_keywords
+    like_paths = args.like
+
+    if not keywords and not like_paths:
+        parser.error("at least one of -k/--keywords or --like is required")
 
     # Open cache (if requested) before scanning so find_images can
     # skip files already known not to be images.
@@ -798,14 +949,12 @@ def main() -> None:
     else:
         cache_cm = nullcontext()
 
-    if not score_keywords:
-        parser.error("at least one keyword is required")
-
     with cache_cm as cache:
         _run_pipeline(
             score_keywords=score_keywords,
             keywords=keywords,
             exclude_keywords=exclude_keywords,
+            like_paths=like_paths,
             model_name=model_name,
             pretrained=pretrained,
             prompt_templates=prompt_templates,
@@ -818,7 +967,7 @@ def main() -> None:
             scores=args.scores,
             verbose=args.verbose,
             print0=args.print0,
-            view=args.view,
+            view=getattr(args, "view", False),
         )
 
 

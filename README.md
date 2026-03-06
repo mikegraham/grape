@@ -1,101 +1,155 @@
 # grape
 
-Find images matching keywords using [CLIP](https://openai.com/research/clip). Like grep, but for images.
+Find images matching keywords using [CLIP](https://openai.com/research/clip).
+Like grep, but for images.
 
 ```
-grape 'golden retriever' ~/Photos/*.jpg
+$ grape -R -s -k sunset ~/Pictures
+0.327  ~/Pictures/vacation/beach_golden_hour.jpg
+0.285  ~/Pictures/vacation/pier_evening.jpg
+0.241  ~/Pictures/hiking/mountain_view.jpg
 ```
 
 ## Install
 
 ```
-pip install -e .
+pip install .
 ```
 
-Requires Python 3.10+. Model weights (~350 MB) are downloaded on first run.
+Requires Python 3.10+.
+Model weights (~350 MB for the default model) are downloaded on first run.
 
-## Usage
+To use `--view` (opens results in a native window):
 
 ```
-grape KEYWORDS PATH [PATH ...]
+pip install '.[view]'
 ```
 
-`KEYWORDS` is a comma-separated list (e.g. `dog`, `'cat,dog'`, `'golden retriever,tennis ball'`). Each `PATH` is an image file or a directory (with `-r`).
+## Quick start
 
-Images are ranked by average cosine similarity across positive keywords. With `--exclude`, ranking becomes `include_mean - exclude_mean`. Image detection is content-based (`PIL.Image.verify`), not extension-based — binary files and non-images are skipped automatically.
+```bash
+# search by keyword
+grape -k sunset photo.jpg
 
-### Options
+# multiple keywords, ranked by average similarity
+grape -k 'cat,dog' *.jpg
+
+# recursive directory search
+grape -R -k 'golden retriever' ~/Pictures
+
+# find images similar to a reference image
+grape --like reference.jpg -R ~/Pictures
+
+# combine text and image queries
+grape -k dog --like my_dog.jpg -R ~/Pictures
+```
+
+## Examples
+
+```bash
+# show scores (-s) or full per-keyword breakdown (-v)
+grape -s -k sunset *.jpg
+grape -v -k 'cat,dog,bird' *.jpg
+
+# top 5 results above a similarity threshold
+grape -n 5 -t 0.25 -k sunset -R ~/Pictures
+
+# prefer "dog", penalize "cat" (score = include_mean - exclude_mean)
+grape -k dog -x cat -R ~/Pictures
+
+# multiple reference images
+grape --like ref1.jpg --like ref2.jpg -R ~/Pictures
+
+# pipe to other tools
+grape -q -print0 -k cat -R ~/Pictures | xargs -0 cp -t ~/cats/
+
+# browse results in a GUI window
+grape --view -k sunset -R ~/Pictures
+
+# cache embeddings for fast repeat queries
+grape --cache grape.db -k sunset -R ~/Pictures
+```
+
+## Options
+
+### Query
 
 | Flag | Description |
 |------|-------------|
-| `-r, --recursive` | Search directories recursively |
-| `-t, --threshold SCORE` | Only show results with score >= SCORE (0.0-1.0) |
-| `-n, --top N` | Show only top N results |
-| `-x, --exclude KEYWORDS` | Comma-separated anti-match keywords |
-| `--ensemble-prompts TEMPLATES` | Comma-separated prompt templates for ensembling (default: built-in set; each template must include `{}`) |
-| `-s, --scores` | Show similarity scores alongside paths |
-| `-v, --verbose` | Show per-keyword score breakdown (implies `-s`) |
-| `-q, --quiet` | Suppress progress and status messages on stderr |
-| `-print0` | Print matching paths as raw NUL-terminated records |
-| `--view` | Open results in a native webview window using simple HTML with `<img>` tags |
-| `--cache PATH` | Cache file for embeddings (created if it doesn't exist) |
-| `--model MODEL` | CLIP model/pretrained tag (default: `ViT-B-16/laion2b_s34b_b88k`) |
+| `-k KEYWORDS` | Comma-separated keywords to match |
+| `-x KEYWORDS` | Anti-match keywords to penalize |
+| `--like IMAGE` | Reference image for similarity search (repeatable) |
 
-By default, path output is shell-quoted (like `ls`) for safer copy/paste.
+At least one of `-k` or `--like` is required.
 
-### Examples
+### Input
+
+| Flag | Description |
+|------|-------------|
+| `-R` | Search directories recursively, following symlinks |
+
+### Filtering
+
+| Flag | Description |
+|------|-------------|
+| `-t SCORE` | Only show results with score >= SCORE |
+| `-n N` | Show only top N results |
+
+### Output
+
+| Flag | Description |
+|------|-------------|
+| `-s` | Show scores |
+| `-v` | Per-keyword score breakdown (implies `-s`) |
+| `-q` | Suppress status messages on stderr |
+| `-print0` | NUL-separated output for `xargs -0` |
+| `--view` | Browse results in a GUI window (requires `pip install '.[view]'`) |
+
+### Configuration
+
+| Flag | Description |
+|------|-------------|
+| `--cache PATH` | SQLite cache for image embeddings |
+| `--model MODEL` | open_clip model/pretrained tag |
+
+Image detection is content-based (`PIL.Image.verify`), not extension-based.
+Output paths are shell-quoted by default.
+
+## Scoring
+
+Images are ranked by cosine similarity between CLIP embeddings.
+Scores typically land in the 0.15--0.35 range for meaningful matches --
+they are similarities, not probabilities, and even strong matches
+rarely exceed 0.35.
+
+With `-x`, the score becomes `mean(include) - mean(exclude)`.
+With `--like`, reference image similarities are included in the mean
+alongside text keywords.
+
+Scores are **not comparable across models**.
+
+## Caching
+
+The first run without a cache encodes every image through the model
+(~80 ms per image on CPU). With `--cache grape.db`, image embeddings
+are stored in a SQLite file. Subsequent runs against the same images
+are near-instant -- only new or changed files are re-encoded.
+
+Cache entries are keyed by absolute path, file stat, and model
+identifier. They auto-invalidate when a file's size, mtime, or inode
+changes. Image detection results are cached too, so directory scans
+get faster over time even for non-image files.
+
+## Models
+
+The default model is `ViT-B-16/laion2b_s34b_b88k`.
+Use `--model` to pick any model from the
+[open_clip pretrained registry](https://github.com/mlfoundations/open_clip):
 
 ```bash
-# Find dogs in a set of photos
-grape dog *.jpg
-
-# Multiple keywords — images are ranked by average similarity
-grape 'cat,dog' *.jpg
-
-# Search a directory recursively, show scores
-grape -r -s sunset ~/Pictures
-
-# Top 5 results above a threshold, verbose breakdown
-grape -v -t 0.25 -n 5 'beach,palm tree' ~/Photos
-
-# Prefer "dog" while penalizing "cat"
-grape -x cat dog ~/Pictures/*.jpg
-
-# Use the built-in prompt ensemble (enabled by default)
-grape dog ~/Pictures/*.jpg
-
-# Override with custom prompt templates
-grape --ensemble-prompts 'a photo of {},a sketch of {}' dog ~/Pictures/*.jpg
-
-# Emit raw NUL-delimited paths for xargs -0
-grape -print0 dog ~/Pictures/*.jpg | xargs -0 -n1 echo
-
-# Open results in a native window
-grape --view dog ~/Pictures/*.jpg
-
-# Use an embedding cache for fast repeat runs
-grape --cache ~/.cache/grape.db dog ~/Photos/*.jpg
+grape --model ViT-L-14/laion2b_s32b_b82k -k sunset -R ~/Pictures
+grape --model ViT-B-32/openai -k sunset -R ~/Pictures
 ```
 
-`--view` is powered by `pywebview`.
-
-### Caching
-
-Encoding images through CLIP is the bottleneck (~80 ms per image on CPU). The `--cache` flag stores image embeddings in a SQLite file so repeat runs skip re-encoding.
-
-```bash
-grape --cache my.db sunset ~/Photos/*.jpg   # first run: encodes all images
-grape --cache my.db beach  ~/Photos/*.jpg   # second run: images already cached
-```
-
-Cache entries are keyed on absolute file path and model identifier. Entries are automatically invalidated when a file's size, mtime, or inode changes — no manual cache-busting needed.
-
-### Models
-
-The default model is `ViT-B-16/laion2b_s34b_b88k` — a good speed/quality tradeoff on CPU. Use `--model` to pick a different [open_clip](https://github.com/mlfoundations/open_clip) model:
-
-```bash
-grape --model ViT-L-14/laion2b_s32b_b82k sunset ~/Photos/*.jpg
-```
-
-The format is `model_name/pretrained_tag`. Run `python -c "import open_clip; print(open_clip.list_pretrained())"` to see available combinations.
+The format is `model_name/pretrained_tag`.
+Larger models are more accurate but slower.

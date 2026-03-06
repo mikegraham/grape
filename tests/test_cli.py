@@ -190,7 +190,7 @@ def test_show_in_webview_calls_create_window_and_start(monkeypatch):
 # --- argument validation ---
 
 def test_bad_model_format(monkeypatch):
-    _, err, code = run_main(["--model", "noslash", "dog", "x.jpg"], monkeypatch)
+    _, err, code = run_main(["--model", "noslash", "-k", "dog", "x.jpg"], monkeypatch)
     assert code != 0
     assert "model_name/pretrained" in err
 
@@ -198,9 +198,9 @@ def test_bad_model_format(monkeypatch):
 def test_empty_keywords_errors(tmp_path, monkeypatch):
     image_path = tmp_path / "empty keywords.jpg"
     image_path.write_bytes(b"unused")
-    _, err, code = run_main(["-q", ",,,", str(image_path)], monkeypatch)
+    _, err, code = run_main(["-q", "-k", ",,,", str(image_path)], monkeypatch)
     assert code != 0
-    assert "keyword" in err.lower()
+    assert "keyword" in err.lower() or "--like" in err.lower()
 
 
 def test_empty_exclude_keywords_errors(tmp_path, monkeypatch):
@@ -208,18 +208,30 @@ def test_empty_exclude_keywords_errors(tmp_path, monkeypatch):
     image_path.write_bytes(b"unused")
     _stub_pipeline(monkeypatch)
     out, _, code = run_main(
-        ["-q", "-s", "-x", ",,,", "dog", str(image_path)],
+        ["-q", "-s", "-x", ",,,", "-k", "dog", str(image_path)],
         monkeypatch,
     )
     assert code == 0
     assert "0.750" in out
 
 
+def test_exclude_only_without_include_or_like_is_error(tmp_path, monkeypatch):
+    """Exclude-only queries are nonsensical (ranks by least similar)."""
+    image_path = tmp_path / "my photo.jpg"
+    image_path.write_bytes(b"unused")
+    _, err, code = run_main(
+        ["-q", "-x", "cat", str(image_path)],
+        monkeypatch,
+    )
+    assert code != 0
+    assert "keyword" in err.lower() or "--like" in err.lower()
+
+
 def test_both_keyword_lists_empty_is_error(tmp_path, monkeypatch):
     image_path = tmp_path / "my photo.jpg"
     image_path.write_bytes(b"unused")
     _, err, code = run_main(
-        ["-q", "-x", ",,,", ",,,", str(image_path)],
+        ["-q", "-x", ",,,", "-k", ",,,", str(image_path)],
         monkeypatch,
     )
     assert code != 0
@@ -227,19 +239,19 @@ def test_both_keyword_lists_empty_is_error(tmp_path, monkeypatch):
 
 
 def test_count_short_flag_is_rejected(monkeypatch):
-    _, err, code = run_main(["-c", "dog", "x.jpg"], monkeypatch)
+    _, err, code = run_main(["-c", "-k", "dog", "x.jpg"], monkeypatch)
     assert code != 0
     assert "unrecognized arguments: -c" in err
 
 
 def test_count_long_flag_is_rejected(monkeypatch):
-    _, err, code = run_main(["--count", "dog", "x.jpg"], monkeypatch)
+    _, err, code = run_main(["--count", "-k", "dog", "x.jpg"], monkeypatch)
     assert code != 0
     assert "unrecognized arguments: --count" in err
 
 
 def test_view_rejects_print0(monkeypatch):
-    _, err, code = run_main(["--view", "-print0", "dog", "x.jpg"], monkeypatch)
+    _, err, code = run_main(["--view", "-print0", "-k", "dog", "x.jpg"], monkeypatch)
     assert code != 0
     assert "not allowed with argument" in err
     assert "--view" in err
@@ -251,7 +263,7 @@ def test_view_rejects_print0(monkeypatch):
 def test_nonexistent_path_errors(monkeypatch):
     _stub_pipeline(monkeypatch)
     _, err, code = run_main(
-        ["-q", "dog", "/tmp/grape_nonexistent_path_xyz"],
+        ["-q", "-k", "dog", "/tmp/grape_nonexistent_path_xyz"],
         monkeypatch,
     )
     assert code != 0
@@ -262,14 +274,14 @@ def test_dir_without_r_warns(tmp_path, monkeypatch):
     """Passing a directory without -r warns and finds no images."""
     Image.new("RGB", (1, 1)).save(tmp_path / "img.jpg", format="JPEG")
     _stub_pipeline(monkeypatch)
-    _, err, code = run_main(["-q", "dog", str(tmp_path)], monkeypatch)
+    _, err, code = run_main(["-q", "-k", "dog", str(tmp_path)], monkeypatch)
     assert "Is a directory" in err
 
 
 def test_no_images_exits(tmp_path, monkeypatch):
     """Empty directory with -r exits with an error."""
     _stub_pipeline(monkeypatch)
-    _, err, code = run_main(["-q", "-r", "dog", str(tmp_path)], monkeypatch)
+    _, err, code = run_main(["-q", "-R", "-k", "dog", str(tmp_path)], monkeypatch)
     assert code != 0
     assert "no images found" in err
 
@@ -293,7 +305,9 @@ def _stub_pipeline(monkeypatch, score=0.75):
         return object()
 
     @dask.delayed
-    def _fake_encode_keywords(model, score_keywords, prompt_templates):
+    def _fake_encode_keywords(
+        model, score_keywords, prompt_templates, cache_context, cache,
+    ):
         return object()
 
     @dask.delayed
@@ -307,7 +321,7 @@ def _stub_pipeline(monkeypatch, score=0.75):
 
     @dask.delayed
     def _fake_score_all(
-        prepared, model, score_keywords, text_emb,
+        prepared, model, score_keywords, like_paths, text_emb,
         cache, quiet,
     ):
         _image_emb, _cached_items, uncached_items, scan_done = prepared
@@ -318,9 +332,23 @@ def _stub_pipeline(monkeypatch, score=0.75):
         ]
         return results, scan_done
 
+    @dask.delayed
+    def _fake_encode_like_images(model, like_paths, cache_context, cache):
+        return np.ones((len(like_paths), 2), dtype=np.float32)
+
+    @dask.delayed
+    def _fake_combine_query_embeddings(text_emb, like_emb):
+        return object()
+
     monkeypatch.setattr(cli_mod, "_import_model_module", _fake_import_model_module)
     monkeypatch.setattr(cli_mod, "_load_model", _fake_load_model)
     monkeypatch.setattr(cli_mod, "_encode_keywords", _fake_encode_keywords)
+    monkeypatch.setattr(
+        cli_mod, "_encode_like_images", _fake_encode_like_images,
+    )
+    monkeypatch.setattr(
+        cli_mod, "_combine_query_embeddings", _fake_combine_query_embeddings,
+    )
     monkeypatch.setattr(
         cli_mod, "_resolve_and_index_cache", _fake_resolve_and_index_cache,
     )
@@ -334,7 +362,7 @@ def test_default_output_shell_quotes_paths(tmp_path, monkeypatch):
     image_path = tmp_path / "my photo.jpg"
     image_path.write_bytes(b"unused")
     _stub_pipeline(monkeypatch)
-    out, _, code = run_main(["-q", "dog", str(image_path)], monkeypatch)
+    out, _, code = run_main(["-q", "-k", "dog", str(image_path)], monkeypatch)
     assert code == 0
     assert out == f"{shlex.quote(str(image_path))}\n"
 
@@ -343,7 +371,9 @@ def test_print0_outputs_raw_nul_terminated_paths(tmp_path, monkeypatch):
     image_path = tmp_path / "my photo.jpg"
     image_path.write_bytes(b"unused")
     _stub_pipeline(monkeypatch)
-    out, _, code = run_main(["-q", "-print0", "dog", str(image_path)], monkeypatch)
+    out, _, code = run_main(
+        ["-q", "-print0", "-k", "dog", str(image_path)], monkeypatch,
+    )
     assert code == 0
     assert out == f"{image_path}\0"
 
@@ -352,7 +382,7 @@ def test_scores_output_shell_quotes_paths(tmp_path, monkeypatch):
     image_path = tmp_path / "my photo.jpg"
     image_path.write_bytes(b"unused")
     _stub_pipeline(monkeypatch)
-    out, _, code = run_main(["-q", "-s", "dog", str(image_path)], monkeypatch)
+    out, _, code = run_main(["-q", "-s", "-k", "dog", str(image_path)], monkeypatch)
     assert code == 0
     assert shlex.quote(str(image_path)) in out
 
@@ -366,7 +396,7 @@ def test_exclude_keywords_adjusts_output_score(tmp_path, monkeypatch):
 
     @dask.delayed
     def _fake_score_all(
-        prepared, model, score_keywords, text_emb,
+        prepared, model, score_keywords, like_paths, text_emb,
         cache, quiet,
     ):
         _image_emb, _cached_items, uncached_items, scan_done = prepared
@@ -381,7 +411,7 @@ def test_exclude_keywords_adjusts_output_score(tmp_path, monkeypatch):
     monkeypatch.setattr(cli_mod, "_score_all", _fake_score_all)
 
     out, _, code = run_main(
-        ["-q", "-s", "-x", "cat", "dog", str(image_path)],
+        ["-q", "-s", "-x", "cat", "-k", "dog", str(image_path)],
         monkeypatch,
     )
     assert code == 0
@@ -393,7 +423,7 @@ def test_exclude_alias_anti_is_rejected(tmp_path, monkeypatch):
     image_path = tmp_path / "my photo.jpg"
     image_path.write_bytes(b"unused")
     _, err, code = run_main(
-        ["-q", "-s", "--anti", "cat", "dog", str(image_path)],
+        ["-q", "-s", "--anti", "cat", "-k", "dog", str(image_path)],
         monkeypatch,
     )
     assert code != 0
@@ -408,7 +438,7 @@ def test_exclude_verbose_shows_not_keyword(tmp_path, monkeypatch):
 
     @dask.delayed
     def _fake_score_all(
-        prepared, model, score_keywords, text_emb,
+        prepared, model, score_keywords, like_paths, text_emb,
         cache, quiet,
     ):
         _image_emb, _cached_items, uncached_items, scan_done = prepared
@@ -423,7 +453,7 @@ def test_exclude_verbose_shows_not_keyword(tmp_path, monkeypatch):
     monkeypatch.setattr(cli_mod, "_score_all", _fake_score_all)
 
     out, _, code = run_main(
-        ["-q", "-v", "-x", "cat", "dog", str(image_path)],
+        ["-q", "-v", "-x", "cat", "-k", "dog", str(image_path)],
         monkeypatch,
     )
     assert code == 0
@@ -438,7 +468,9 @@ def test_ensemble_prompts_uses_default_template_set(tmp_path, monkeypatch):
     import grape.cli as cli_mod
 
     @dask.delayed
-    def _fake_encode_keywords(model, score_keywords, prompt_templates):
+    def _fake_encode_keywords(
+        model, score_keywords, prompt_templates, cache_context, cache,
+    ):
         captured["prompt_templates"] = prompt_templates
         return object()
 
@@ -446,7 +478,7 @@ def test_ensemble_prompts_uses_default_template_set(tmp_path, monkeypatch):
     monkeypatch.setattr(cli_mod, "_encode_keywords", _fake_encode_keywords)
 
     out, _, code = run_main(
-        ["-q", "dog", str(image_path)],
+        ["-q", "-k", "dog", str(image_path)],
         monkeypatch,
     )
     assert code == 0
@@ -463,7 +495,9 @@ def test_ensemble_prompts_custom_templates_override_default(tmp_path, monkeypatc
     import grape.cli as cli_mod
 
     @dask.delayed
-    def _fake_encode_keywords(model, score_keywords, prompt_templates):
+    def _fake_encode_keywords(
+        model, score_keywords, prompt_templates, cache_context, cache,
+    ):
         captured["prompt_templates"] = prompt_templates
         return object()
 
@@ -475,7 +509,7 @@ def test_ensemble_prompts_custom_templates_override_default(tmp_path, monkeypatc
             "-q",
             "--ensemble-prompts",
             "one {},two {}",
-            "dog",
+            "-k", "dog",
             str(image_path),
         ],
         monkeypatch,
@@ -487,7 +521,7 @@ def test_ensemble_prompts_custom_templates_override_default(tmp_path, monkeypatc
 
 def test_ensemble_prompts_template_without_placeholder_errors(monkeypatch):
     _, err, code = run_main(
-        ["--ensemble-prompts", "bad template", "dog", "x.jpg"],
+        ["--ensemble-prompts", "bad template", "-k", "dog", "x.jpg"],
         monkeypatch,
     )
     assert code != 0
@@ -500,7 +534,7 @@ def test_view_calls_webview_with_html(tmp_path, monkeypatch):
     _stub_pipeline(monkeypatch)
     captured: list[str] = []
     monkeypatch.setattr("grape.cli._show_in_webview", captured.append)
-    out, _, code = run_main(["-q", "--view", "dog", str(image_path)], monkeypatch)
+    out, _, code = run_main(["-q", "--view", "-k", "dog", str(image_path)], monkeypatch)
     assert code == 0
     assert out == ""
     assert len(captured) == 1
@@ -541,7 +575,7 @@ def test_score_all_uses_in_memory_cache_index():
     ).compute()
 
     results, _done = _score_all(
-        prepared, object(), ["dog"], text_emb,
+        prepared, object(), ["dog"], [], text_emb,
         _NoDbCache(), True,
     ).compute()
 
@@ -549,6 +583,69 @@ def test_score_all_uses_in_memory_cache_index():
     assert results[0].path == Path("/tmp/a.jpg")
     assert results[0].scores["dog"] == pytest.approx(1.0)
     assert results[0].score == pytest.approx(1.0)
+
+
+def test_score_all_duplicate_like_paths_keep_separate_scores():
+    """--like /a/ref.jpg --like /b/ref.jpg must preserve both scores.
+
+    Previously, like scores were stored in the same dict as keyword scores
+    keyed by basename -- so two like images with the same filename would
+    overwrite each other.  Now like_scores is a separate list of
+    (path, similarity) tuples, avoiding collisions entirely.
+    """
+    from grape.cli import (
+        _prepare_cached_embeddings,
+        _ScanDone,
+        _score_all,
+    )
+
+    class _NoDbCache:
+        def get_many_for_paths(self, *_args, **_kwargs):
+            raise AssertionError("DB batch lookup should not be called")
+
+    items = [
+        _ScannedImage(
+            path=Path("/tmp/a.jpg"),
+            path_key="/tmp/a.jpg",
+            file_stat="stat-a",
+        )
+    ]
+    cached_index = {
+        ("/tmp/a.jpg", "stat-a"): np.array([1.0, 0.0], dtype=np.float32)
+    }
+    # One text keyword + two like images (same basename, different dirs).
+    text_keywords = ["dog"]
+    like_paths = ["/x/ref.jpg", "/y/ref.jpg"]
+    query_emb = np.array(
+        [
+            [1.0, 0.0],   # "dog"
+            [0.0, 1.0],   # like /x/ref.jpg
+            [1.0, 1.0],   # like /y/ref.jpg
+        ],
+        dtype=np.float32,
+    )
+    scan_result = (items, _ScanDone(image_count=1))
+    cache_context = ("model-id", cached_index)
+
+    prepared = _prepare_cached_embeddings(
+        scan_result, cache_context,
+    ).compute()
+
+    results, _done = _score_all(
+        prepared, object(), text_keywords, like_paths, query_emb,
+        _NoDbCache(), True,
+    ).compute()
+
+    assert len(results) == 1
+    r = results[0]
+    # Text keyword score is in the dict.
+    assert "dog" in r.scores
+    # Both like images have their own entry in like_scores.
+    assert len(r.like_scores) == 2
+    assert r.like_scores[0][0] == "/x/ref.jpg"
+    assert r.like_scores[1][0] == "/y/ref.jpg"
+    # The two like scores are different (different query vectors).
+    assert r.like_scores[0][1] != pytest.approx(r.like_scores[1][1])
 
 
 def test_scan_files_includes_cache_metadata(tmp_path):
@@ -583,7 +680,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 @pytest.mark.slow
 def test_e2e_single_file(monkeypatch):
     """Score a single file through the full CLI pipeline."""
-    out, _, code = run_main(["-q", "dog", str(FIXTURES / "dog.jpg")], monkeypatch)
+    out, _, code = run_main(["-q", "-k", "dog", str(FIXTURES / "dog.jpg")], monkeypatch)
     assert code == 0
     assert "dog.jpg" in out
 
@@ -591,7 +688,7 @@ def test_e2e_single_file(monkeypatch):
 @pytest.mark.slow
 def test_e2e_recursive_dir(monkeypatch):
     """Score a directory recursively."""
-    out, _, code = run_main(["-q", "-r", "dog", str(FIXTURES)], monkeypatch)
+    out, _, code = run_main(["-q", "-R", "-k", "dog", str(FIXTURES)], monkeypatch)
     assert code == 0
     assert "dog.jpg" in out
 
@@ -600,7 +697,7 @@ def test_e2e_recursive_dir(monkeypatch):
 def test_e2e_scores_mode(monkeypatch):
     """--scores prints 'score  path' lines."""
     out, _, code = run_main(
-        ["-q", "-s", "dog", str(FIXTURES / "dog.jpg")], monkeypatch,
+        ["-q", "-s", "-k", "dog", str(FIXTURES / "dog.jpg")], monkeypatch,
     )
     assert code == 0
     parts = out.strip().split()
@@ -612,7 +709,7 @@ def test_e2e_scores_mode(monkeypatch):
 def test_e2e_top_n(monkeypatch):
     """--top 1 limits output to a single result."""
     out, _, code = run_main(
-        ["-q", "--top", "1", "-r", "dog", str(FIXTURES)], monkeypatch,
+        ["-q", "--top", "1", "-R", "-k", "dog", str(FIXTURES)], monkeypatch,
     )
     assert code == 0
     assert len(out.strip().split("\n")) == 1
@@ -622,7 +719,7 @@ def test_e2e_top_n(monkeypatch):
 def test_e2e_threshold_filters(monkeypatch):
     """--threshold 1.0 filters out everything."""
     out, err, code = run_main(
-        ["-q", "-t", "1.0", "dog", str(FIXTURES / "dog.jpg")], monkeypatch,
+        ["-q", "-t", "1.0", "-k", "dog", str(FIXTURES / "dog.jpg")], monkeypatch,
     )
     assert code == 0
     assert "no images above threshold" in err
@@ -632,7 +729,7 @@ def test_e2e_threshold_filters(monkeypatch):
 def test_e2e_verbose(monkeypatch):
     """--verbose shows per-keyword breakdown."""
     out, _, code = run_main(
-        ["-q", "-v", "dog,cat", str(FIXTURES / "dog.jpg")], monkeypatch,
+        ["-q", "-v", "-k", "dog,cat", str(FIXTURES / "dog.jpg")], monkeypatch,
     )
     assert code == 0
     assert "dog:" in out
@@ -643,7 +740,7 @@ def test_e2e_verbose(monkeypatch):
 def test_e2e_status_message(monkeypatch):
     """Without -q, prints image count and keywords to stderr."""
     _, err, code = run_main(
-        ["-r", "dog", str(FIXTURES)], monkeypatch,
+        ["-R", "-k", "dog", str(FIXTURES)], monkeypatch,
     )
     assert code == 0
     assert "image" in err
@@ -655,7 +752,7 @@ def test_e2e_with_cache(tmp_path, monkeypatch):
     """--cache creates a DB and caches image embeddings."""
     db = tmp_path / "test.db"
     out, _, code = run_main(
-        ["-q", "--cache", str(db), "dog", str(FIXTURES / "dog.jpg")],
+        ["-q", "--cache", str(db), "-k", "dog", str(FIXTURES / "dog.jpg")],
         monkeypatch,
     )
     assert code == 0
