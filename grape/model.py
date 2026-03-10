@@ -56,7 +56,7 @@ class CLIPModel:
             print("Loading model...", end=" ", flush=True, file=sys.stderr)
         try:
             self._init_model(open_clip, model_name, pretrained)
-        except (ImportError, AttributeError) as exc:
+        except (ImportError, RuntimeError) as exc:
             if not _requires_transformers(exc):
                 raise
             open_clip = _import_open_clip(use_transformers=True)
@@ -171,7 +171,7 @@ def get_hf_hub(model_name: str, pretrained: str) -> str:
         open_clip = _import_open_clip(
             use_transformers=False, model_name=model_name,
         )
-    except (ImportError, AttributeError) as exc:
+    except ImportError as exc:
         if not _requires_transformers(exc):
             raise
         open_clip = _import_open_clip(
