@@ -189,6 +189,48 @@ def test_not_image_takes_priority_over_image_hit(tmp_path):
     cache.close()
 
 
+def test_is_image_returns_false_from_cache(tmp_path):
+    """is_image returns False immediately for files cached as not-image."""
+    from grape.search import is_image
+
+    bad = tmp_path / "bad.dat"
+    bad.write_bytes(b"not an image")
+
+    cache = EmbeddingCache(tmp_path / "test.db")
+    cache.put_not_image(bad)
+
+    # Cache says it's not an image -- should return False without opening
+    assert is_image(bad, cache) is False
+    cache.close()
+
+
+def test_is_image_catches_syntax_error(tmp_path):
+    """PIL SyntaxError (corrupt format) is caught and cached."""
+    from unittest.mock import patch
+
+    from grape.search import is_image
+
+    bad = tmp_path / "corrupt.xyz"
+    bad.write_bytes(b"\x00" * 100)
+
+    cache = EmbeddingCache(tmp_path / "test.db")
+
+    # Patch Image.open to raise SyntaxError (some corrupt formats do this)
+    with patch("grape.search.Image.open", side_effect=SyntaxError("bad format")):
+        result = is_image(bad, cache)
+
+    assert result is False
+    assert cache.is_not_image(bad)
+    cache.close()
+
+
+def test_encode_keyword_embeddings_empty_templates_raises():
+    """Empty prompt_templates list raises ValueError."""
+    from grape.search import _encode_keyword_embeddings
+    with pytest.raises(ValueError, match="must not be empty"):
+        _encode_keyword_embeddings(None, ["dog"], "a photo of {}", [])
+
+
 def test_score_image_prompt_ensemble_averages_templates(tmp_path):
     """Prompt ensembling should average text embeddings per keyword."""
 

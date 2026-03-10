@@ -66,6 +66,21 @@ def test_parse_keywords_empty():
     assert parse_keywords(",,,") == []
 
 
+def test_parse_keywords_custom_separator():
+    assert parse_keywords("cat;dog", separator=";") == ["cat", "dog"]
+
+
+def test_parse_keywords_empty_separator_no_split():
+    """Empty separator treats the whole string as one keyword."""
+    assert parse_keywords("red, white, and blue", separator="") == [
+        "red, white, and blue",
+    ]
+
+
+def test_parse_keywords_empty_separator_blank_input():
+    assert parse_keywords("  ", separator="") == []
+
+
 # --- _format_results ---
 
 def test_format_results_shows_score_and_path():
@@ -690,6 +705,208 @@ def test_scan_files_rejects_non_images_passed_directly(tmp_path):
     assert items[0].path == jpg
 
 
+# --- _format_query_summary ---
+
+def test_format_query_summary_keywords_only():
+    from grape.cli import _format_query_summary
+    assert _format_query_summary(["dog", "cat"], []) == "dog, cat"
+
+
+def test_format_query_summary_with_like():
+    from grape.cli import _format_query_summary
+    result = _format_query_summary(["dog"], [], like_names=["ref.jpg"])
+    assert result == "dog; like: ref.jpg"
+
+
+def test_format_query_summary_with_exclude():
+    from grape.cli import _format_query_summary
+    result = _format_query_summary(["dog"], ["cat"])
+    assert result == "dog; excluding: cat"
+
+
+def test_format_query_summary_all_parts():
+    from grape.cli import _format_query_summary
+    result = _format_query_summary(
+        ["dog"], ["cat"], like_names=["ref.jpg"],
+    )
+    assert result == "dog; like: ref.jpg; excluding: cat"
+
+
+def test_format_query_summary_no_keywords():
+    from grape.cli import _format_query_summary
+    assert _format_query_summary([], []) == "(no keywords)"
+
+
+# --- _format_results with like_scores ---
+
+def test_format_results_verbose_shows_like_scores():
+    results = [
+        ScoredImage(
+            path=Path("/a/img.jpg"),
+            scores={"dog": 0.8},
+            like_scores=[("/x/ref.jpg", 0.95)],
+            score=0.875,
+        ),
+    ]
+    output = _format_results(results, verbose=True)
+    assert "dog: 0.800" in output
+    assert "like:ref.jpg: 0.950" in output
+
+
+# --- _score_all error handling ---
+
+def test_score_all_skips_syntax_error():
+    """SyntaxError during image encoding is caught and recorded as not-image."""
+    from grape.cli import (
+        _prepare_cached_embeddings,
+        _ScanDone,
+        _score_all,
+    )
+
+    class _RaisingModel:
+        def model_id(self):
+            return "test-model"
+        def encode_image(self, path):
+            raise SyntaxError("Not a PNG file")
+
+    class _TrackingCache:
+        def __init__(self):
+            self.not_images = []
+        def get(self, path, model_id):
+            return None
+        def put(self, path, model_id, emb):
+            pass
+        def put_not_image(self, path, *, path_key=None, file_stat=None):
+            self.not_images.append(str(path))
+        def get_many_for_paths(self, *a, **kw):
+            raise AssertionError("should not be called")
+
+    items = [
+        _ScannedImage(
+            path=Path("/tmp/bad.png"),
+            path_key="/tmp/bad.png",
+            file_stat="stat-bad",
+        ),
+    ]
+    text_emb = np.array([[1.0, 0.0]], dtype=np.float32)
+    scan_result = (items, _ScanDone(image_count=1))
+    cache_context = ("model-id", {})
+    tracking = _TrackingCache()
+
+    prepared = _prepare_cached_embeddings(
+        scan_result, cache_context,
+    ).compute()
+
+    results, _done = _score_all(
+        prepared, _RaisingModel(), ["dog"], [], text_emb,
+        tracking, True,
+    ).compute()
+
+    assert len(results) == 0
+    assert "/tmp/bad.png" in tracking.not_images
+
+
+def test_score_all_skips_oserror_no_errno():
+    """OSError with errno=None (PIL format error) is caught; real errors propagate."""
+    from grape.cli import (
+        _prepare_cached_embeddings,
+        _ScanDone,
+        _score_all,
+    )
+
+    class _RaisingModel:
+        def model_id(self):
+            return "test-model"
+        def encode_image(self, path):
+            raise OSError("cannot identify image file")
+
+    items = [
+        _ScannedImage(
+            path=Path("/tmp/bad.jpg"),
+            path_key="/tmp/bad.jpg",
+            file_stat="stat-bad",
+        ),
+    ]
+    text_emb = np.array([[1.0, 0.0]], dtype=np.float32)
+    scan_result = (items, _ScanDone(image_count=1))
+    cache_context = ("model-id", {})
+
+    prepared = _prepare_cached_embeddings(
+        scan_result, cache_context,
+    ).compute()
+
+    results, _done = _score_all(
+        prepared, _RaisingModel(), ["dog"], [], text_emb,
+        None, True,
+    ).compute()
+
+    assert len(results) == 0
+
+
+def test_score_all_propagates_real_oserror():
+    """OSError with an errno (e.g. ENOENT) must not be swallowed."""
+    import errno
+
+    from grape.cli import (
+        _prepare_cached_embeddings,
+        _ScanDone,
+        _score_all,
+    )
+
+    class _RaisingModel:
+        def model_id(self):
+            return "test-model"
+        def encode_image(self, path):
+            raise FileNotFoundError(
+                errno.ENOENT, "No such file", str(path),
+            )
+
+    items = [
+        _ScannedImage(
+            path=Path("/tmp/gone.jpg"),
+            path_key="/tmp/gone.jpg",
+            file_stat="stat-gone",
+        ),
+    ]
+    text_emb = np.array([[1.0, 0.0]], dtype=np.float32)
+    scan_result = (items, _ScanDone(image_count=1))
+    cache_context = ("model-id", {})
+
+    prepared = _prepare_cached_embeddings(
+        scan_result, cache_context,
+    ).compute()
+
+    with pytest.raises(FileNotFoundError):
+        _score_all(
+            prepared, _RaisingModel(), ["dog"], [], text_emb,
+            None, True,
+        ).compute()
+
+
+# --- _scan_files with cached not-images ---
+
+def test_scan_files_skips_direct_file_cached_as_not_image(tmp_path):
+    """Direct file arg known as not-image via cache is skipped."""
+    from grape.cache import EmbeddingCache
+    from grape.cli import _scan_files
+
+    jpg = tmp_path / "real.jpg"
+    Image.new("RGB", (1, 1)).save(jpg)
+    bad = tmp_path / "bad.dat"
+    bad.write_bytes(b"not an image")
+
+    cache = EmbeddingCache(tmp_path / "test.db")
+    cache.put_not_image(bad)
+
+    items, done = _scan_files(
+        [str(jpg), str(bad)], False, cache,
+    ).compute()
+
+    assert done.image_count == 1
+    assert items[0].path == jpg
+    cache.close()
+
+
 # --- end-to-end with real model (slow) ---
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -698,7 +915,10 @@ FIXTURES = Path(__file__).parent / "fixtures"
 @pytest.mark.slow
 def test_e2e_single_file(monkeypatch):
     """Score a single file through the full CLI pipeline."""
-    out, _, code = run_main(["-q", "-k", "dog", str(FIXTURES / "dog.jpg")], monkeypatch)
+    out, _, code = run_main(
+        ["-q", "--no-cache", "-k", "dog", str(FIXTURES / "dog.jpg")],
+        monkeypatch,
+    )
     assert code == 0
     assert "dog.jpg" in out
 
@@ -706,7 +926,9 @@ def test_e2e_single_file(monkeypatch):
 @pytest.mark.slow
 def test_e2e_recursive_dir(monkeypatch):
     """Score a directory recursively."""
-    out, _, code = run_main(["-q", "-R", "-k", "dog", str(FIXTURES)], monkeypatch)
+    out, _, code = run_main(
+        ["-q", "--no-cache", "-R", "-k", "dog", str(FIXTURES)], monkeypatch,
+    )
     assert code == 0
     assert "dog.jpg" in out
 
@@ -715,7 +937,8 @@ def test_e2e_recursive_dir(monkeypatch):
 def test_e2e_scores_mode(monkeypatch):
     """--scores prints 'score  path' lines."""
     out, _, code = run_main(
-        ["-q", "-s", "-k", "dog", str(FIXTURES / "dog.jpg")], monkeypatch,
+        ["-q", "--no-cache", "-s", "-k", "dog", str(FIXTURES / "dog.jpg")],
+        monkeypatch,
     )
     assert code == 0
     parts = out.strip().split()
@@ -727,7 +950,8 @@ def test_e2e_scores_mode(monkeypatch):
 def test_e2e_top_n(monkeypatch):
     """--top 1 limits output to a single result."""
     out, _, code = run_main(
-        ["-q", "--top", "1", "-R", "-k", "dog", str(FIXTURES)], monkeypatch,
+        ["-q", "--no-cache", "--top", "1", "-R", "-k", "dog", str(FIXTURES)],
+        monkeypatch,
     )
     assert code == 0
     assert len(out.strip().split("\n")) == 1
@@ -737,7 +961,8 @@ def test_e2e_top_n(monkeypatch):
 def test_e2e_threshold_filters(monkeypatch):
     """--threshold 1.0 filters out everything."""
     out, err, code = run_main(
-        ["-q", "-t", "1.0", "-k", "dog", str(FIXTURES / "dog.jpg")], monkeypatch,
+        ["-q", "--no-cache", "-t", "1.0", "-k", "dog", str(FIXTURES / "dog.jpg")],
+        monkeypatch,
     )
     assert code == 0
     assert "no images above threshold" in err
@@ -747,7 +972,8 @@ def test_e2e_threshold_filters(monkeypatch):
 def test_e2e_verbose(monkeypatch):
     """--verbose shows per-keyword breakdown."""
     out, _, code = run_main(
-        ["-q", "-v", "-k", "dog,cat", str(FIXTURES / "dog.jpg")], monkeypatch,
+        ["-q", "--no-cache", "-v", "-k", "dog,cat", str(FIXTURES / "dog.jpg")],
+        monkeypatch,
     )
     assert code == 0
     assert "dog:" in out
@@ -758,7 +984,7 @@ def test_e2e_verbose(monkeypatch):
 def test_e2e_status_message(monkeypatch):
     """Without -q, prints image count and keywords to stderr."""
     _, err, code = run_main(
-        ["-R", "-k", "dog", str(FIXTURES)], monkeypatch,
+        ["--no-cache", "-R", "-k", "dog", str(FIXTURES)], monkeypatch,
     )
     assert code == 0
     assert "image" in err

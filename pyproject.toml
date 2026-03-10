@@ -12,6 +12,8 @@ dependencies = [
     "torch>=2.0.0",
     "dask>=2024.5.0",
     "Pillow>=9.0.0",
+    "platformdirs>=3.0",
+    "tqdm>=4.60",
     "transformers>=4.49.0",
     "sentencepiece>=0.2.0",
 ]

@@ -57,6 +57,7 @@ def is_image(
     Uses ``im.load()`` instead of ``im.verify()`` because verify only
     checks headers -- truncated images and some video containers pass
     verify but fail when actual pixel data is decoded later.
+    See https://github.com/python-pillow/Pillow/issues/3012
     """
     if cache is not None and cache.is_not_image(
         path, path_key=path_key, file_stat=file_stat

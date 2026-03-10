@@ -27,8 +27,14 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("grape")
 
-DEFAULT_MODEL = "ViT-L-14/laion2b_s32b_b82k"
+# EVA-CLIP: Improved Training Techniques for CLIP at Scale
+# (Sun et al., 2023) https://arxiv.org/abs/2303.15389
+DEFAULT_MODEL = "EVA02-L-14/merged2b_s4b_b131k"
 
+# Prompt ensembling: average embeddings across multiple prompt templates
+# per keyword, then L2-normalize. Improves zero-shot accuracy over a
+# single template. See CLIP (Radford et al., 2021) Section 3.1.4 and
+# Appendix A. https://arxiv.org/abs/2103.00020
 DEFAULT_PROMPT_ENSEMBLE = [
     "a photo of a {}",
     "a photo of the {}",
@@ -440,6 +446,8 @@ def _score_all(
     ``like_paths`` are --like image paths.  Keeping them separate avoids
     score-dict key collisions when basenames repeat or match a keyword.
     """
+    from tqdm import tqdm
+
     from grape.search import _get_embedding
 
     image_emb, cached_items, uncached_items, scan_done = prepared
@@ -470,7 +478,9 @@ def _score_all(
     # Slow path: encode uncached images through the model one at a time.
     if uncached_items:
         log.debug("score_all: encoding %d uncached images", len(uncached_items))
-    for item in uncached_items:
+    for item in tqdm(
+        uncached_items, desc="Encoding", file=sys.stderr, disable=quiet,
+    ):
         try:
             img_emb = _get_embedding(model, item.path, cache)
             sims = (img_emb @ text_emb.T)[0]
@@ -610,9 +620,15 @@ class _ScannedImage:
 # Pure helpers (not delayed -- used inside delayed tasks or at parse time)
 # ---------------------------------------------------------------------------
 
-def parse_keywords(raw: str) -> list[str]:
-    """Split a keyword string on commas. Strips whitespace from each keyword."""
-    return [k.strip() for k in raw.split(",") if k.strip()]
+def parse_keywords(raw: str, separator: str = ",") -> list[str]:
+    """Split a keyword string on a separator. Strips whitespace from each.
+
+    If *separator* is empty, the entire string is treated as a single keyword.
+    """
+    if not separator:
+        stripped = raw.strip()
+        return [stripped] if stripped else []
+    return [k.strip() for k in raw.split(separator) if k.strip()]
 
 
 def parse_prompt_templates(raw: str) -> list[str]:
@@ -880,12 +896,20 @@ def _build_parser() -> argparse.ArgumentParser:
         )
 
     # -- Configuration -------------------------------------------------------
+    from platformdirs import user_cache_dir
+    default_cache = os.path.join(user_cache_dir("grape"), "embeddings.db")
     parser.add_argument(
         "--cache",
         metavar="PATH",
-        default=None,
+        default=default_cache,
         help="cache file for embeddings"
-             " (created if it doesn't exist)",
+             f" (default: {default_cache})",
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        default=False,
+        help="disable embedding cache",
     )
     parser.add_argument(
         "--model",
@@ -903,6 +927,12 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="TEMPLATES",
         help="comma-separated prompt templates for keyword ensembling"
              f" (default: {default_prompt_templates})",
+    )
+    parser.add_argument(
+        "--keyword-separator",
+        default=",",
+        metavar="SEP",
+        help=argparse.SUPPRESS,
     )
     return parser
 
@@ -1039,10 +1069,11 @@ def main() -> None:
             level=logging.INFO, format="%(name)s: %(message)s",
             stream=sys.stderr,
         )
-    keywords = parse_keywords(args.keywords) if args.keywords else []
+    sep = args.keyword_separator
+    keywords = parse_keywords(args.keywords, sep) if args.keywords else []
     exclude_keywords: list[str] = []
     if args.exclude:
-        exclude_keywords = parse_keywords(args.exclude)
+        exclude_keywords = parse_keywords(args.exclude, sep)
     prompt_templates = _parse_prompt_templates(parser, args.ensemble_prompts)
     model_name, pretrained = _validate_model_arg(parser, args.model)
     score_keywords = keywords + exclude_keywords
@@ -1051,12 +1082,13 @@ def main() -> None:
     if not keywords and not like_paths:
         parser.error("at least one of -k/--keywords or --like is required")
 
-    # Open cache (if requested) before scanning so find_images can
-    # skip files already known not to be images.
+    # Open cache before scanning so find_images can skip files
+    # already known not to be images.
     cache_cm: Any
-    if args.cache:
+    if not args.no_cache:
         from grape.cache import EmbeddingCache
 
+        os.makedirs(os.path.dirname(args.cache), exist_ok=True)
         cache_cm = closing(EmbeddingCache(args.cache))
     else:
         cache_cm = nullcontext()

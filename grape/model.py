@@ -5,7 +5,11 @@ Public API:
     resolve_model_id   -- stable model identifier without loading weights
     preload_weights    -- kick off background weight read for fast startup
 
-This module contains some crazy hacks to recude latency.
+Uses OpenCLIP (Cherti et al., 2023) for model loading and inference.
+https://arxiv.org/abs/2212.07143
+https://github.com/mlfoundations/open_clip
+
+This module contains some crazy hacks to reduce latency.
 """
 
 # The bottom half of this file is startup hacks. They are ugly but save ~2s
@@ -27,13 +31,6 @@ from PIL import Image
 
 from grape.hf_cache import WEIGHT_FILENAMES as _WEIGHT_FILENAMES
 from grape.hf_cache import cached_file_from_repo as _cached_file_from_repo
-
-# Default to offline HF Hub access in this process to avoid unexpected
-# network latency during model startup. This only applies when the caller
-# did not already set `HF_HUB_OFFLINE` in the environment.
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
-
-
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -112,11 +109,12 @@ class CLIPModel:
         pretrained: str,
         state_dict: dict,
     ) -> None:
-        """Load model via meta device + pre-loaded state dict.
+        """Load model using a pre-read state dict.
 
-        See _MetaDeviceLoader docstring for the full explanation.
+        Skips open_clip's download/checkpoint logic by constructing the
+        model with load_weights=False and assigning the pre-loaded tensors.
         """
-        _MetaDeviceLoader.load_into(
+        _init_from_state_dict(
             self, open_clip, model_name, pretrained, state_dict,
         )
 
@@ -210,13 +208,13 @@ def resolve_model_id(
 #   2. HF cache probing (~0.2s saved): read the HF Hub cache directory
 #      layout directly instead of going through huggingface_hub APIs.
 #
-#   3. Meta-device model init (~0.7s saved): construct the nn.Module on
-#      torch.device('meta') (no tensor allocation, ~23ms) and then
-#      assign pre-loaded safetensors weights via load_state_dict.
-#
-#   4. Background weight preload: start reading weights from disk in a
+#   3. Background weight preload: start reading weights from disk in a
 #      thread while the open_clip import is still happening, so the
 #      state dict is warm by the time we need it.
+#
+#   4. Fast init from state dict: construct the model with
+#      load_weights=False, then assign the pre-loaded state dict.
+#      Skips open_clip's download/checkpoint logic entirely.
 #
 # Each hack is brittle in a specific way (documented inline). When an
 # assumption breaks, we fall back to the normal open_clip path -- slower
@@ -422,21 +420,20 @@ def _temporary_hf_hub_offline():
     return _temporary_env("HF_HUB_OFFLINE", "1")
 
 
-# -- Hacks 3 & 4: Meta-device init + background weight preload ------------
+# -- Hacks 3 & 4: Background weight preload + fast init -------------------
 #
-# open_clip.create_model() spends ~700ms allocating random tensors that
-# get immediately overwritten by load_checkpoint(). We avoid this by:
+# open_clip's normal path downloads + loads weights synchronously inside
+# create_model_and_transforms().  We split this into two cheaper steps:
 #
 #   1. Reading the safetensors file in a background thread (preload_weights)
 #      while the open_clip import is still happening.
 #
-#   2. Constructing the model on torch.device('meta') (~23ms, no real
-#      tensors allocated) and then assigning the pre-loaded state dict
-#      via load_state_dict(assign=True) -- tensors are moved, not copied.
+#   2. Constructing the model on CPU with load_weights=False, then
+#      assigning the pre-loaded state dict via load_state_dict(assign=True).
+#      This skips open_clip's download/checkpoint logic entirely.
 #
-# The only fixup: the causal attention mask buffer is created during
-# CLIP.__init__ but not saved in checkpoints, so after meta-device
-# construction it's still a meta tensor. We rebuild it manually.
+# Float16 checkpoints (e.g. EVA02-L-14) are upcast to float32 before
+# assignment, since CPU inference expects float32 inputs.
 #
 # If the safetensors file isn't cached locally, or preload_weights wasn't
 # called, CLIPModel falls back to the normal open_clip path.
@@ -487,55 +484,47 @@ def _take_preloaded_state_dict() -> dict | None:
     return sd
 
 
-class _MetaDeviceLoader:
-    """Fast model init: meta device + pre-loaded state dict.
+def _init_from_state_dict(
+    clip: CLIPModel,
+    open_clip: Any,
+    model_name: str,
+    pretrained: str,
+    state_dict: dict,
+) -> None:
+    """Build model on CPU and load a pre-read state dict.
 
-    Constructs the model on torch.device('meta') (~23ms vs ~700ms on CPU)
-    then assigns the pre-loaded tensors as parameters. See "Hacks 3 & 4"
-    comment above for the full explanation.
+    The pretrained config specifies model-specific normalization
+    (mean/std) and resize mode.  create_model(load_weights=False)
+    does NOT apply these, so we must pass them explicitly via
+    force_preprocess_cfg.  Without this, models that use non-default
+    normalization (e.g. mean/std = 0.5 instead of ImageNet defaults)
+    produce wrong embeddings.
     """
-
-    @staticmethod
-    def load_into(
-        clip: CLIPModel,
-        open_clip: Any,
-        model_name: str,
-        pretrained: str,
-        state_dict: dict,
-    ) -> None:
-        # The pretrained config specifies model-specific normalization
-        # (mean/std) and resize mode.  create_model(load_weights=False)
-        # does NOT apply these, so we must pass them explicitly via
-        # force_preprocess_cfg.  Without this, models that use non-default
-        # normalization (e.g. mean/std = 0.5 instead of ImageNet defaults)
-        # produce wrong embeddings.
-        from open_clip.factory import merge_preprocess_kwargs
-        pt_cfg = open_clip.get_pretrained_cfg(model_name, pretrained) or {}
-        force_pp = merge_preprocess_kwargs(
-            {},
-            mean=pt_cfg.get("mean"),
-            std=pt_cfg.get("std"),
-            interpolation=pt_cfg.get("interpolation"),
-            resize_mode=pt_cfg.get("resize_mode"),
-        )
-        with torch.device("meta"):
-            model = open_clip.create_model(
-                model_name,
-                load_weights=False,
-                device="meta",
-                force_preprocess_cfg=force_pp,
-            )
-        model.load_state_dict(state_dict, assign=True, strict=True)
-        # The causal attention mask is a non-persistent buffer created in
-        # CLIP.__init__ but absent from checkpoints. Rebuild on CPU.
-        if hasattr(model, "attn_mask"):
-            ctx_len = model.context_length
-            mask = torch.empty(ctx_len, ctx_len)
-            mask.fill_(float("-inf"))
-            mask.triu_(1)
-            model.attn_mask = mask
-        clip.model = model
-        from open_clip.transform import PreprocessCfg, image_transform_v2
-        pp_cfg = PreprocessCfg(**model.visual.preprocess_cfg)
-        clip.preprocess = image_transform_v2(pp_cfg, is_train=False)
-        clip.tokenizer = open_clip.get_tokenizer(model_name)
+    from open_clip.factory import merge_preprocess_kwargs
+    pt_cfg = open_clip.get_pretrained_cfg(model_name, pretrained) or {}
+    force_pp = merge_preprocess_kwargs(
+        {},
+        mean=pt_cfg.get("mean"),
+        std=pt_cfg.get("std"),
+        interpolation=pt_cfg.get("interpolation"),
+        resize_mode=pt_cfg.get("resize_mode"),
+    )
+    model = open_clip.create_model(
+        model_name,
+        load_weights=False,
+        device="cpu",
+        force_preprocess_cfg=force_pp,
+    )
+    # Some checkpoints store weights in float16 (e.g. EVA02-L-14).
+    # Convert to float32 before loading so all parameters match the
+    # float32 input tensors produced by the image preprocessor.
+    state_dict = {
+        k: v.float() if v.is_floating_point() else v
+        for k, v in state_dict.items()
+    }
+    model.load_state_dict(state_dict, assign=True, strict=True)
+    clip.model = model
+    from open_clip.transform import PreprocessCfg, image_transform_v2
+    pp_cfg = PreprocessCfg(**model.visual.preprocess_cfg)
+    clip.preprocess = image_transform_v2(pp_cfg, is_train=False)
+    clip.tokenizer = open_clip.get_tokenizer(model_name)

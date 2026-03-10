@@ -232,3 +232,46 @@ def test_text_embedding_same_keyword_different_templates(cache):
     )
     np.testing.assert_array_equal(got["a photo of a cat"], emb1)
     np.testing.assert_array_equal(got["a cat in the wild"], emb2)
+
+
+# --- empty-input guards ---
+
+def test_get_many_for_paths_empty_input(cache):
+    assert cache.get_many_for_paths("model-a", {}) == {}
+
+
+def test_get_text_embeddings_empty_input(cache):
+    assert cache.get_text_embeddings("model-a", []) == {}
+
+
+def test_put_text_embeddings_empty_input(cache):
+    """Empty list should be a no-op, not an error."""
+    cache.put_text_embeddings("model-a", [])
+
+
+# --- put_many ---
+
+def test_put_many_stores_and_retrieves(cache, tmp_path):
+    img1 = tmp_path / "a.jpg"
+    img2 = tmp_path / "b.jpg"
+    img1.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
+    img2.write_bytes(b"\xff\xd8\xff\xe0" + b"\x11" * 100)
+    emb1 = _rand_embedding(50)
+    emb2 = _rand_embedding(51)
+
+    cache.put_many("model-a", [
+        (img1, emb1, None, None),
+        (img2, emb2, None, None),
+    ])
+
+    got1 = cache.get(img1, "model-a")
+    got2 = cache.get(img2, "model-a")
+    assert got1 is not None
+    assert got2 is not None
+    np.testing.assert_array_equal(got1, emb1)
+    np.testing.assert_array_equal(got2, emb2)
+
+
+def test_put_many_empty_is_noop(cache):
+    """Empty list should be a no-op, not an error."""
+    cache.put_many("model-a", [])

@@ -1,6 +1,6 @@
 # grape
 
-Find images matching keywords using [CLIP](https://openai.com/research/clip).
+Find images matching keywords using [CLIP](https://arxiv.org/abs/2103.00020).
 Like grep, but for images.
 
 ```
@@ -10,6 +10,10 @@ $ grape -R -s -k sunset ~/Pictures
 0.241  ~/Pictures/hiking/mountain_view.jpg
 ```
 
+Grape caches everything aggressively: image embeddings, text embeddings,
+model information, and image detection results are all stored in a local
+SQLite database. After the first run, repeat queries are very fast.
+
 ## Install
 
 ```
@@ -17,7 +21,8 @@ pip install .
 ```
 
 Requires Python 3.10+.
-Model weights (~350 MB for the default model) are downloaded on first run.
+Model weights (~1.7 GB for the default EVA02-L-14 model) are downloaded
+on first run.
 
 To use `--view` (opens results in a native window):
 
@@ -29,46 +34,96 @@ pip install '.[view]'
 
 ```bash
 # search by keyword
-grape -k sunset photo.jpg
+grape --keywords sunset photo.jpg
 
 # multiple keywords, ranked by average similarity
-grape -k 'cat,dog' *.jpg
+grape --keywords 'cat,dog' *.jpg
 
 # recursive directory search
-grape -R -k 'golden retriever' ~/Pictures
+grape --dereference-recursive --keywords 'golden retriever' ~/Pictures
 
 # find images similar to a reference image
-grape --like reference.jpg -R ~/Pictures
+grape --dereference-recursive --like reference.jpg ~/Pictures
 
 # combine text and image queries
-grape -k dog --like my_dog.jpg -R ~/Pictures
+grape --dereference-recursive --keywords dog --like my_dog.jpg ~/Pictures
 ```
 
 ## Examples
 
 ```bash
-# show scores (-s) or full per-keyword breakdown (-v)
-grape -s -k sunset *.jpg
-grape -v -k 'cat,dog,bird' *.jpg
+# show scores (--scores) or full per-keyword breakdown (--verbose)
+grape --scores --keywords sunset *.jpg
+grape --verbose --keywords 'cat,dog,bird' *.jpg
 
 # top 5 results above a similarity threshold
-grape -n 5 -t 0.25 -k sunset -R ~/Pictures
+grape --dereference-recursive --top 5 --threshold 0.25 --keywords sunset ~/Pictures
 
 # prefer "dog", penalize "cat" (score = include_mean - exclude_mean)
-grape -k dog -x cat -R ~/Pictures
+grape --dereference-recursive --keywords dog --exclude cat ~/Pictures
 
 # multiple reference images
-grape --like ref1.jpg --like ref2.jpg -R ~/Pictures
-
-# pipe to other tools
-grape -q -print0 -k cat -R ~/Pictures | xargs -0 cp -t ~/cats/
+grape --dereference-recursive --like ref1.jpg --like ref2.jpg ~/Pictures
 
 # browse results in a GUI window
-grape --view -k sunset -R ~/Pictures
+grape --dereference-recursive --view --keywords sunset ~/Pictures
 
-# cache embeddings for fast repeat queries
-grape --cache grape.db -k sunset -R ~/Pictures
+# use a different model
+grape --dereference-recursive --model ViT-L-14/laion2b_s32b_b82k --keywords sunset ~/Pictures
+
+# copy the top 10 cat photos to a folder
+grape --dereference-recursive --quiet -print0 --top 10 --keywords cat ~/Pictures \
+  | xargs -0 cp -t ~/cats/
+
+# open the best match directly
+grape --dereference-recursive --top 1 --keywords 'golden gate bridge' ~/Pictures \
+  | xargs open
+
+# interactive selection with fzf
+grape --dereference-recursive --keywords dog ~/Pictures \
+  | fzf --preview 'chafa {}'
+
+# find semantically similar images (same subject/scene, not pixel-level)
+grape --dereference-recursive --scores --like photo.jpg ~/Pictures
+
+# find similar images, excluding a specific style
+grape --dereference-recursive --scores --like vacation.jpg --exclude 'indoor,night' ~/Pictures
+
+# only high-res results (filter with exiftool)
+grape --dereference-recursive -print0 --keywords sunset ~/Pictures \
+  | xargs -0 exiftool -if '$ImageWidth >= 1920 and $ImageHeight >= 1080' \
+    -printFormat '$Directory/$FileName'
+
+# only landscape-oriented photos
+grape --dereference-recursive -print0 --keywords mountain ~/Pictures \
+  | xargs -0 exiftool -if '$ImageWidth > $ImageHeight' \
+    -printFormat '$Directory/$FileName'
+
+# only photos taken with a specific camera
+grape --dereference-recursive -print0 --keywords portrait ~/Pictures \
+  | xargs -0 exiftool -if '$Model =~ /iPhone 15/' \
+    -printFormat '$Directory/$FileName'
+
+# only photos from 2024
+grape --dereference-recursive -print0 --keywords 'birthday party' ~/Pictures \
+  | xargs -0 exiftool -if '$DateTimeOriginal ge "2024:01:01"' \
+    -printFormat '$Directory/$FileName'
+
+# only files larger than 1 MB
+grape --dereference-recursive -print0 --keywords landscape ~/Pictures \
+  | xargs -0 find -maxdepth 0 -size +1M
+
+# only files modified in the last 7 days
+grape --dereference-recursive -print0 --keywords selfie ~/Pictures \
+  | xargs -0 find -maxdepth 0 -mtime -7
 ```
+
+**Note on `--like` and duplicates:** `--like` finds *semantically* similar
+images (same subject, scene, or style) -- not pixel-level duplicates. A
+photo and its cropped version will score high, but so will two completely
+different photos of dogs playing fetch. For finding actual duplicates, near-duplicates,
+and resized copies, use a perceptual hashing tool like
+[czkawka](https://github.com/qarmin/czkawka) instead.
 
 ## Options
 
@@ -100,7 +155,7 @@ At least one of `-k` or `--like` is required.
 | Flag | Description |
 |------|-------------|
 | `-s` | Show scores |
-| `-v` | Per-keyword score breakdown (implies `-s`) |
+| `-v` | Per-keyword score breakdown (implies `-s`); also enables debug logging |
 | `-q` | Suppress status messages on stderr |
 | `-print0` | NUL-separated output for `xargs -0` |
 | `--view` | Browse results in a GUI window (requires `pip install '.[view]'`) |
@@ -109,11 +164,32 @@ At least one of `-k` or `--like` is required.
 
 | Flag | Description |
 |------|-------------|
-| `--cache PATH` | SQLite cache for image embeddings |
-| `--model MODEL` | open_clip model/pretrained tag |
+| `--cache PATH` | SQLite cache file (default: `~/.cache/grape/embeddings.db`) |
+| `--no-cache` | Disable caching entirely |
+| `--model MODEL` | OpenCLIP model/pretrained tag (default: `EVA02-L-14/merged2b_s4b_b131k`) |
 
-Image detection is content-based (`PIL.Image.verify`), not extension-based.
+Image detection is content-based (PIL), not extension-based.
 Output paths are shell-quoted by default.
+
+## Caching
+
+Caching is on by default. The cache lives at `~/.cache/grape/embeddings.db`
+(or `$XDG_CACHE_HOME/grape/embeddings.db`) and stores:
+
+- **Image embeddings**: the expensive part. Encoding an image takes
+  ~80ms on CPU; with a warm cache, scoring is a single matrix multiply.
+- **Text embeddings**: prompt-level, so "a photo of a dog" is cached
+  once and reused across queries that include "dog".
+- **Model identity**: cached so repeat runs skip the torch/open_clip
+  import entirely (~1.5s saved).
+- **Image detection**: files identified as non-images (videos, documents,
+  etc.) are remembered and skipped on future scans.
+
+Cache entries are keyed by absolute path, file stat (size, mtime, inode),
+and model identifier. They auto-invalidate when a file changes. A fully
+warm query over thousands of images typically completes in under 50ms.
+
+Use `--no-cache` to disable, or `--cache PATH` to use a different file.
 
 ## Scoring
 
@@ -128,28 +204,31 @@ alongside text keywords.
 
 Scores are **not comparable across models**.
 
-## Caching
-
-The first run without a cache encodes every image through the model
-(~80 ms per image on CPU). With `--cache grape.db`, image embeddings
-are stored in a SQLite file. Subsequent runs against the same images
-are near-instant -- only new or changed files are re-encoded.
-
-Cache entries are keyed by absolute path, file stat, and model
-identifier. They auto-invalidate when a file's size, mtime, or inode
-changes. Image detection results are cached too, so directory scans
-get faster over time even for non-image files.
-
 ## Models
 
-The default model is `ViT-B-16/laion2b_s34b_b88k`.
+The default model is
+[EVA02-L-14](https://arxiv.org/abs/2303.15389) (`merged2b_s4b_b131k`),
+which offers strong zero-shot accuracy at moderate compute cost.
+
 Use `--model` to pick any model from the
-[open_clip pretrained registry](https://github.com/mlfoundations/open_clip):
+[OpenCLIP](https://github.com/mlfoundations/open_clip) pretrained
+registry:
 
 ```bash
+# lighter, faster
+grape --model ViT-B-32/laion2b_s34b_b79k -k sunset -R ~/Pictures
+
+# classic strong baseline
 grape --model ViT-L-14/laion2b_s32b_b82k -k sunset -R ~/Pictures
-grape --model ViT-B-32/openai -k sunset -R ~/Pictures
 ```
 
-The format is `model_name/pretrained_tag`.
-Larger models are more accurate but slower.
+The format is `model_name/pretrained_tag`. Larger models produce better
+embeddings but are slower to encode. Cached embeddings are scoped per
+model, so switching models re-encodes everything.
+
+Keywords are matched using
+[prompt ensembling](https://arxiv.org/abs/2103.00020) (Section 3.1.4):
+each keyword is expanded into multiple prompt templates
+(e.g. "a photo of a dog", "a photo of the dog"), embedded separately,
+then averaged and renormalized. This improves zero-shot accuracy over
+a single prompt.
