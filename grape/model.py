@@ -477,7 +477,11 @@ def _take_preloaded_state_dict() -> dict | None:
     global _preload_thread, _preloaded_state_dict
     if _preload_thread is None:
         return None
-    _preload_thread.join()
+    _preload_thread.join(timeout=30)
+    if _preload_thread.is_alive():
+        # Timed out waiting for background weight read; fall back to
+        # normal open_clip loading.
+        return None
     sd = _preloaded_state_dict
     _preload_thread = None
     _preloaded_state_dict = None

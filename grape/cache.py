@@ -81,13 +81,20 @@ class EmbeddingCache:
     def __init__(self, db_path: str | Path) -> None:
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        with self._lock:
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute(_CREATE_EMBEDDINGS)
-            self._conn.execute(_CREATE_NOT_IMAGES)
-            self._conn.execute(_CREATE_TEXT_EMBEDDINGS)
-            self._conn.execute(_CREATE_MODEL_IDS)
-            self._conn.commit()
+        try:
+            with self._lock:
+                self._conn.execute("PRAGMA journal_mode=WAL")
+                # Avoid "database is locked" when multiple grape processes
+                # hit the same cache file concurrently.
+                self._conn.execute("PRAGMA busy_timeout=5000")
+                self._conn.execute(_CREATE_EMBEDDINGS)
+                self._conn.execute(_CREATE_NOT_IMAGES)
+                self._conn.execute(_CREATE_TEXT_EMBEDDINGS)
+                self._conn.execute(_CREATE_MODEL_IDS)
+                self._conn.commit()
+        except sqlite3.DatabaseError:
+            self._conn.close()
+            raise
 
     def get(
         self,

@@ -1087,10 +1087,20 @@ def main() -> None:
     # already known not to be images.
     cache_cm: Any
     if not args.no_cache:
+        import sqlite3
+
         from grape.cache import EmbeddingCache
 
         os.makedirs(os.path.dirname(args.cache), exist_ok=True)
-        cache_cm = closing(EmbeddingCache(args.cache))
+        try:
+            cache_cm = closing(EmbeddingCache(args.cache))
+        except sqlite3.DatabaseError:
+            print(
+                f"grape: cache corrupted: {args.cache}\n"
+                f"grape: delete it and retry",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     else:
         cache_cm = nullcontext()
 

@@ -944,6 +944,24 @@ def test_scan_files_skips_direct_file_cached_as_not_image(tmp_path):
     cache.close()
 
 
+# --- corrupt cache ---
+
+def test_corrupt_cache_prints_message(tmp_path, monkeypatch):
+    """Corrupt cache file produces a helpful error, not a traceback."""
+    db = tmp_path / "bad.db"
+    db.write_bytes(b"not a sqlite database")
+    img = tmp_path / "img.jpg"
+    Image.new("RGB", (1, 1)).save(img, format="JPEG")
+
+    _, err, code = run_main(
+        ["-q", "--cache", str(db), "-k", "dog", str(img)],
+        monkeypatch,
+    )
+    assert code == 1
+    assert "corrupted" in err
+    assert str(db) in err
+
+
 # --- _filter_and_sort ---
 
 def test_filter_and_sort_threshold(capsys):
