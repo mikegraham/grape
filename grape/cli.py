@@ -46,10 +46,12 @@ _HTML_TEMPLATE_TEXT = """
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>grape results</title>
   <style>
     body {
       margin: 12px;
+      color-scheme: light dark;
     }
     .meta {
       font: 12px/1.3 sans-serif;
@@ -542,10 +544,9 @@ def _filter_and_sort(
             file=sys.stderr,
         )
 
-    if exclude_keywords:
-        _apply_excluded_keywords(
-            results, keywords, exclude_keywords,
-        )
+    _apply_excluded_keywords(
+        results, keywords, exclude_keywords,
+    )
 
     results.sort(key=lambda r: r.score, reverse=True)
 
