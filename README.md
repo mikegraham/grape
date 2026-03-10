@@ -10,6 +10,8 @@ $ grape -R -s -k sunset ~/Pictures
 0.241  ~/Pictures/hiking/mountain_view.jpg
 ```
 
+<img src="docs/screenshot_view.png" alt="grape --view screenshot" width="600">
+
 Grape caches everything aggressively: image embeddings, text embeddings,
 model information, and image detection results are all stored in a local
 SQLite database. After the first run, repeat queries are very fast.
@@ -59,26 +61,26 @@ grape --scores --keywords sunset *.jpg
 grape --verbose --keywords 'cat,dog,bird' *.jpg
 
 # top 5 results above a similarity threshold
-grape -R --top 5 --threshold 0.25 --keywords sunset ~/Pictures
+grape -R -n 5 --threshold 0.25 --keywords sunset ~/Pictures
 
 # prefer "dog", penalize "cat" (score = include_mean - exclude_mean)
 grape -R --keywords dog --exclude cat ~/Pictures
 
-# multiple reference images
+# (multiple) reference images
 grape -R --like ref1.jpg --like ref2.jpg ~/Pictures
 
 # browse results in a GUI window
-grape -R --view --keywords sunset ~/Pictures
+grape -R ---keywords sunset ~/Pictures --view
 
 # use a different model
 grape -R --model ViT-L-14/laion2b_s32b_b82k --keywords sunset ~/Pictures
 
 # copy the top 10 cat photos to a folder
-grape -R --quiet -print0 --top 10 --keywords cat ~/Pictures \
+grape -R --quiet -print0 -n 10 --keywords cat ~/Pictures \
   | xargs -0 cp -t ~/cats/
 
 # open the best match directly
-grape -R --top 1 --keywords 'golden gate bridge' ~/Pictures \
+grape -R -n 1 --keywords 'golden gate bridge' ~/Pictures \
   | xargs open
 
 # interactive selection with fzf
@@ -100,8 +102,8 @@ exiftool -if '$ImageWidth >= 1920 and $ImageHeight >= 1080' \
 find ~/Pictures -mtime -7 -type f | xargs grape --keywords selfie --scores
 ```
 
-**Note on `--like` and duplicates:** `--like` finds *semantically* similar
-images (same subject, scene, or style) -- not pixel-level duplicates. A
+**Note on `--like`:** `--like` finds *semantically* similar
+images (same subject, scene, or style), not pixel-level duplicates. A
 photo and its cropped version will score high, but so will two completely
 different photos of dogs playing fetch. For finding actual duplicates, near-duplicates,
 and resized copies, use a perceptual hashing tool like
