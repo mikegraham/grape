@@ -143,6 +143,42 @@ def test_format_html_embeds_images(tmp_path):
     assert html_doc.index("0.750") < html_doc.index("<img ")
 
 
+def test_format_html_structure(tmp_path):
+    """Rendered HTML parses correctly and has the right structural bones."""
+    from html.parser import HTMLParser
+
+    images = []
+    for i in range(3):
+        p = tmp_path / f"img{i}.jpg"
+        Image.new("RGB", (1, 1)).save(p, format="JPEG")
+        images.append(p)
+    results = [
+        ScoredImage(path=p, scores={"dog": 0.5 + i * 0.1}, score=0.5 + i * 0.1)
+        for i, p in enumerate(images)
+    ]
+
+    html_doc = _format_html(results, ["dog"])
+
+    # Parses without error and collect tag counts.
+    tags: dict[str, int] = {}
+
+    class Counter(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            tags[tag] = tags.get(tag, 0) + 1
+        def handle_decl(self, decl):
+            tags["!doctype"] = tags.get("!doctype", 0) + 1
+
+    Counter().feed(html_doc)
+
+    assert tags.get("!doctype", 0) == 1, "missing doctype"
+    assert tags.get("html", 0) == 1
+    assert tags.get("head", 0) == 1
+    assert tags.get("body", 0) == 1
+    assert tags.get("style", 0) == 1
+    assert tags.get("img", 0) == len(results), "one <img> per result"
+    assert tags.get("meta", 0) >= 1, "missing <meta> tags"
+
+
 def test_format_html_verbose_shows_breakdown(tmp_path):
     image_path = tmp_path / "my photo.jpg"
     Image.new("RGB", (1, 1)).save(image_path, format="JPEG")
@@ -657,6 +693,7 @@ def test_score_all_duplicate_like_paths_keep_separate_scores():
     assert r.like_scores[0][1] != pytest.approx(r.like_scores[1][1])
 
 
+
 def test_scan_files_includes_cache_metadata(tmp_path):
     """_scan_files returns items with cache metadata for plain files."""
     image_path = tmp_path / "a.jpg"
@@ -907,88 +944,78 @@ def test_scan_files_skips_direct_file_cached_as_not_image(tmp_path):
     cache.close()
 
 
+# --- _filter_and_sort ---
+
+def test_filter_and_sort_threshold(capsys):
+    """--threshold filters results below the cutoff."""
+    from grape.cli import _filter_and_sort, _ScanDone
+    results = [
+        ScoredImage(path=Path("/a.jpg"), scores={"dog": 0.8}, score=0.8),
+        ScoredImage(path=Path("/b.jpg"), scores={"dog": 0.3}, score=0.3),
+        ScoredImage(path=Path("/c.jpg"), scores={"dog": 0.5}, score=0.5),
+    ]
+    out = _filter_and_sort(
+        (results, _ScanDone(image_count=3)),
+        ["dog"], [], [], threshold=0.4, top=None, quiet=True,
+    )
+    assert [r.score for r in out] == [0.8, 0.5]
+
+
+def test_filter_and_sort_top_n(capsys):
+    """--top limits to N highest-scoring results."""
+    from grape.cli import _filter_and_sort, _ScanDone
+    results = [
+        ScoredImage(path=Path(f"/{i}.jpg"), scores={"dog": s}, score=s)
+        for i, s in enumerate([0.3, 0.8, 0.5, 0.7])
+    ]
+    out = _filter_and_sort(
+        (results, _ScanDone(image_count=4)),
+        ["dog"], [], [], threshold=None, top=2, quiet=True,
+    )
+    assert len(out) == 2
+    assert out[0].score == 0.8
+    assert out[1].score == 0.7
+
+
+def test_filter_and_sort_status_message(capsys):
+    """Without quiet, prints image count and query to stderr."""
+    from grape.cli import _filter_and_sort, _ScanDone
+    results = [
+        ScoredImage(path=Path("/a.jpg"), scores={"sunset": 0.5}, score=0.5),
+    ]
+    _filter_and_sort(
+        (results, _ScanDone(image_count=1)),
+        ["sunset"], [], [], threshold=None, top=None, quiet=False,
+    )
+    err = capsys.readouterr().err
+    assert "1 image" in err
+    assert "sunset" in err
+
+
 # --- end-to-end with real model (slow) ---
 
 FIXTURES = Path(__file__).parent / "fixtures"
+E2E_MODEL = "ViT-B-32/laion2b_s34b_b79k"
 
 
 @pytest.mark.slow
 def test_e2e_single_file(monkeypatch):
     """Score a single file through the full CLI pipeline."""
     out, _, code = run_main(
-        ["-q", "--no-cache", "-k", "dog", str(FIXTURES / "dog.jpg")],
+        [
+            "-q",
+            "--no-cache",
+            "--model",
+            E2E_MODEL,
+            "-k",
+            "dog",
+            str(FIXTURES / "dog.jpg"),
+        ],
         monkeypatch,
     )
     assert code == 0
     assert "dog.jpg" in out
 
-
-@pytest.mark.slow
-def test_e2e_recursive_dir(monkeypatch):
-    """Score a directory recursively."""
-    out, _, code = run_main(
-        ["-q", "--no-cache", "-R", "-k", "dog", str(FIXTURES)], monkeypatch,
-    )
-    assert code == 0
-    assert "dog.jpg" in out
-
-
-@pytest.mark.slow
-def test_e2e_scores_mode(monkeypatch):
-    """--scores prints 'score  path' lines."""
-    out, _, code = run_main(
-        ["-q", "--no-cache", "-s", "-k", "dog", str(FIXTURES / "dog.jpg")],
-        monkeypatch,
-    )
-    assert code == 0
-    parts = out.strip().split()
-    assert len(parts) >= 2
-    float(parts[0])  # score should be a float
-
-
-@pytest.mark.slow
-def test_e2e_top_n(monkeypatch):
-    """--top 1 limits output to a single result."""
-    out, _, code = run_main(
-        ["-q", "--no-cache", "--top", "1", "-R", "-k", "dog", str(FIXTURES)],
-        monkeypatch,
-    )
-    assert code == 0
-    assert len(out.strip().split("\n")) == 1
-
-
-@pytest.mark.slow
-def test_e2e_threshold_filters(monkeypatch):
-    """--threshold 1.0 filters out everything."""
-    out, err, code = run_main(
-        ["-q", "--no-cache", "-t", "1.0", "-k", "dog", str(FIXTURES / "dog.jpg")],
-        monkeypatch,
-    )
-    assert code == 0
-    assert "no images above threshold" in err
-
-
-@pytest.mark.slow
-def test_e2e_verbose(monkeypatch):
-    """--verbose shows per-keyword breakdown."""
-    out, _, code = run_main(
-        ["-q", "--no-cache", "-v", "-k", "dog,cat", str(FIXTURES / "dog.jpg")],
-        monkeypatch,
-    )
-    assert code == 0
-    assert "dog:" in out
-    assert "cat:" in out
-
-
-@pytest.mark.slow
-def test_e2e_status_message(monkeypatch):
-    """Without -q, prints image count and keywords to stderr."""
-    _, err, code = run_main(
-        ["--no-cache", "-R", "-k", "dog", str(FIXTURES)], monkeypatch,
-    )
-    assert code == 0
-    assert "image" in err
-    assert "dog" in err
 
 
 @pytest.mark.slow
@@ -996,9 +1023,39 @@ def test_e2e_with_cache(tmp_path, monkeypatch):
     """--cache creates a DB and caches image embeddings."""
     db = tmp_path / "test.db"
     out, _, code = run_main(
-        ["-q", "--cache", str(db), "-k", "dog", str(FIXTURES / "dog.jpg")],
+        [
+            "-q",
+            "--model",
+            E2E_MODEL,
+            "--cache",
+            str(db),
+            "-k",
+            "dog",
+            str(FIXTURES / "dog.jpg"),
+        ],
         monkeypatch,
     )
     assert code == 0
     assert "dog.jpg" in out
     assert db.exists()
+
+
+@pytest.mark.slow
+def test_e2e_like(monkeypatch):
+    """--like finds images similar to a reference."""
+    out, _, code = run_main(
+        [
+            "-q", "--no-cache",
+            "--model", E2E_MODEL,
+            "--scores",
+            "--like", str(FIXTURES / "dog.jpg"),
+            str(FIXTURES / "cat.jpg"),
+            str(FIXTURES / "dog.jpg"),
+        ],
+        monkeypatch,
+    )
+    assert code == 0
+    lines = out.strip().splitlines()
+    assert len(lines) == 2
+    # Self-match (dog vs dog) should score highest and appear first.
+    assert "dog.jpg" in lines[0]

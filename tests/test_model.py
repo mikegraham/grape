@@ -70,25 +70,32 @@ NEGATIVE_MATCHES = [
 def test_semantic_ranking(clip_model, fixtures_dir):
     """The model should rank the right image first for most queries."""
     images = find_images(str(fixtures_dir), recursive=False)
+    checks_to_run = POSITIVE_MATCHES + NEGATIVE_MATCHES
+
+    # Batch once: encode images and query texts up front so we avoid
+    # repeatedly re-encoding the same images for every keyword.
+    image_embs = np.vstack([clip_model.encode_image(str(p)) for p in images])
+    query_texts = [query for query, _ in checks_to_run]
+    query_embs = clip_model.encode_texts(query_texts)
+    similarity = image_embs @ query_embs.T
 
     correct = 0
     details = []
     checks = []
 
-    for keyword, expected_name in POSITIVE_MATCHES:
-        results = score_images(clip_model, images, [keyword], quiet=True)
-        results.sort(key=lambda r: r.score, reverse=True)
-        top_name = results[0].path.name
+    for i, (keyword, expected_name) in enumerate(POSITIVE_MATCHES):
+        top_idx = int(np.argmax(similarity[:, i]))
+        top_name = images[top_idx].name
         ok = top_name == expected_name
         correct += ok
         checks.append(ok)
         details.append(f"  {'ok' if ok else 'MISS':4s}  +{keyword:25s} -> {top_name}"
                         + (f" (expected {expected_name})" if not ok else ""))
 
-    for keyword, wrong_name in NEGATIVE_MATCHES:
-        results = score_images(clip_model, images, [keyword], quiet=True)
-        results.sort(key=lambda r: r.score, reverse=True)
-        top_name = results[0].path.name
+    offset = len(POSITIVE_MATCHES)
+    for i, (keyword, wrong_name) in enumerate(NEGATIVE_MATCHES, start=offset):
+        top_idx = int(np.argmax(similarity[:, i]))
+        top_name = images[top_idx].name
         ok = top_name != wrong_name
         correct += ok
         checks.append(ok)
