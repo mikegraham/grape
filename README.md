@@ -24,10 +24,12 @@ Requires Python 3.10+.
 Model weights (~1.7 GB for the default EVA02-L-14 model) are downloaded
 on first run.
 
-To use `--view` (opens results in a native window):
+`--view` support (native results window) is installed by default.
 
+If you want a minimal/headless install without GUI deps:
 ```
-pip install '.[view]'
+pip install . --no-deps
+pip install open-clip-torch torch dask Pillow platformdirs tqdm transformers sentencepiece
 ```
 
 ## Quick start
@@ -40,13 +42,13 @@ grape --keywords sunset photo.jpg
 grape --keywords 'cat,dog' *.jpg
 
 # recursive directory search
-grape --dereference-recursive --keywords 'golden retriever' ~/Pictures
+grape -R --keywords 'golden retriever' ~/Pictures
 
 # find images similar to a reference image
-grape --dereference-recursive --like reference.jpg ~/Pictures
+grape -R --like reference.jpg ~/Pictures
 
 # combine text and image queries
-grape --dereference-recursive --keywords dog --like my_dog.jpg ~/Pictures
+grape -R --keywords dog --like my_dog.jpg ~/Pictures
 ```
 
 ## Examples
@@ -57,65 +59,45 @@ grape --scores --keywords sunset *.jpg
 grape --verbose --keywords 'cat,dog,bird' *.jpg
 
 # top 5 results above a similarity threshold
-grape --dereference-recursive --top 5 --threshold 0.25 --keywords sunset ~/Pictures
+grape -R --top 5 --threshold 0.25 --keywords sunset ~/Pictures
 
 # prefer "dog", penalize "cat" (score = include_mean - exclude_mean)
-grape --dereference-recursive --keywords dog --exclude cat ~/Pictures
+grape -R --keywords dog --exclude cat ~/Pictures
 
 # multiple reference images
-grape --dereference-recursive --like ref1.jpg --like ref2.jpg ~/Pictures
+grape -R --like ref1.jpg --like ref2.jpg ~/Pictures
 
 # browse results in a GUI window
-grape --dereference-recursive --view --keywords sunset ~/Pictures
+grape -R --view --keywords sunset ~/Pictures
 
 # use a different model
-grape --dereference-recursive --model ViT-L-14/laion2b_s32b_b82k --keywords sunset ~/Pictures
+grape -R --model ViT-L-14/laion2b_s32b_b82k --keywords sunset ~/Pictures
 
 # copy the top 10 cat photos to a folder
-grape --dereference-recursive --quiet -print0 --top 10 --keywords cat ~/Pictures \
+grape -R --quiet -print0 --top 10 --keywords cat ~/Pictures \
   | xargs -0 cp -t ~/cats/
 
 # open the best match directly
-grape --dereference-recursive --top 1 --keywords 'golden gate bridge' ~/Pictures \
+grape -R --top 1 --keywords 'golden gate bridge' ~/Pictures \
   | xargs open
 
 # interactive selection with fzf
-grape --dereference-recursive --keywords dog ~/Pictures \
+grape -R --keywords dog ~/Pictures \
   | fzf --preview 'chafa {}'
 
 # find semantically similar images (same subject/scene, not pixel-level)
-grape --dereference-recursive --scores --like photo.jpg ~/Pictures
+grape -R --scores --like photo.jpg ~/Pictures
 
 # find similar images, excluding a specific style
-grape --dereference-recursive --scores --like vacation.jpg --exclude 'indoor,night' ~/Pictures
+grape -R --scores --like vacation.jpg --exclude 'indoor,night' ~/Pictures
 
-# only high-res results (filter with exiftool)
-grape --dereference-recursive -print0 --keywords sunset ~/Pictures \
-  | xargs -0 exiftool -if '$ImageWidth >= 1920 and $ImageHeight >= 1080' \
-    -printFormat '$Directory/$FileName'
-
-# only landscape-oriented photos
-grape --dereference-recursive -print0 --keywords mountain ~/Pictures \
-  | xargs -0 exiftool -if '$ImageWidth > $ImageHeight' \
-    -printFormat '$Directory/$FileName'
-
-# only photos taken with a specific camera
-grape --dereference-recursive -print0 --keywords portrait ~/Pictures \
-  | xargs -0 exiftool -if '$Model =~ /iPhone 15/' \
-    -printFormat '$Directory/$FileName'
-
-# only photos from 2024
-grape --dereference-recursive -print0 --keywords 'birthday party' ~/Pictures \
-  | xargs -0 exiftool -if '$DateTimeOriginal ge "2024:01:01"' \
-    -printFormat '$Directory/$FileName'
-
-# only files larger than 1 MB
-grape --dereference-recursive -print0 --keywords landscape ~/Pictures \
-  | xargs -0 find -maxdepth 0 -size +1M
+# only high-res images (pre-filter with exiftool, then score)
+exiftool -if '$ImageWidth >= 1920 and $ImageHeight >= 1080' \
+  -printFormat '$Directory/$FileName' ~/Pictures/*.jpg \
+  | xargs grape --keywords sunset --scores
 
 # only files modified in the last 7 days
-grape --dereference-recursive -print0 --keywords selfie ~/Pictures \
-  | xargs -0 find -maxdepth 0 -mtime -7
+find ~/Pictures -mtime -7 -type f | xargs grape --keywords selfie --scores
 ```
 
 **Note on `--like` and duplicates:** `--like` finds *semantically* similar
@@ -158,7 +140,7 @@ At least one of `-k` or `--like` is required.
 | `-v` | Per-keyword score breakdown (implies `-s`); also enables debug logging |
 | `-q` | Suppress status messages on stderr |
 | `-print0` | NUL-separated output for `xargs -0` |
-| `--view` | Browse results in a GUI window (requires `pip install '.[view]'`) |
+| `--view` | Browse results in a GUI window |
 
 ### Configuration
 
