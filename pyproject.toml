@@ -16,13 +16,13 @@ dependencies = [
     "tqdm>=4.60",
     "transformers>=4.49.0",
     "sentencepiece>=0.2.0",
-]
-
-[project.optional-dependencies]
-view = [
     "Jinja2>=3.1",
     "pywebview>=6.1",
 ]
+
+[project.optional-dependencies]
+# Compatibility alias: view deps are now installed by default.
+view = []
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
@@ -44,10 +44,16 @@ addopts = [
     # coverage
     "--cov=grape",
     "--cov-report=term-missing",
-    "--cov-fail-under=50",
+    "--cov-fail-under=80",
 ]
 markers = [
     "slow: tests that download/load the CLIP model",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "log\\.(debug|info|warning|error)",
+    "pragma: no cover",
 ]
 
 # --- ruff ---
