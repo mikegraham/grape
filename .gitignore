@@ -32,4 +32,14 @@ env/
 
 # Local benchmarking artifacts
 benchmarks/
-grape_timeline_dask.py
+dask_graph.*
+grape_dask_graph.*
+/grape_timeline_*.py
+/cluster.py
+
+# Local editor / tool state
+.claude/
+.cursor/
+.aider*
+.idea/
+.vscode/
