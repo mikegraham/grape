@@ -142,22 +142,22 @@ class CLIPModel:
         return dim
 
     @torch.no_grad()
-    def encode_texts(self, texts: list[str]) -> NDArray[Any]:
+    def encode_texts(self, texts: list[str]) -> NDArray[np.float32]:
         """Encode text strings to L2-normalized embeddings. Shape: (n, dim)."""
         tokens = self.tokenizer(texts).to(self.device)
         emb = self.model.encode_text(tokens)
         emb = emb / emb.norm(dim=-1, keepdim=True)
-        result: NDArray[Any] = emb.cpu().numpy().astype(np.float32)
+        result: NDArray[np.float32] = emb.cpu().numpy().astype(np.float32)
         return result
 
     @torch.no_grad()
-    def encode_image(self, image_path: str) -> NDArray[Any]:
+    def encode_image(self, image_path: str) -> NDArray[np.float32]:
         """Encode a single image to an L2-normalized embedding. Shape: (1, dim)."""
         image = Image.open(image_path).convert("RGB")
         tensor = self.preprocess(image).unsqueeze(0).to(self.device)
         emb = self.model.encode_image(tensor)
         emb = emb / emb.norm(dim=-1, keepdim=True)
-        result: NDArray[Any] = emb.cpu().numpy().astype(np.float32)
+        result: NDArray[np.float32] = emb.cpu().numpy().astype(np.float32)
         return result
 
 

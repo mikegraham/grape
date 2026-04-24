@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple, cast
 
 import numpy as np
+from numpy.typing import NDArray
 from PIL import Image
 from tqdm import tqdm
 
@@ -178,7 +179,7 @@ def iter_images(
 def _build_result(
     path: Path,
     keywords: list[str],
-    sims: np.ndarray,
+    sims: NDArray[np.float32],
 ) -> ScoredImage:
     return ScoredImage(
         path=path,
@@ -191,7 +192,7 @@ def _get_embedding(
     model: CLIPModel,
     path: Path,
     cache: EmbeddingCache | None,
-) -> np.ndarray:
+) -> NDArray[np.float32]:
     """Encode an image, using the cache when available."""
     if cache is not None:
         cached = cache.get(path, model.model_id())
@@ -208,7 +209,7 @@ def _encode_keyword_embeddings(
     keywords: list[str],
     prompt_template: str,
     prompt_templates: list[str] | None,
-) -> np.ndarray:
+) -> NDArray[np.float32]:
     """Encode keyword prompts, optionally with prompt ensembling."""
     if prompt_templates is None:
         prompts = [prompt_template.format(kw) for kw in keywords]
@@ -229,7 +230,7 @@ def _encode_keyword_embeddings(
     merged = reshaped.mean(axis=1)
     norms = np.linalg.norm(merged, axis=1, keepdims=True)
     merged = merged / np.clip(norms, 1e-12, None)
-    return cast(np.ndarray, merged.astype(np.float32))
+    return cast(NDArray[np.float32], merged.astype(np.float32))
 
 
 def encode_keywords(
@@ -237,7 +238,7 @@ def encode_keywords(
     keywords: list[str],
     prompt_template: str = "a photo of {}",
     prompt_templates: list[str] | None = None,
-) -> np.ndarray:
+) -> NDArray[np.float32]:
     """Encode keyword prompts once for repeated image scoring."""
     return _encode_keyword_embeddings(
         model,
@@ -251,7 +252,7 @@ def score_image_with_text_embeddings(
     model: CLIPModel,
     image_path: Path,
     keywords: list[str],
-    text_emb: np.ndarray,
+    text_emb: NDArray[np.float32],
     cache: EmbeddingCache | None = None,
 ) -> ScoredImage:
     """Score a single image using precomputed keyword embeddings."""
