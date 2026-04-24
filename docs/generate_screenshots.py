@@ -10,6 +10,7 @@ Produces:
 Requirements: playwright (with firefox installed).
 """
 
+import hashlib
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,39 @@ REPO = Path(__file__).resolve().parent.parent
 FIXTURES = REPO / "tests" / "fixtures"
 DOCS = REPO / "docs"
 MODEL = "ViT-B-32/laion2b_s34b_b79k"
+
+
+def screenshot_inputs_hash() -> str:
+    """Hash of everything the rendered screenshot depends on.
+
+    If this changes, docs/screenshot_view.png is stale and must be
+    regenerated with this script.  A test (tests/test_docs.py) guards
+    against drift by comparing this hash to docs/screenshot_view.inputs.sha256.
+    """
+    h = hashlib.sha256()
+
+    # All fixture files, in sorted order.
+    for p in sorted(FIXTURES.rglob("*")):
+        if p.is_file() and not p.name.startswith("."):
+            h.update(str(p.relative_to(FIXTURES)).encode())
+            h.update(b"\0")
+            h.update(p.read_bytes())
+            h.update(b"\0")
+
+    # The HTML template used to render --view.
+    from grape.cli import _HTML_TEMPLATE_TEXT
+    h.update(b"template\0")
+    h.update(_HTML_TEMPLATE_TEXT.encode())
+
+    # The generator script itself (this file).
+    h.update(b"generator\0")
+    h.update(Path(__file__).read_bytes())
+
+    # The model used to score -- embedding changes would change results.
+    h.update(b"model\0")
+    h.update(MODEL.encode())
+
+    return h.hexdigest()
 
 
 def generate_view_screenshot() -> None:
@@ -71,7 +105,10 @@ def generate_view_screenshot() -> None:
         page.screenshot(path=str(out), full_page=True)
         browser.close()
         html_path.unlink()
+    hash_file = DOCS / "screenshot_view.inputs.sha256"
+    hash_file.write_text(screenshot_inputs_hash() + "\n")
     print(f"wrote {out}")
+    print(f"wrote {hash_file}")
 
 
 if __name__ == "__main__":
