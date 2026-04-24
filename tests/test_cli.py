@@ -12,6 +12,7 @@ from PIL import Image
 from grape.cli import (
     DEFAULT_PROMPT_ENSEMBLE,
     _apply_excluded_keywords,
+    _expand_stdin_paths,
     _format_html,
     _format_results,
     _ScannedImage,
@@ -79,6 +80,32 @@ def test_parse_keywords_empty_separator_no_split():
 
 def test_parse_keywords_empty_separator_blank_input():
     assert parse_keywords("  ", separator="") == []
+
+
+# --- _expand_stdin_paths ---
+
+def test_expand_stdin_paths_no_dash():
+    assert _expand_stdin_paths(["a.jpg", "b.jpg"]) == ["a.jpg", "b.jpg"]
+
+
+def test_expand_stdin_paths_reads_stdin(monkeypatch):
+    import io
+    monkeypatch.setattr("sys.stdin", io.StringIO("/a/one.jpg\n/b/two.jpg\n"))
+    assert _expand_stdin_paths(["-"]) == ["/a/one.jpg", "/b/two.jpg"]
+
+
+def test_expand_stdin_paths_mixed(monkeypatch):
+    import io
+    monkeypatch.setattr("sys.stdin", io.StringIO("/x.jpg\n"))
+    assert _expand_stdin_paths(["a.jpg", "-", "b.jpg"]) == [
+        "a.jpg", "/x.jpg", "b.jpg",
+    ]
+
+
+def test_expand_stdin_paths_skips_blank_lines(monkeypatch):
+    import io
+    monkeypatch.setattr("sys.stdin", io.StringIO("a.jpg\n\n\nb.jpg\n"))
+    assert _expand_stdin_paths(["-"]) == ["a.jpg", "b.jpg"]
 
 
 # --- _format_results ---

@@ -1,7 +1,7 @@
 # grape
 
-Find images matching keywords using [CLIP](https://arxiv.org/abs/2103.00020).
-Like grep, but for images.
+Find images matching keywords using [CLIP](https://arxiv.org/abs/2103.00020)
+(Radford et al., 2021). Like grep, but for images.
 
 ```
 $ grape -R -s -k sunset ~/Pictures
@@ -12,207 +12,154 @@ $ grape -R -s -k sunset ~/Pictures
 
 <img src="docs/screenshot_view.png" alt="grape --view screenshot" width="600">
 
-Grape caches everything aggressively: image embeddings, text embeddings,
-model information, and image detection results are all stored in a local
-SQLite database. After the first run, repeat queries are very fast.
-
 ## Install
 
 ```
 pip install .
 ```
 
-Requires Python 3.10+.
-Model weights (~1.7 GB for the default EVA02-L-14 model) are downloaded
-on first run.
+Python 3.10+. Model weights (~1.7 GB for the default) download on first run.
 
-`--view` support (native results window) is installed by default.
+For a headless install without the `--view` GUI deps:
 
-If you want a minimal/headless install without GUI deps:
 ```
 pip install . --no-deps
 pip install open-clip-torch torch dask Pillow platformdirs tqdm transformers sentencepiece
 ```
 
-## Quick start
+## Usage
 
-```bash
-# search by keyword
-grape --keywords sunset photo.jpg
-
-# multiple keywords, ranked by average similarity
-grape --keywords 'cat,dog' *.jpg
-
-# recursive directory search
-grape -R --keywords 'golden retriever' ~/Pictures
-
-# find images similar to a reference image
-grape -R --like reference.jpg ~/Pictures
-
-# combine text and image queries
-grape -R --keywords dog --like my_dog.jpg ~/Pictures
-```
-
-## Examples
-
-```bash
-# show scores (--scores) or full per-keyword breakdown (--verbose)
-grape --scores --keywords sunset *.jpg
-grape --verbose --keywords 'cat,dog,bird' *.jpg
-
-# top 5 results above a similarity threshold
-grape -R -n 5 --threshold 0.25 --keywords sunset ~/Pictures
-
-# prefer "dog", penalize "cat" (score = include_mean - exclude_mean)
-grape -R --keywords dog --exclude cat ~/Pictures
-
-# (multiple) reference images
-grape -R --like ref1.jpg --like ref2.jpg ~/Pictures
-
-# browse results in a GUI window
-grape -R ---keywords sunset ~/Pictures --view
-
-# use a different model
-grape -R --model ViT-L-14/laion2b_s32b_b82k --keywords sunset ~/Pictures
-
-# copy the top 10 cat photos to a folder
-grape -R --quiet -print0 -n 10 --keywords cat ~/Pictures \
-  | xargs -0 cp -t ~/cats/
-
-# open the best match directly
-grape -R -n 1 --keywords 'golden gate bridge' ~/Pictures \
-  | xargs open
-
-# interactive selection with fzf
-grape -R --keywords dog ~/Pictures \
-  | fzf --preview 'chafa {}'
-
-# find semantically similar images (same subject/scene, not pixel-level)
-grape -R --scores --like photo.jpg ~/Pictures
-
-# find similar images, excluding a specific style
-grape -R --scores --like vacation.jpg --exclude 'indoor,night' ~/Pictures
-
-# only high-res images (pre-filter with exiftool, then score)
-exiftool -if '$ImageWidth >= 1920 and $ImageHeight >= 1080' \
-  -printFormat '$Directory/$FileName' ~/Pictures/*.jpg \
-  | xargs grape --keywords sunset --scores
-
-# only files modified in the last 7 days
-find ~/Pictures -mtime -7 -type f | xargs grape --keywords selfie --scores
-```
-
-**Note on `--like`:** `--like` finds *semantically* similar
-images (same subject, scene, or style), not pixel-level duplicates. A
-photo and its cropped version will score high, but so will two completely
-different photos of dogs playing fetch. For finding actual duplicates, near-duplicates,
-and resized copies, use a perceptual hashing tool like
-[czkawka](https://github.com/qarmin/czkawka) instead.
-
-## Options
-
-### Query
-
-| Flag | Description |
-|------|-------------|
-| `-k KEYWORDS` | Comma-separated keywords to match |
-| `-x KEYWORDS` | Anti-match keywords to penalize |
-| `--like IMAGE` | Reference image for similarity search (repeatable) |
-
+Paths can be files, directories (with `-R`), or `-` to read from stdin.
 At least one of `-k` or `--like` is required.
 
-### Input
+```bash
+# text search
+grape -R -k sunset ~/Pictures
 
-| Flag | Description |
-|------|-------------|
-| `-R` | Search directories recursively, following symlinks |
+# find images similar to a reference
+grape -R --like ref.jpg ~/Pictures
 
-### Filtering
+# combine text + reference, and penalize something
+grape -R -k dog -x cat --like my_dog.jpg ~/Pictures
 
-| Flag | Description |
-|------|-------------|
-| `-t SCORE` | Only show results with score >= SCORE |
-| `-n N` | Show only top N results |
+# top 5 above a threshold, with scores
+grape -R -s -n 5 -t 0.25 -k sunset ~/Pictures
 
-### Output
+# browse results in a GUI window
+grape -R -k sunset --view ~/Pictures
 
-| Flag | Description |
-|------|-------------|
-| `-s` | Show scores |
-| `-v` | Per-keyword score breakdown (implies `-s`); also enables debug logging |
-| `-q` | Suppress status messages on stderr |
-| `-print0` | NUL-separated output for `xargs -0` |
-| `--view` | Browse results in a GUI window |
+# aesthetic ranking (skip default templating -- prompts are already full sentences)
+grape -R -n 20 --ensemble-prompts '{}' -k 'beautiful photo' -x 'ugly photo' ~/Pictures
 
-### Configuration
+# read paths from stdin
+find ~/Pictures -mtime -7 -type f | grape -k selfie -
 
-| Flag | Description |
-|------|-------------|
-| `--cache PATH` | SQLite cache file (default: `~/.cache/grape/embeddings.db`) |
-| `--no-cache` | Disable caching entirely |
-| `--model MODEL` | OpenCLIP model/pretrained tag (default: `EVA02-L-14/merged2b_s4b_b131k`) |
+# copy the top 10 cat photos to a folder
+grape -R -print0 -n 10 -k cat ~/Pictures | xargs -0 cp -t ~/cats/
 
-Image detection is content-based (PIL), not extension-based.
-Output paths are shell-quoted by default.
+# open the best match directly
+grape -R -k 'golden gate bridge' -n 1 ~/Pictures | xargs open
 
-## Caching
+# interactive selection with fzf
+grape -R -k dog ~/Pictures | fzf --preview 'chafa {}'
+```
 
-Caching is on by default. The cache lives at `~/.cache/grape/embeddings.db`
-(or `$XDG_CACHE_HOME/grape/embeddings.db`) and stores:
+Run `grape --help` for the full flag list.
 
-- **Image embeddings**: the expensive part. Encoding an image takes
-  ~80ms on CPU; with a warm cache, scoring is a single matrix multiply.
-- **Text embeddings**: prompt-level, so "a photo of a dog" is cached
-  once and reused across queries that include "dog".
-- **Model identity**: cached so repeat runs skip the torch/open_clip
-  import entirely (~1.5s saved).
-- **Image detection**: files identified as non-images (videos, documents,
-  etc.) are remembered and skipped on future scans.
+## Worked examples
 
-Cache entries are keyed by absolute path, file stat (size, mtime, inode),
-and model identifier. They auto-invalidate when a file changes. A fully
-warm query over thousands of images typically completes in under 50ms.
+**Per-keyword breakdown** (`-v`) shows how each keyword and `--like`
+reference contributes. The score on the header line is the mean.
 
-Use `--no-cache` to disable, or `--cache PATH` to use a different file.
+```
+$ grape -R -v -n 3 --keywords 'playful puppy,golden retriever' ~/Pictures
+0.342  /home/me/Pictures/family/biscuit_park.jpg
+  playful puppy: 0.301  golden retriever: 0.383
+0.298  /home/me/Pictures/family/biscuit_couch.jpg
+  playful puppy: 0.267  golden retriever: 0.329
+0.274  /home/me/Pictures/family/old_biscuit.jpg
+  playful puppy: 0.198  golden retriever: 0.350
+```
+
+**Calibrate, then threshold.** Run with `-s` first to see what scores real
+matches land at, then set `-t` just below the noise floor.
+
+```
+$ grape -R -s --keywords sunset ~/Pictures | head -5
+0.312  /home/me/Pictures/travel/santorini_evening.jpg
+0.287  /home/me/Pictures/deck_sunset.jpg
+0.244  /home/me/Pictures/travel/ocean_dusk.jpg
+0.198  /home/me/Pictures/outdoor/golden_leaves.jpg   # weak, off-topic
+$ grape -R -s -t 0.24 --keywords sunset ~/Pictures
+0.312  /home/me/Pictures/travel/santorini_evening.jpg
+0.287  /home/me/Pictures/deck_sunset.jpg
+0.244  /home/me/Pictures/travel/ocean_dusk.jpg
+```
+
+**Aesthetic ranking** uses `--exclude` to subtract the mean score of a
+contrast prompt. Scores are smaller here because both sides are competing.
+
+```
+$ grape -R -s -n 5 --ensemble-prompts '{}' \
+    --keywords 'beautiful photo' --exclude 'ugly photo' ~/travel/
+0.163  /home/me/travel/kyoto_arashiyama.jpg
+0.139  /home/me/travel/iceland_sunset.jpg
+0.127  /home/me/travel/nepal_trek.jpg
+0.109  /home/me/travel/paris_evening.jpg
+0.091  /home/me/travel/tokyo_skyline.jpg
+```
 
 ## Scoring
 
-Images are ranked by cosine similarity between CLIP embeddings.
-Scores typically land in the 0.15--0.35 range for meaningful matches --
-they are similarities, not probabilities, and even strong matches
-rarely exceed 0.35.
+Grape ranks images by cosine similarity between CLIP embeddings. Each
+image's score is:
 
-With `-x`, the score becomes `mean(include) - mean(exclude)`.
-With `--like`, reference image similarities are included in the mean
-alongside text keywords.
+    mean(similarity to --keywords and --like) - mean(similarity to --exclude)
 
-Scores are **not comparable across models**.
+Cosine similarities are **not probabilities**. Meaningful matches typically
+sit in the 0.15-0.35 range; even strong matches rarely exceed 0.35. Use `-s`
+to calibrate before choosing a `-t` threshold. Scores are **not comparable
+across models** -- switch models and the numbers shift.
+
+**`--like` matches semantics, not pixels.** Two different photos of dogs
+playing fetch score high; a photo and its crop do too. For actual duplicate
+detection, use a perceptual-hashing tool like
+[czkawka](https://github.com/qarmin/czkawka).
+
+## Caching
+
+On by default at `~/.cache/grape/embeddings.db`
+(`$XDG_CACHE_HOME/grape/embeddings.db`). Cached:
+
+- Image embeddings (the expensive part; ~80 ms per image on CPU)
+- Text embeddings, keyed by prompt
+- Model identity, so repeat runs skip the torch/open_clip import entirely
+- Image-vs-non-image detection results, so videos and docs are skipped on rescan
+
+A warm query scores thousands of images in under a second via a single
+matrix multiply. Entries are keyed by absolute path, file stat (size, mtime,
+inode), and model ID, so they auto-invalidate when files change.
+
+Use `--no-cache` to disable or `--cache PATH` to relocate.
 
 ## Models
 
-The default model is
-[EVA02-L-14](https://arxiv.org/abs/2303.15389) (`merged2b_s4b_b131k`),
-which offers strong zero-shot accuracy at moderate compute cost.
-
-Use `--model` to pick any model from the
-[OpenCLIP](https://github.com/mlfoundations/open_clip) pretrained
-registry:
+The default is
+[EVA-CLIP's EVA02-L-14](https://arxiv.org/abs/2303.15389) (Sun et al., 2023)
+pretrained as `merged2b_s4b_b131k` -- strong zero-shot accuracy at moderate
+cost. Pick any [OpenCLIP](https://github.com/mlfoundations/open_clip)
+checkpoint with `--model model_name/pretrained_tag`:
 
 ```bash
-# lighter, faster
-grape --model ViT-B-32/laion2b_s34b_b79k -k sunset -R ~/Pictures
-
-# classic strong baseline
-grape --model ViT-L-14/laion2b_s32b_b82k -k sunset -R ~/Pictures
+grape --model ViT-B-32/laion2b_s34b_b79k -R -k sunset ~/Pictures   # fast
+grape --model ViT-L-14/laion2b_s32b_b82k -R -k sunset ~/Pictures   # strong
 ```
 
-The format is `model_name/pretrained_tag`. Larger models produce better
-embeddings but are slower to encode. Cached embeddings are scoped per
-model, so switching models re-encodes everything.
+Embeddings are scoped per model; switching re-encodes everything.
 
-Keywords are matched using
-[prompt ensembling](https://arxiv.org/abs/2103.00020) (Section 3.1.4):
-each keyword is expanded into multiple prompt templates
-(e.g. "a photo of a dog", "a photo of the dog"), embedded separately,
-then averaged and renormalized. This improves zero-shot accuracy over
-a single prompt.
+Keywords are matched with
+[prompt ensembling](https://arxiv.org/abs/2103.00020) (Radford et al., 2021,
+Section 3.1.4 and Appendix A): each keyword expands into several templates
+("a photo of a {}", "a photo of the {}", ...), each is embedded, then the
+embeddings are averaged and renormalized. Improves zero-shot accuracy over
+a single prompt. Override with `--ensemble-prompts`.

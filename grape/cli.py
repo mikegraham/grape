@@ -196,8 +196,6 @@ def _encode_keywords(
     With ensembling, each keyword produces N prompts.  We cache each
     prompt individually, then average + renormalize per keyword.
     """
-    from typing import cast
-
     import numpy as np
 
     model_id = cache_context[0] if cache_context else None
@@ -254,7 +252,7 @@ def _encode_keywords(
             merged = embs.mean(axis=0, keepdims=True)
             norm = np.linalg.norm(merged)
             merged = merged / max(norm, 1e-12)
-            keyword_embs.append(cast(np.ndarray, merged.astype(np.float32)))
+            keyword_embs.append(merged.astype(np.float32))
 
     return np.vstack(keyword_embs)
 
@@ -327,6 +325,22 @@ def _resolve_and_index_cache(
     cached_index = cache.embedding_index_for_model(model_id)
     log.debug("cache index: %d image embeddings", len(cached_index))
     return model_id, cached_index
+
+
+def _expand_stdin_paths(path_args: list[str]) -> list[str]:
+    """Replace any '-' arguments with newline-delimited lines from stdin."""
+    if "-" not in path_args:
+        return path_args
+    expanded: list[str] = []
+    for p in path_args:
+        if p == "-":
+            for raw in sys.stdin:
+                line = raw.rstrip("\n\r")
+                if line:
+                    expanded.append(line)
+        else:
+            expanded.append(p)
+    return expanded
 
 
 @dask.delayed
@@ -779,22 +793,27 @@ def _format_query_summary(
 
 def _build_parser() -> argparse.ArgumentParser:
     """Construct and return the CLI parser."""
-    default_prompt_templates = ", ".join(DEFAULT_PROMPT_ENSEMBLE)
     parser = argparse.ArgumentParser(
         prog="grape",
-        description="Find images matching keywords using CLIP.",
+        description=(
+            "Find images matching keywords using CLIP.\n"
+            "\n"
+            "Each image's score is:\n"
+            "    mean(similarity to --keywords and --like)"
+            " - mean(similarity to --exclude)"
+        ),
         epilog="examples:\n"
-               "  grape -k sunset photo.jpg\n"
-               "  grape -k 'cat,dog' *.jpg\n"
-               "  grape -R -k 'golden retriever' ~/Pictures\n"
-               "  grape --like ref.jpg -R ~/Pictures\n"
-               "  grape -k dog --like ref.jpg -R ~/Pictures\n",
+               "  grape --keywords sunset photo.jpg\n"
+               "  grape -R --keywords 'cat,dog' ~/Pictures\n"
+               "  grape -R --like ref.jpg ~/Pictures\n"
+               "  grape -R --keywords dog --exclude cat ~/Pictures\n"
+               "  grape -R -n 20 --ensemble-prompts '{}'"
+               " --keywords 'beautiful photo' --exclude 'ugly photo'"
+               " --view ~/Pictures\n"
+               "  find ~/Pictures -mtime -7 | grape --keywords selfie -\n"
+               "  grape -R -print0 -n 10 --keywords cat ~/Pictures"
+               " | xargs -0 cp -t ~/cats/\n",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument(
-        "--version",
-        action="version",
-        version=f"%(prog)s {_pkg_version('grape')}",
     )
 
     # -- Positional ---------------------------------------------------------
@@ -802,7 +821,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "path",
         nargs="+",
         metavar="PATH",
-        help="image file(s) or directory (with -R)",
+        help="image file; directory (use -R to recurse); '-' to read paths from stdin",
     )
 
     # -- Query: what to search for ------------------------------------------
@@ -810,24 +829,21 @@ def _build_parser() -> argparse.ArgumentParser:
         "-k", "--keywords",
         default=None,
         metavar="KEYWORDS",
-        help="comma-separated keywords to match"
-             " (e.g. 'cat,dog' or 'golden retriever,sunset')",
+        help="comma-separated keywords to match",
     )
     parser.add_argument(
         "-x", "--exclude",
         dest="exclude",
         default=None,
         metavar="KEYWORDS",
-        help="comma-separated anti-match keywords to penalize"
-             " (score = include_mean - exclude_mean)",
+        help="comma-separated keywords to penalize",
     )
     parser.add_argument(
         "--like",
         action="append",
         default=[],
         metavar="IMAGE",
-        help="reference image to find similar images"
-             " (repeatable; combined with keyword queries)",
+        help="reference image for similarity search (repeatable)",
     )
 
     # -- Input: where to search ---------------------------------------------
@@ -845,11 +861,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         metavar="SCORE",
-        help="only show results >= SCORE"
-             " (cosine similarity, not a probability;"
-             " even strong matches rarely exceed 0.35;"
-             " scores are not comparable across models;"
-             " use -s to see scores and pick a threshold)",
+        help="only show results with score >= SCORE",
     )
     parser.add_argument(
         "-n", "--top",
@@ -874,15 +886,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-q", "--quiet",
         action="store_true",
-        help="suppress progress and status messages"
-             " on stderr",
+        help="suppress progress messages on stderr",
     )
     output_group = parser.add_mutually_exclusive_group()
     output_group.add_argument(
         "-print0",
         action="store_true",
-        help="print matching paths separated by NUL"
-             " bytes (raw paths, no shell quoting)",
+        help="NUL-separated, unquoted paths",
     )
     _has_view_deps = (
         importlib.util.find_spec("webview") is not None
@@ -892,8 +902,8 @@ def _build_parser() -> argparse.ArgumentParser:
         output_group.add_argument(
             "--view",
             action="store_true",
-            help="open results in a native webview window"
-                 " using simple HTML with <img> tags",
+            help="open results in a graphical window"
+                 " (HTML grid with thumbnails)",
         )
 
     # -- Configuration -------------------------------------------------------
@@ -903,22 +913,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "--cache",
         metavar="PATH",
         default=default_cache,
-        help="cache file for embeddings"
-             f" (default: {default_cache})",
+        help=f"embedding cache file (default: {default_cache})",
     )
     parser.add_argument(
         "--no-cache",
         action="store_true",
         default=False,
-        help="disable embedding cache",
+        help="disable caching",
     )
     parser.add_argument(
         "--model",
         default=DEFAULT_MODEL,
-        help="open_clip model/pretrained tag"
-             f" (default: {DEFAULT_MODEL});"
-             " see https://github.com/mlfoundations/open_clip"
-             " for available models",
+        metavar="NAME/PRETRAINED",
+        help=f"CLIP model (default: {DEFAULT_MODEL});"
+             " valid values at https://github.com/mlfoundations/open_clip",
     )
     parser.add_argument(
         "--ensemble-prompts",
@@ -926,14 +934,24 @@ def _build_parser() -> argparse.ArgumentParser:
         const=",".join(DEFAULT_PROMPT_ENSEMBLE),
         default=",".join(DEFAULT_PROMPT_ENSEMBLE),
         metavar="TEMPLATES",
-        help="comma-separated prompt templates for keyword ensembling"
-             f" (default: {default_prompt_templates})",
+        help="comma-separated prompt templates ('{}' is replaced with each"
+             " keyword); the keyword's final embedding is the normalized mean"
+             " across templates. Pass a single template (e.g. '{}') to"
+             " disable ensembling. Default:"
+             f" {','.join(DEFAULT_PROMPT_ENSEMBLE)}",
     )
     parser.add_argument(
         "--keyword-separator",
         default=",",
         metavar="SEP",
         help=argparse.SUPPRESS,
+    )
+
+    # -- Meta ----------------------------------------------------------------
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {_pkg_version('grape')}",
     )
     return parser
 
@@ -1115,7 +1133,7 @@ def main() -> None:
             prompt_templates=prompt_templates,
             cache=cache,
             quiet=args.quiet,
-            path_args=args.path,
+            path_args=_expand_stdin_paths(args.path),
             recursive=args.recursive,
             threshold=args.threshold,
             top=args.top,
