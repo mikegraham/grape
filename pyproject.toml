@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "grape"
+name = "grape-image-search"
 version = "0.1.0"
 description = "Find images matching keywords using CLIP. Like grep, but for images."
 readme = "README.md"

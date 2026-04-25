@@ -15,7 +15,7 @@ $ grape -R -s -k sunset ~/Pictures
 ## Install
 
 ```
-pip install .
+pip install grape-image-search
 ```
 
 Python 3.10+. Model weights (~1.7 GB for the default) download on first run.
@@ -23,7 +23,7 @@ Python 3.10+. Model weights (~1.7 GB for the default) download on first run.
 For a headless install without the `--view` GUI deps:
 
 ```
-pip install . --no-deps
+pip install grape-image-search --no-deps
 pip install open-clip-torch torch dask Pillow platformdirs tqdm transformers sentencepiece
 ```
 

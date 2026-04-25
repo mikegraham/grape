@@ -951,7 +951,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version",
         action="version",
-        version=f"%(prog)s {_pkg_version('grape')}",
+        version=f"%(prog)s {_pkg_version('grape-image-search')}",
     )
     return parser
 
