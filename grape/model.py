@@ -420,6 +420,38 @@ def _temporary_hf_hub_offline():
     return _temporary_env("HF_HUB_OFFLINE", "1")
 
 
+@contextmanager
+def _suppress_open_clip_no_weights_warning():
+    """Suppress open_clip's stale "no pretrained weights" warning during fast-init.
+
+    open_clip emits this warning via ``logging.warning(...)`` (root logger,
+    WARNING level) when called with ``load_weights=False``. In our fast-init
+    path the warning is technically correct at the moment it fires but stale
+    a few lines later, after we ``load_state_dict`` from preloaded weights.
+
+    The filter is narrow on three axes -- logger name, level, message
+    substring -- and is installed only for the duration of the wrapped call,
+    so it cannot accidentally drop unrelated warnings.
+    """
+    import logging
+
+    class _Filter(logging.Filter):
+        def filter(self, record):
+            return not (
+                record.name == "root"
+                and record.levelno == logging.WARNING
+                and "No pretrained weights loaded" in record.getMessage()
+            )
+
+    f = _Filter()
+    root = logging.getLogger()
+    root.addFilter(f)
+    try:
+        yield
+    finally:
+        root.removeFilter(f)
+
+
 # -- Hacks 3 & 4: Background weight preload + fast init -------------------
 #
 # open_clip's normal path downloads + loads weights synchronously inside
@@ -513,12 +545,13 @@ def _init_from_state_dict(
         interpolation=pt_cfg.get("interpolation"),
         resize_mode=pt_cfg.get("resize_mode"),
     )
-    model = open_clip.create_model(
-        model_name,
-        load_weights=False,
-        device="cpu",
-        force_preprocess_cfg=force_pp,
-    )
+    with _suppress_open_clip_no_weights_warning():
+        model = open_clip.create_model(
+            model_name,
+            load_weights=False,
+            device="cpu",
+            force_preprocess_cfg=force_pp,
+        )
     # Some checkpoints store weights in float16 (e.g. EVA02-L-14).
     # Convert to float32 before loading so all parameters match the
     # float32 input tensors produced by the image preprocessor.

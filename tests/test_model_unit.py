@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from grape.model import (
     _has_cached_weights,
+    _suppress_open_clip_no_weights_warning,
     _temporary_env,
     _temporary_hf_hub_offline,
 )
@@ -57,3 +58,32 @@ def test_temporary_hf_hub_offline_sets_and_restores(monkeypatch):
     with _temporary_hf_hub_offline():
         assert os.environ["HF_HUB_OFFLINE"] == "1"
     assert os.environ["HF_HUB_OFFLINE"] == "0"
+
+
+# --- _suppress_open_clip_no_weights_warning ---
+
+def test_suppress_filter_drops_target_message(caplog):
+    import logging
+    with caplog.at_level(logging.WARNING, logger=""):
+        with _suppress_open_clip_no_weights_warning():
+            logging.warning("No pretrained weights loaded for model 'X'.")
+    assert not any(
+        "No pretrained weights loaded" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_suppress_filter_keeps_other_root_warnings(caplog):
+    import logging
+    with caplog.at_level(logging.WARNING, logger=""):
+        with _suppress_open_clip_no_weights_warning():
+            logging.warning("a different warning")
+    assert any("a different warning" in r.getMessage() for r in caplog.records)
+
+
+def test_suppress_filter_removed_after_context_exits():
+    import logging
+    root = logging.getLogger()
+    before = list(root.filters)
+    with _suppress_open_clip_no_weights_warning():
+        assert len(root.filters) == len(before) + 1
+    assert root.filters == before
