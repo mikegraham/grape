@@ -161,23 +161,17 @@ class CLIPModel:
         """Encode an image to an L2-normalized embedding. Shape: (1, dim).
 
         Animated GIF/WEBP/APNG: sample K = min(n_frames,
-        MAX_ANIMATION_FRAMES) uniformly, encode each, L2-normalize, mean,
-        re-normalize. Matches CLIP4Clip's meanP recipe (arXiv:2104.08860).
-        Single-frame images take the original code path so embeddings
-        stay byte-identical to the previous implementation.
+        MAX_ANIMATION_FRAMES) frames uniformly, encode each, L2-normalize,
+        mean, re-normalize. Matches CLIP4Clip's meanP recipe
+        (arXiv:2104.08860). Static images go through the same path with
+        K=1 and produce byte-identical embeddings to the prior impl.
         """
         image = Image.open(image_path)
         n_frames = getattr(image, "n_frames", 1)
-        if n_frames == 1:
-            tensor = self.preprocess(image.convert("RGB")).unsqueeze(0)
-            tensor = tensor.to(self.device)
-            emb = self.model.encode_image(tensor)
-            emb = emb / emb.norm(dim=-1, keepdim=True)
-            result: NDArray[np.float32] = emb.cpu().numpy().astype(np.float32)
-            return result
-
         k = min(n_frames, MAX_ANIMATION_FRAMES)
-        indices = [round(i * (n_frames - 1) / (k - 1)) for i in range(k)]
+        # max(k-1, 1) keeps the formula well-defined when k == 1.
+        divisor = max(k - 1, 1)
+        indices = [round(i * (n_frames - 1) / divisor) for i in range(k)]
         tensors = []
         for idx in indices:
             image.seek(idx)
@@ -187,8 +181,8 @@ class CLIPModel:
         emb = emb / emb.norm(dim=-1, keepdim=True)
         mean = emb.mean(dim=0, keepdim=True)
         mean = mean / mean.norm(dim=-1, keepdim=True)
-        result_multi: NDArray[np.float32] = mean.cpu().numpy().astype(np.float32)
-        return result_multi
+        result: NDArray[np.float32] = mean.cpu().numpy().astype(np.float32)
+        return result
 
 
 def get_hf_hub(model_name: str, pretrained: str) -> str:
