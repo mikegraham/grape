@@ -12,6 +12,8 @@ from numpy.typing import NDArray
 from PIL import Image
 from tqdm import tqdm
 
+from grape.cache import stat_key_from_stat
+
 # CLIPModel is under TYPE_CHECKING so that importing search.py does
 # not pull in torch/open_clip (~2 s).  The cache-hit path never needs them.
 if TYPE_CHECKING:
@@ -20,31 +22,39 @@ if TYPE_CHECKING:
 
 
 class ImageRecord(NamedTuple):
-    path: Path
+    # ``path`` is the display string -- preserves the caller's input style,
+    # including a leading ``./`` the way ``find``/``rg``/``du`` do.  Wrapping
+    # it in ``pathlib.Path`` would normalize the prefix away.  ``path_key`` is
+    # the realpath used as the SQLite cache key.
+    path: str
     path_key: str
     file_stat: str
+
+    @classmethod
+    def from_display_path(cls, display: str) -> "ImageRecord":
+        """Build a record from a user-facing path. Resolves realpath +
+        stats the file once, so callers can't drift the cache key by
+        recomputing it inconsistently elsewhere."""
+        path_key = os.path.realpath(display)
+        return cls(
+            path=display,
+            path_key=path_key,
+            file_stat=stat_key_from_stat(os.stat(path_key)),
+        )
 
 
 @dataclass
 class ScoredImage:
-    path: Path
+    # Display string (see ImageRecord). Construct a Path locally where
+    # pathlib semantics are needed.
+    path: str
     scores: dict[str, float] = field(default_factory=dict)
     like_scores: list[tuple[str, float]] = field(default_factory=list)
     score: float = 0.0
 
 
-def _stat_key_from_stat(st: os.stat_result) -> str:
-    """Build cache invalidation key from an existing stat result."""
-    # Keep exact spacing compatible with json.dumps(list) to preserve
-    # cache-key stability while avoiding JSON encoder overhead.
-    return (
-        f"[{st.st_size}, {st.st_mtime_ns},"
-        f" {st.st_ino}, {st.st_dev}, {st.st_ctime_ns}]"
-    )
-
-
 def is_image(
-    path: Path,
+    path: str,
     cache: EmbeddingCache | None = None,
     *,
     path_key: str | None = None,
@@ -89,8 +99,8 @@ def find_images(
     directory: str,
     recursive: bool = False,
     cache: EmbeddingCache | None = None,
-) -> list[Path]:
-    """Return sorted image paths under *directory*."""
+) -> list[str]:
+    """Return sorted display paths for images under *directory*."""
     return sorted(iter_images(directory, recursive=recursive, cache=cache))
 
 
@@ -102,11 +112,16 @@ def iter_image_records(
     image_hits: set[tuple[str, str]] | None = None,
     not_image_hits: set[tuple[str, str]] | None = None,
 ) -> Iterator[ImageRecord]:
-    """Yield image records under *directory* with cache key metadata."""
-    # Canonicalize the root once so parent-directory symlinks are resolved
-    # without paying realpath cost repeatedly per discovered file.
-    root = Path(os.path.realpath(directory))
-    if not root.is_dir():
+    """Yield image records under *directory* with cache key metadata.
+
+    Display paths (``record.path``) preserve the caller's input style:
+    a relative *directory* yields relative paths, an absolute one yields
+    absolute paths.  Cache keys (``record.path_key``) always use the
+    realpath so symlink aliases, ``./`` prefixes, and the like don't
+    fragment the cache between scan modes.
+    """
+    real_root = os.path.realpath(directory)
+    if not os.path.isdir(real_root):
         return
     if image_hits is None and cache is not None:
         image_hits = cache.image_hit_index()
@@ -114,24 +129,40 @@ def iter_image_records(
         not_image_hits = cache.not_image_index()
     # Track visited real directory paths to avoid infinite loops from
     # symlink cycles (e.g. a -> b -> a).
-    seen_dirs: set[str] = {str(root)}
-    stack = [root]
+    seen_dirs: set[str] = {real_root}
+    # Each stack entry pairs a display directory (what the user sees)
+    # with the realpath we actually scandir.  Scanning the realpath
+    # avoids surprises if intermediate dirs are symlinks.
+    stack: list[tuple[str, str]] = [(directory, real_root)]
     while stack:
-        current = stack.pop()
-        with os.scandir(current) as entries:
+        display_dir, real_dir = stack.pop()
+        with os.scandir(real_dir) as entries:
             for entry in entries:
                 # Check file first to avoid calling is_dir() on every file.
                 # On large flat trees this removes a costly extra syscall.
                 if not entry.is_file():
                     if recursive and entry.is_dir():
-                        real = os.path.realpath(entry.path)
-                        if real not in seen_dirs:
-                            seen_dirs.add(real)
-                            stack.append(Path(entry.path))
+                        real_child = os.path.realpath(entry.path)
+                        if real_child not in seen_dirs:
+                            seen_dirs.add(real_child)
+                            stack.append(
+                                (
+                                    os.path.join(display_dir, entry.name),
+                                    real_child,
+                                )
+                            )
                     continue
-                path = Path(entry.path)
-                stat_key = _stat_key_from_stat(entry.stat())
-                cache_key = (entry.path, stat_key)
+                # Raw string concatenation, not Path: pathlib normalizes
+                # away "./" the way Unix tools do not.
+                display_path = os.path.join(display_dir, entry.name)
+                # entry.path has real_dir as parent, so it is the realpath
+                # of the file unless the leaf itself is a symlink.
+                if entry.is_symlink():
+                    real_path = os.path.realpath(entry.path)
+                else:
+                    real_path = entry.path
+                stat_key = stat_key_from_stat(entry.stat())
+                cache_key = (real_path, stat_key)
                 # Check not-image before image-hit: a file that was
                 # once embedded but later found to be broken (truncated,
                 # video container, etc.) must stay excluded.
@@ -139,20 +170,20 @@ def iter_image_records(
                     continue
                 if image_hits is not None and cache_key in image_hits:
                     yield ImageRecord(
-                        path=path,
-                        path_key=entry.path,
+                        path=display_path,
+                        path_key=real_path,
                         file_stat=stat_key,
                     )
                     continue
                 if is_image(
-                    path,
+                    display_path,
                     cache,
-                    path_key=entry.path,
+                    path_key=real_path,
                     file_stat=stat_key,
                 ):
                     yield ImageRecord(
-                        path=path,
-                        path_key=entry.path,
+                        path=display_path,
+                        path_key=real_path,
                         file_stat=stat_key,
                     )
 
@@ -164,8 +195,8 @@ def iter_images(
     *,
     image_hits: set[tuple[str, str]] | None = None,
     not_image_hits: set[tuple[str, str]] | None = None,
-) -> Iterator[Path]:
-    """Yield image paths under *directory* (path-only wrapper)."""
+) -> Iterator[str]:
+    """Yield display image paths under *directory* (path-only wrapper)."""
     for record in iter_image_records(
         directory,
         recursive=recursive,
@@ -177,12 +208,12 @@ def iter_images(
 
 
 def _build_result(
-    path: Path,
+    path: str,
     keywords: list[str],
     sims: NDArray[np.float32],
 ) -> ScoredImage:
     return ScoredImage(
-        path=path,
+        path=os.fspath(path),
         scores={kw: float(s) for kw, s in zip(keywords, sims)},
         score=float(sims.mean()),
     )
@@ -190,17 +221,32 @@ def _build_result(
 
 def _get_embedding(
     model: CLIPModel,
-    path: Path,
+    path: str,
     cache: EmbeddingCache | None,
+    *,
+    path_key: str | None = None,
+    file_stat: str | None = None,
 ) -> NDArray[np.float32]:
-    """Encode an image, using the cache when available."""
+    """Encode an image, using the cache when available.
+
+    When the caller already has the path's realpath and stat-token (e.g.
+    from an ``ImageRecord``), pass them through ``path_key`` / ``file_stat``
+    to avoid a redundant realpath+stat inside the cache and to prevent
+    a TOCTOU race where the file is touched between scan and encode.
+    """
     if cache is not None:
-        cached = cache.get(path, model.model_id())
+        cached = cache.get(
+            path, model.model_id(),
+            path_key=path_key, file_stat=file_stat,
+        )
         if cached is not None:
             return cached
-    emb = model.encode_image(str(path))
+    emb = model.encode_image(os.fspath(path))
     if cache is not None:
-        cache.put(path, model.model_id(), emb)
+        cache.put(
+            path, model.model_id(), emb,
+            path_key=path_key, file_stat=file_stat,
+        )
     return emb
 
 
@@ -250,7 +296,7 @@ def encode_keywords(
 
 def score_image_with_text_embeddings(
     model: CLIPModel,
-    image_path: Path,
+    image_path: str,
     keywords: list[str],
     text_emb: NDArray[np.float32],
     cache: EmbeddingCache | None = None,
@@ -263,7 +309,7 @@ def score_image_with_text_embeddings(
 
 def score_image(
     model: CLIPModel,
-    image_path: Path,
+    image_path: str,
     keywords: list[str],
     prompt_template: str = "a photo of {}",
     prompt_templates: list[str] | None = None,
@@ -287,7 +333,7 @@ def score_image(
 
 def score_images(
     model: CLIPModel,
-    image_paths: list[Path],
+    image_paths: list[str] | list[Path],
     keywords: list[str],
     prompt_template: str = "a photo of {}",
     prompt_templates: list[str] | None = None,
