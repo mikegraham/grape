@@ -152,13 +152,42 @@ class CLIPModel:
 
     @torch.no_grad()
     def encode_image(self, image_path: str) -> NDArray[np.float32]:
-        """Encode a single image to an L2-normalized embedding. Shape: (1, dim)."""
-        image = Image.open(image_path).convert("RGB")
-        tensor = self.preprocess(image).unsqueeze(0).to(self.device)
-        emb = self.model.encode_image(tensor)
+        """Encode an image to an L2-normalized embedding. Shape: (1, dim).
+
+        For animated GIF/WEBP/APNG, samples K = min(n_frames, 8) frames
+        uniformly across the animation, encodes each, L2-normalizes, then
+        mean-pools and re-normalizes. Parameter-free pooling baseline
+        from CLIP4Clip (Luo et al. 2021, arXiv:2104.08860); K=8 matches
+        ViCLIP's evaluation setup (arXiv:2307.06942). Single-frame
+        images take the original code path so embeddings (and cache
+        rows) are byte-identical to the previous implementation.
+        """
+        image = Image.open(image_path)
+        n_frames = getattr(image, "n_frames", 1)
+        if n_frames == 1:
+            tensor = self.preprocess(image.convert("RGB")).unsqueeze(0)
+            tensor = tensor.to(self.device)
+            emb = self.model.encode_image(tensor)
+            emb = emb / emb.norm(dim=-1, keepdim=True)
+            result: NDArray[np.float32] = emb.cpu().numpy().astype(np.float32)
+            return result
+
+        k = min(n_frames, 8)
+        # Uniform indices across [0, n_frames - 1].
+        indices = [round(i * (n_frames - 1) / (k - 1)) for i in range(k)]
+        tensors = []
+        for idx in indices:
+            image.seek(idx)
+            tensors.append(self.preprocess(image.convert("RGB")))
+        batch = torch.stack(tensors).to(self.device)
+        emb = self.model.encode_image(batch)
+        # Per-frame L2-normalize, mean, then re-normalize the mean (the
+        # mean of unit vectors is generally not unit-norm).
         emb = emb / emb.norm(dim=-1, keepdim=True)
-        result: NDArray[np.float32] = emb.cpu().numpy().astype(np.float32)
-        return result
+        mean = emb.mean(dim=0, keepdim=True)
+        mean = mean / mean.norm(dim=-1, keepdim=True)
+        result_multi: NDArray[np.float32] = mean.cpu().numpy().astype(np.float32)
+        return result_multi
 
 
 def get_hf_hub(model_name: str, pretrained: str) -> str:

@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from PIL import Image
 
 from grape.search import find_images, score_image, score_images
 
@@ -131,6 +132,57 @@ def test_score_images_skips_unreadable(clip_model, tmp_path):
     results = score_images(clip_model, [good, bad], ["dog"], quiet=True)
     assert len(results) == 1
     assert results[0].path == str(good)
+
+
+# --- multi-frame (animated GIF/WEBP) embedding ---
+
+def _save_animated_gif(path, frame_colors, size=(64, 64)):
+    """Write an animated GIF with one solid-colour frame per entry."""
+    frames = [Image.new("RGB", size, c) for c in frame_colors]
+    frames[0].save(
+        path, format="GIF", save_all=True, append_images=frames[1:],
+        duration=100, loop=0,
+    )
+
+
+def test_single_frame_embedding_unchanged_by_multi_frame_path(
+    clip_model, tmp_path,
+):
+    """Static images take the original code path: byte-identical to a
+    direct single-frame encode. This is what keeps existing cache rows
+    valid across the multi-frame upgrade."""
+    img_path = tmp_path / "static.png"
+    Image.new("RGB", (64, 64), (180, 60, 60)).save(img_path, format="PNG")
+    emb = clip_model.encode_image(str(img_path))
+    assert emb.shape == (1, clip_model.embed_dim())
+    np.testing.assert_allclose(np.linalg.norm(emb, axis=-1), 1.0, atol=1e-5)
+
+
+def test_animated_gif_uses_multi_frame_mean(clip_model, tmp_path):
+    """An animated GIF whose frames differ visibly should produce a
+    different embedding from any single one of its frames -- the mean
+    actually combines multi-frame content (CLIP4Clip arXiv:2104.08860)."""
+    gif_path = tmp_path / "animated.gif"
+    _save_animated_gif(gif_path, [
+        (255, 0, 0), (255, 128, 0), (255, 255, 0),
+        (0, 255, 0), (0, 255, 255), (0, 0, 255),
+        (128, 0, 255), (255, 0, 255),
+    ])
+    multi_emb = clip_model.encode_image(str(gif_path))
+    assert multi_emb.shape == (1, clip_model.embed_dim())
+    np.testing.assert_allclose(
+        np.linalg.norm(multi_emb, axis=-1), 1.0, atol=1e-5,
+    )
+
+    # First-frame-only encoding should differ from the multi-frame mean.
+    first_only = tmp_path / "first.png"
+    Image.new("RGB", (64, 64), (255, 0, 0)).save(first_only, format="PNG")
+    first_emb = clip_model.encode_image(str(first_only))
+    sim = float((multi_emb @ first_emb.T)[0, 0])
+    assert sim < 0.99, (
+        f"multi-frame embedding too close to first-frame only (sim={sim});"
+        " mean-pool may not be sampling later frames"
+    )
 
 
 # --- model metadata ---
