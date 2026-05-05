@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Pipeline scheduler swapped from `dask.delayed` to stdlib `concurrent.futures.ThreadPoolExecutor`. Same DAG, same overlap of independent roots; ~99ms of `dask` import overhead removed from every invocation. Warm-cache wall time drops ~20% (e.g. ~210ms → ~165ms on a 140-image directory). Cold-cache time is unchanged. Dependency dropped from `pyproject.toml`.
+
 ### Added
 - Animated GIF / WEBP / APNG inputs: `encode_image` now samples K = min(N, 8) uniformly-spaced frames, encodes each, and mean-pools the L2-normalized embeddings (re-normalized after the mean) instead of using only the first frame. Static (single-frame) images take the original code path so existing cache rows remain byte-identical. Method follows CLIP4Clip's parameter-free pooling baseline ([arXiv:2104.08860](https://arxiv.org/abs/2104.08860)); K=8 matches ViCLIP's evaluation default ([arXiv:2307.06942](https://arxiv.org/abs/2307.06942)).
 - `--view`: image dimensions (e.g. `1920x1080`) shown next to the filename.

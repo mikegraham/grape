@@ -6,14 +6,13 @@ import shlex
 import sys
 import tempfile
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, nullcontext
 from dataclasses import dataclass
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import dask
-from dask.threaded import get as _dask_threaded_get
 from PIL import Image, UnidentifiedImageError
 
 from grape.search import (
@@ -99,11 +98,11 @@ def _get_webview() -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Dask delayed building blocks
+# Pipeline building blocks
 #
-# Each @dask.delayed function is a node in the task graph, wired together
-# in _run_pipeline(). A single dask.compute() call runs four branches
-# concurrently on a thread pool:
+# Each function below is a node in the in-process task graph wired up by
+# _run_pipeline(), which runs the independent roots concurrently on a
+# stdlib ThreadPoolExecutor:
 #
 #   _load_model (instant) ------+-- _encode_keywords ------+
 #                                \-- _encode_like_images --+ |
@@ -112,13 +111,15 @@ def _get_webview() -> Any:
 #   _scan_files ------+--------+-- _prepare                  |
 #                                   \-- _score_all ----------+
 #
-# After dask.compute(), _filter_and_sort and _emit run on the main
+# After the graph completes, _filter_and_sort and _emit run on the main
 # thread (pywebview requires it, stdout is cleaner without interleaving).
 #
+# We used to use dask.delayed here, but dask itself takes ~99ms to import
+# -- a tax the warm-cache path can't afford. concurrent.futures has zero
+# extra import cost (stdlib) and the graph is small enough that explicit
+# Future chaining is easy to read.
+#
 # Performance notes:
-# - The scheduler is passed as a function (dask.threaded.get) not a string
-#   ("threads") to avoid a ~0.2s lazy import of dask.distributed that
-#   happens inside dask's get_scheduler() lookup.
 # - _load_model creates a _LazyModel proxy; the expensive torch/open_clip
 #   import and weight loading only happen if a downstream node actually
 #   accesses the model (i.e. cache miss).  When everything is cached,
@@ -134,7 +135,7 @@ class _LazyModel:
 
     When all embeddings (text + image) are cached, the model is never
     accessed and no heavy import happens -- keeping scan_files free
-    from GIL contention.  Thread-safe for concurrent dask tasks.
+    from GIL contention.  Thread-safe for concurrent worker threads.
     """
 
     def __init__(
@@ -165,7 +166,6 @@ class _LazyModel:
         return getattr(self._ensure_loaded(), name)
 
 
-@dask.delayed
 def _load_model(
     model_name: str,
     pretrained: str,
@@ -180,7 +180,6 @@ def _load_model(
     return _LazyModel(model_name, pretrained, quiet)
 
 
-@dask.delayed
 def _encode_keywords(
     model: "CLIPModel",
     score_keywords: list[str],
@@ -259,7 +258,6 @@ def _encode_keywords(
 
 
 
-@dask.delayed
 def _encode_like_images(
     model: "CLIPModel",
     like_paths: list[str],
@@ -286,7 +284,6 @@ def _encode_like_images(
     return np.vstack(embeddings)
 
 
-@dask.delayed
 def _combine_query_embeddings(
     text_emb: Any,
     like_emb: Any,
@@ -297,7 +294,6 @@ def _combine_query_embeddings(
     return np.vstack(parts)
 
 
-@dask.delayed
 def _resolve_and_index_cache(
     model_name: str,
     pretrained: str,
@@ -347,7 +343,6 @@ def _expand_stdin_paths(path_args: list[str]) -> list[str]:
     return expanded
 
 
-@dask.delayed
 def _scan_files(
     path_args: list[str],
     recursive: bool,
@@ -402,7 +397,6 @@ def _scan_files(
     )
 
 
-@dask.delayed
 def _prepare_cached_embeddings(
     scan_result: "tuple[list[ImageRecord], _ScanDone]",
     cache_context: tuple[str | None, dict[tuple[str, str], Any] | None],
@@ -441,7 +435,6 @@ def _prepare_cached_embeddings(
     return image_emb, cached_items, uncached_items, scan_done
 
 
-@dask.delayed
 def _score_all(
     prepared: "tuple[Any, list[ImageRecord], list[ImageRecord], _ScanDone]",
     model: "CLIPModel",
@@ -536,7 +529,7 @@ def _filter_and_sort(
 ) -> list[ScoredImage]:
     """Apply excludes, sort, threshold, top-N, and validate scan status.
 
-    Not a dask node -- runs on the main thread after dask.compute().
+    Runs on the main thread after the executor finishes.
     """
     results, scan_done = score_result
 
@@ -583,7 +576,7 @@ def _emit(
 ) -> int:
     """Format and output results on the main thread.
 
-    Not a dask node -- runs after dask.compute() returns, so pywebview
+    Runs after the pipeline finishes, so pywebview
     and stdout output happen on the main thread where they belong.
     """
     if not results:
@@ -1005,60 +998,59 @@ def _run_pipeline(
     print0: bool,
     view: bool,
 ) -> None:
-    """Build and execute the dask task graph for the full CLI pipeline."""
-    # --- Build the task graph ---
-    # Three independent roots run concurrently:
-    #   1. _load_model (instant -- creates lazy proxy)
-    #   2. _resolve_and_index_cache (fast SQLite lookup on warm cache)
-    #   3. _scan_files (IO-bound directory walk)
-    # When the cache is warm, torch/open_clip are never imported and
-    # _scan_files runs uncontested by the GIL.
-
-    # Root 1: lazy model proxy (no import, no weight loading)
-    model = _load_model(model_name, pretrained, quiet)
-
-    # Root 2: model_id resolution + cache index (SQLite only when warm)
-    cache_context = _resolve_and_index_cache(
-        model_name, pretrained, cache,
-    )
-
-    # Text keyword embeddings (None when no text keywords).
-    text_emb = (
-        _encode_keywords(
-            model, score_keywords, prompt_templates, cache_context, cache,
-        )
-        if score_keywords else None
-    )
-    # --like image embeddings (None when no --like).
-    # Depends on cache_context so we can reuse cached embeddings,
-    # ensuring --like self-matches produce exactly 1.0 similarity.
-    like_emb = (
-        _encode_like_images(model, like_paths, cache_context, cache)
-        if like_paths else None
-    )
-    # Combined query matrix: [text keywords..., like embeddings...].
-    query_emb = _combine_query_embeddings(text_emb, like_emb)
+    """Run the full CLI pipeline on a small ThreadPoolExecutor."""
     like_names = [Path(p).name for p in like_paths]
 
-    # Branch 3: file scanning (IO-bound, fully independent root)
-    scan_result = _scan_files(path_args, recursive, cache)
+    # Each dependent task is wrapped in a closure that calls .result()
+    # on its inputs -- the executor schedules Futures, workers blocked
+    # on .result() don't consume CPU. max_workers=4 matches our truly
+    # independent roots (model+resolve+scan, plus one for score_all);
+    # higher counts left idle threads competing during the encode loop
+    # and added ~9% to cold-large wall time.
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="grape") as ex:
+        # Three independent roots, started in parallel.
+        f_model = ex.submit(_load_model, model_name, pretrained, quiet)
+        f_cache_ctx = ex.submit(
+            _resolve_and_index_cache, model_name, pretrained, cache,
+        )
+        f_scan = ex.submit(_scan_files, path_args, recursive, cache)
 
-    # Runs as soon as scan + cache index are ready (no model/text dependency).
-    # The vstack of cached embeddings (~23ms at 10k images) overlaps with
-    # model loading and text encoding.
-    prepared = _prepare_cached_embeddings(scan_result, cache_context)
-
-    # Convergence: scoring needs prepared embeddings + query embeddings + model
-    score_result = _score_all(
-        prepared, model, score_keywords, like_paths, query_emb,
-        cache, quiet, verbose,
-    )
-
-    # Single compute call -- dask resolves the whole graph.
-    # Pass the get function directly to avoid dask.distributed import (~0.2s).
-    (score_result_value,) = dask.compute(
-        score_result, scheduler=_dask_threaded_get,
-    )
+        # Text keyword embeddings (None when no text keywords).
+        f_text_emb = ex.submit(
+            lambda: _encode_keywords(
+                f_model.result(), score_keywords, prompt_templates,
+                f_cache_ctx.result(), cache,
+            ),
+        ) if score_keywords else None
+        # --like image embeddings (None when no --like). Depends on
+        # cache_context so cached --like embeddings match exactly.
+        f_like_emb = ex.submit(
+            lambda: _encode_like_images(
+                f_model.result(), like_paths, f_cache_ctx.result(), cache,
+            ),
+        ) if like_paths else None
+        # Combined query matrix: [text keywords..., like embeddings...].
+        f_query = ex.submit(
+            lambda: _combine_query_embeddings(
+                f_text_emb.result() if f_text_emb is not None else None,
+                f_like_emb.result() if f_like_emb is not None else None,
+            ),
+        )
+        # vstack of cached embeddings; overlaps with model load + encoding.
+        f_prepared = ex.submit(
+            lambda: _prepare_cached_embeddings(
+                f_scan.result(), f_cache_ctx.result(),
+            ),
+        )
+        # Convergence: scoring needs prepared + query + model.
+        f_score = ex.submit(
+            lambda: _score_all(
+                f_prepared.result(), f_model.result(),
+                score_keywords, like_paths, f_query.result(),
+                cache, quiet, verbose,
+            ),
+        )
+        score_result_value = f_score.result()
 
     # Post-processing and output run on the main thread (pywebview
     # requires it, and stdout is cleaner without thread interleaving).

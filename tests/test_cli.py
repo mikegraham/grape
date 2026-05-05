@@ -5,7 +5,6 @@ import shlex
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-import dask
 import numpy as np
 import pytest
 from PIL import Image
@@ -375,31 +374,26 @@ def _stub_pipeline(monkeypatch, score=0.75):
     """Stub the delayed pipeline tasks so tests don't load the real model.
 
     Replaces _load_model, _encode_keywords, _resolve_and_index_cache,
-    and _score_all with plain @dask.delayed stubs that return
+    and _score_all with plain plain function stubs that return
     lightweight fake objects so tests don't load the real model.
     """
     import grape.cli as cli_mod
 
-    @dask.delayed
     def _fake_load_model(model_name, pretrained, quiet):
         return object()
 
-    @dask.delayed
     def _fake_encode_keywords(
         model, score_keywords, prompt_templates, cache_context, cache,
     ):
         return object()
 
-    @dask.delayed
     def _fake_resolve_and_index_cache(model_name, pretrained, cache):
         return (None, None)
 
-    @dask.delayed
     def _fake_prepare_cached_embeddings(scan_result, cache_context):
         items, scan_done = scan_result
         return (None, [], items, scan_done)
 
-    @dask.delayed
     def _fake_score_all(
         prepared, model, score_keywords, like_paths, text_emb,
         cache, quiet, verbose,
@@ -412,11 +406,9 @@ def _stub_pipeline(monkeypatch, score=0.75):
         ]
         return results, scan_done
 
-    @dask.delayed
     def _fake_encode_like_images(model, like_paths, cache_context, cache):
         return np.ones((len(like_paths), 2), dtype=np.float32)
 
-    @dask.delayed
     def _fake_combine_query_embeddings(text_emb, like_emb):
         return object()
 
@@ -566,7 +558,6 @@ def test_exclude_keywords_adjusts_output_score(tmp_path, monkeypatch):
     # Custom stub that returns different scores per keyword
     import grape.cli as cli_mod
 
-    @dask.delayed
     def _fake_score_all(
         prepared, model, score_keywords, like_paths, text_emb,
         cache, quiet, verbose,
@@ -608,7 +599,6 @@ def test_exclude_verbose_shows_not_keyword(tmp_path, monkeypatch):
 
     import grape.cli as cli_mod
 
-    @dask.delayed
     def _fake_score_all(
         prepared, model, score_keywords, like_paths, text_emb,
         cache, quiet, verbose,
@@ -639,7 +629,6 @@ def test_ensemble_prompts_uses_default_template_set(tmp_path, monkeypatch):
 
     import grape.cli as cli_mod
 
-    @dask.delayed
     def _fake_encode_keywords(
         model, score_keywords, prompt_templates, cache_context, cache,
     ):
@@ -666,7 +655,6 @@ def test_ensemble_prompts_custom_templates_override_default(tmp_path, monkeypatc
 
     import grape.cli as cli_mod
 
-    @dask.delayed
     def _fake_encode_keywords(
         model, score_keywords, prompt_templates, cache_context, cache,
     ):
@@ -744,12 +732,12 @@ def test_score_all_uses_in_memory_cache_index():
 
     prepared = _prepare_cached_embeddings(
         scan_result, cache_context,
-    ).compute()
+    )
 
     results, _done = _score_all(
         prepared, object(), ["dog"], [], text_emb,
         _NoDbCache(), True, False,
-    ).compute()
+    )
 
     assert len(results) == 1
     assert results[0].path == "/tmp/a.jpg"
@@ -801,12 +789,12 @@ def test_score_all_duplicate_like_paths_keep_separate_scores():
 
     prepared = _prepare_cached_embeddings(
         scan_result, cache_context,
-    ).compute()
+    )
 
     results, _done = _score_all(
         prepared, object(), text_keywords, like_paths, query_emb,
         _NoDbCache(), True, False,
-    ).compute()
+    )
 
     assert len(results) == 1
     r = results[0]
@@ -828,10 +816,10 @@ def test_scan_files_includes_cache_metadata(tmp_path):
 
     from grape.cli import _scan_files
 
-    # _scan_files is @dask.delayed, so .compute() to get the result
+    # _scan_files returns its tuple directly now (no dask)
     items, done = _scan_files(
         [str(image_path)], False, None,
-    ).compute()
+    )
 
     assert len(items) == 1
     item = items[0]
@@ -863,7 +851,7 @@ def test_scan_files_rejects_non_images_passed_directly(tmp_path):
 
     items, done = _scan_files(
         [str(jpg), str(mp4), str(txt)], False, None,
-    ).compute()
+    )
 
     assert done.image_count == 1
     assert items[0].path == str(jpg)
@@ -959,12 +947,12 @@ def test_score_all_skips_syntax_error():
 
     prepared = _prepare_cached_embeddings(
         scan_result, cache_context,
-    ).compute()
+    )
 
     results, _done = _score_all(
         prepared, _RaisingModel(), ["dog"], [], text_emb,
         tracking, True, False,
-    ).compute()
+    )
 
     assert len(results) == 0
     assert "/tmp/bad.png" in tracking.not_images
@@ -997,12 +985,12 @@ def test_score_all_skips_oserror_no_errno():
 
     prepared = _prepare_cached_embeddings(
         scan_result, cache_context,
-    ).compute()
+    )
 
     results, _done = _score_all(
         prepared, _RaisingModel(), ["dog"], [], text_emb,
         None, True, False,
-    ).compute()
+    )
 
     assert len(results) == 0
 
@@ -1038,13 +1026,13 @@ def test_score_all_propagates_real_oserror():
 
     prepared = _prepare_cached_embeddings(
         scan_result, cache_context,
-    ).compute()
+    )
 
     with pytest.raises(FileNotFoundError):
         _score_all(
             prepared, _RaisingModel(), ["dog"], [], text_emb,
             None, True, False,
-        ).compute()
+        )
 
 
 def test_score_all_verbose_prints_uncached_paths(capsys):
@@ -1079,12 +1067,12 @@ def test_score_all_verbose_prints_uncached_paths(capsys):
 
     prepared = _prepare_cached_embeddings(
         scan_result, cache_context,
-    ).compute()
+    )
 
     _score_all(
         prepared, _StubModel(), ["dog"], [], text_emb,
         None, True, True,
-    ).compute()
+    )
 
     err = capsys.readouterr().err
     assert "/tmp/photo-one.jpg" in err
@@ -1118,12 +1106,12 @@ def test_score_all_non_verbose_omits_uncached_paths(capsys):
 
     prepared = _prepare_cached_embeddings(
         scan_result, cache_context,
-    ).compute()
+    )
 
     _score_all(
         prepared, _StubModel(), ["dog"], [], text_emb,
         None, True, False,
-    ).compute()
+    )
 
     err = capsys.readouterr().err
     assert "/tmp/silent-photo.jpg" not in err
@@ -1146,7 +1134,7 @@ def test_scan_files_skips_direct_file_cached_as_not_image(tmp_path):
 
     items, done = _scan_files(
         [str(jpg), str(bad)], False, cache,
-    ).compute()
+    )
 
     assert done.image_count == 1
     assert items[0].path == str(jpg)

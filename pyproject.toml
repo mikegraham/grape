@@ -26,7 +26,6 @@ classifiers = [
 dependencies = [
     "open-clip-torch>=2.24.0",
     "torch>=2.0.0",
-    "dask>=2024.5.0",
     "Pillow>=9.0.0",
     "platformdirs>=3.0",
     "tqdm>=4.60",
