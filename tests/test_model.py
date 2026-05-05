@@ -185,6 +185,35 @@ def test_animated_gif_uses_multi_frame_mean(clip_model, tmp_path):
     )
 
 
+@pytest.mark.parametrize("n_frames", [3, 8, 20])
+def test_multi_frame_mean_matches_manual_computation(
+    clip_model, tmp_path, n_frames,
+):
+    """The animated-image embedding equals a manually-computed mean
+    over the expected uniformly-sampled frames -- covers N<K, N==K, N>K."""
+    from grape.model import MAX_ANIMATION_FRAMES
+    colors = [
+        (i * 13 % 256, (i * 29) % 256, (i * 47) % 256)
+        for i in range(n_frames)
+    ]
+    gif_path = tmp_path / f"{n_frames}f.gif"
+    _save_animated_gif(gif_path, colors)
+    multi_emb = clip_model.encode_image(str(gif_path))
+
+    k = min(n_frames, MAX_ANIMATION_FRAMES)
+    indices = [round(i * (n_frames - 1) / (k - 1)) for i in range(k)]
+
+    frame_embs = []
+    for j, idx in enumerate(indices):
+        p = tmp_path / f"f{j}.png"
+        Image.new("RGB", (64, 64), colors[idx]).save(p, format="PNG")
+        frame_embs.append(clip_model.encode_image(str(p)))
+    stacked = np.vstack(frame_embs)
+    expected = stacked.mean(axis=0, keepdims=True)
+    expected = expected / np.linalg.norm(expected, axis=-1, keepdims=True)
+    np.testing.assert_allclose(multi_emb, expected, atol=1e-5)
+
+
 # --- model metadata ---
 
 def test_model_id_format(clip_model):
