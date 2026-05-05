@@ -1,5 +1,7 @@
 """Tests for image discovery (no model needed)."""
 
+import os
+
 import numpy as np
 import pytest
 from PIL import Image
@@ -10,7 +12,7 @@ from grape.search import find_images, iter_image_records, score_image
 
 def test_finds_images_not_text(fixtures_dir):
     images = find_images(str(fixtures_dir), recursive=False)
-    names = {p.name for p in images}
+    names = {os.path.basename(p) for p in images}
     assert "dog.jpg" in names
     assert "cat.jpg" in names
     assert "readme.txt" not in names
@@ -18,13 +20,13 @@ def test_finds_images_not_text(fixtures_dir):
 
 def test_recursive_finds_subdirs(fixtures_dir):
     images = find_images(str(fixtures_dir), recursive=True)
-    names = {p.name for p in images}
+    names = {os.path.basename(p) for p in images}
     assert "sunset.jpg" in names
 
 
 def test_non_recursive_skips_subdirs(fixtures_dir):
     images = find_images(str(fixtures_dir), recursive=False)
-    names = {p.name for p in images}
+    names = {os.path.basename(p) for p in images}
     assert "sunset.jpg" not in names
 
 
@@ -35,7 +37,7 @@ def test_nonexistent_dir():
 
 def test_returns_sorted(fixtures_dir):
     images = find_images(str(fixtures_dir), recursive=False)
-    names = [p.name for p in images]
+    names = [os.path.basename(p) for p in images]
     assert names == sorted(names)
 
 
@@ -49,7 +51,7 @@ def test_detects_by_content_not_extension(tmp_path):
     (tmp_path / "notes.txt").write_bytes(b"hello world")
 
     images = find_images(str(tmp_path))
-    names = {p.name for p in images}
+    names = {os.path.basename(p) for p in images}
     assert "photo.dat" in names
     assert "fake.jpg" not in names
     assert "notes.txt" not in names
@@ -62,7 +64,7 @@ def test_iter_image_records_includes_cache_keys(tmp_path):
     records = list(iter_image_records(str(tmp_path)))
     assert len(records) == 1
     record = records[0]
-    assert record.path == image_path
+    assert record.path == str(image_path)
     assert record.path_key == str(image_path)
     assert isinstance(record.file_stat, str)
 
@@ -76,7 +78,7 @@ def test_find_images_caches_non_images(tmp_path):
 
     cache = EmbeddingCache(tmp_path / "test.db")
     images = find_images(str(tmp_path), cache=cache)
-    assert {p.name for p in images} == {"real.jpg"}
+    assert {os.path.basename(p) for p in images} == {"real.jpg"}
     # The non-image is now recorded
     assert cache.is_not_image(tmp_path / "data.bin")
     # Second call still returns the same results
@@ -116,7 +118,7 @@ def test_find_images_uses_embedding_cache_for_known_images(tmp_path, monkeypatch
 
     monkeypatch.setattr("grape.search.Image.open", _fail_open)
     images = find_images(str(scan_dir), cache=cache)
-    assert [p.name for p in images] == ["real.jpg"]
+    assert [os.path.basename(p) for p in images] == ["real.jpg"]
     cache.close()
 
 
@@ -144,7 +146,7 @@ def test_recursive_symlink_cycle_terminates(tmp_path):
 
     images = find_images(str(tmp_path), recursive=True)
     # The image should appear exactly once, not infinitely.
-    names = [p.name for p in images]
+    names = [os.path.basename(p) for p in images]
     assert names.count("img.jpg") == 1
 
 
@@ -156,14 +158,14 @@ def test_truncated_image_rejected(fixtures_dir):
     the scan but fail encode_image, triggering an unnecessary model load.
     """
     images = find_images(str(fixtures_dir), recursive=False)
-    names = {p.name for p in images}
+    names = {os.path.basename(p) for p in images}
     assert "truncated.jpg" not in names
 
 
 def test_mp4_rejected(fixtures_dir):
     """Video files are not images."""
     images = find_images(str(fixtures_dir), recursive=False)
-    names = {p.name for p in images}
+    names = {os.path.basename(p) for p in images}
     assert "not_an_image.mp4" not in names
 
 

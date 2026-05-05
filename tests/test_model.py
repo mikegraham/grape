@@ -3,6 +3,7 @@
 These are slow on first run (model download ~350MB).
 """
 
+import os
 import re
 import shutil
 from pathlib import Path
@@ -85,7 +86,7 @@ def test_semantic_ranking(clip_model, fixtures_dir):
 
     for i, (keyword, expected_name) in enumerate(POSITIVE_MATCHES):
         top_idx = int(np.argmax(similarity[:, i]))
-        top_name = images[top_idx].name
+        top_name = os.path.basename(images[top_idx])
         ok = top_name == expected_name
         correct += ok
         checks.append(ok)
@@ -95,7 +96,7 @@ def test_semantic_ranking(clip_model, fixtures_dir):
     offset = len(POSITIVE_MATCHES)
     for i, (keyword, wrong_name) in enumerate(NEGATIVE_MATCHES, start=offset):
         top_idx = int(np.argmax(similarity[:, i]))
-        top_name = images[top_idx].name
+        top_name = os.path.basename(images[top_idx])
         ok = top_name != wrong_name
         correct += ok
         checks.append(ok)
@@ -129,7 +130,7 @@ def test_score_images_skips_unreadable(clip_model, tmp_path):
 
     results = score_images(clip_model, [good, bad], ["dog"], quiet=True)
     assert len(results) == 1
-    assert results[0].path == good
+    assert results[0].path == str(good)
 
 
 # --- model metadata ---

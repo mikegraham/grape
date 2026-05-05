@@ -1,5 +1,6 @@
 """Tests for CLI argument parsing, formatting, and error handling."""
 
+import os
 import shlex
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -15,12 +16,11 @@ from grape.cli import (
     _expand_stdin_paths,
     _format_html,
     _format_results,
-    _ScannedImage,
     _show_in_webview,
     main,
     parse_keywords,
 )
-from grape.search import ScoredImage
+from grape.search import ImageRecord, ScoredImage
 
 
 def run_main(args, monkeypatch):
@@ -112,8 +112,8 @@ def test_expand_stdin_paths_skips_blank_lines(monkeypatch):
 
 def test_format_results_shows_score_and_path():
     results = [
-        ScoredImage(path=Path("/a/dog.jpg"), scores={"dog": 0.85}, score=0.85),
-        ScoredImage(path=Path("/a/cat.jpg"), scores={"dog": 0.42}, score=0.42),
+        ScoredImage(path="/a/dog.jpg", scores={"dog": 0.85}, score=0.85),
+        ScoredImage(path="/a/cat.jpg", scores={"dog": 0.42}, score=0.42),
     ]
     output = _format_results(results, verbose=False)
     lines = output.strip().split("\n")
@@ -126,7 +126,7 @@ def test_format_results_shows_score_and_path():
 def test_format_results_verbose_shows_breakdown():
     results = [
         ScoredImage(
-            path=Path("/a/img.jpg"),
+            path="/a/img.jpg",
             scores={"dog": 0.8, "cat": 0.4}, score=0.6,
         ),
     ]
@@ -137,7 +137,7 @@ def test_format_results_verbose_shows_breakdown():
 
 def test_apply_excluded_keywords_adjusts_score_and_labels():
     results = [
-        ScoredImage(path=Path("/a/img.jpg"), scores={"dog": 0.9, "cat": 0.2}),
+        ScoredImage(path="/a/img.jpg", scores={"dog": 0.9, "cat": 0.2}),
     ]
     _apply_excluded_keywords(results, ["dog"], ["cat"])
     assert results[0].score == pytest.approx(0.7)
@@ -147,7 +147,7 @@ def test_apply_excluded_keywords_adjusts_score_and_labels():
 
 def test_apply_excluded_keywords_with_empty_include():
     results = [
-        ScoredImage(path=Path("/a/img.jpg"), scores={"cat": 0.2}),
+        ScoredImage(path="/a/img.jpg", scores={"cat": 0.2}),
     ]
     _apply_excluded_keywords(results, [], ["cat"])
     assert results[0].score == pytest.approx(-0.2)
@@ -158,7 +158,7 @@ def test_format_html_embeds_images(tmp_path):
     image_path = tmp_path / "my photo.jpg"
     Image.new("RGB", (1, 1)).save(image_path, format="JPEG")
     results = [
-        ScoredImage(path=image_path, scores={"dog": 0.75}, score=0.75),
+        ScoredImage(path=str(image_path), scores={"dog": 0.75}, score=0.75),
     ]
 
     html_doc = _format_html(results, ["dog"])
@@ -180,7 +180,7 @@ def test_format_html_structure(tmp_path):
         Image.new("RGB", (1, 1)).save(p, format="JPEG")
         images.append(p)
     results = [
-        ScoredImage(path=p, scores={"dog": 0.5 + i * 0.1}, score=0.5 + i * 0.1)
+        ScoredImage(path=str(p), scores={"dog": 0.5 + i * 0.1}, score=0.5 + i * 0.1)
         for i, p in enumerate(images)
     ]
 
@@ -210,7 +210,11 @@ def test_format_html_verbose_shows_breakdown(tmp_path):
     image_path = tmp_path / "my photo.jpg"
     Image.new("RGB", (1, 1)).save(image_path, format="JPEG")
     results = [
-        ScoredImage(path=image_path, scores={"dog": 0.75, "cat": 0.25}, score=0.75),
+        ScoredImage(
+            path=str(image_path),
+            scores={"dog": 0.75, "cat": 0.25},
+            score=0.75,
+        ),
     ]
 
     html_doc = _format_html(results, ["dog", "cat"])
@@ -224,11 +228,14 @@ def test_format_html_shows_original_path_text(monkeypatch, tmp_path):
     image_path = Path("relative name.jpg")
     Image.new("RGB", (1, 1)).save(image_path, format="JPEG")
     results = [
-        ScoredImage(path=image_path, scores={"dog": 0.75}, score=0.75),
+        ScoredImage(path=str(image_path), scores={"dog": 0.75}, score=0.75),
     ]
 
     html_doc = _format_html(results, ["dog"])
-    assert "<p class=\"meta path\">relative name.jpg</p>" in html_doc
+    assert (
+        "<span class=\"path\""
+        " title=\"relative name.jpg\">relative name.jpg</span>"
+    ) in html_doc
     assert str((tmp_path / image_path).as_uri()) in html_doc
 
 
@@ -395,7 +402,7 @@ def _stub_pipeline(monkeypatch, score=0.75):
     @dask.delayed
     def _fake_score_all(
         prepared, model, score_keywords, like_paths, text_emb,
-        cache, quiet,
+        cache, quiet, verbose,
     ):
         _image_emb, _cached_items, uncached_items, scan_done = prepared
         results = [
@@ -439,6 +446,99 @@ def test_default_output_shell_quotes_paths(tmp_path, monkeypatch):
     assert out == f"{shlex.quote(str(image_path))}\n"
 
 
+def test_relative_file_path_kept_relative_in_output(tmp_path, monkeypatch):
+    """Relative input → relative display (cache key uses realpath separately)."""
+    image_path = tmp_path / "kitten.jpg"
+    Image.new("RGB", (1, 1)).save(image_path)
+    _stub_pipeline(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+
+    out, _, code = run_main(["-q", "-k", "dog", "kitten.jpg"], monkeypatch)
+    assert code == 0
+    assert out == "kitten.jpg\n"
+
+
+def test_recursive_relative_dir_keeps_relative_paths(tmp_path, monkeypatch):
+    """`grape -R photos` emits photos/foo.jpg, not /abs/.../photos/foo.jpg."""
+    sub = tmp_path / "photos"
+    sub.mkdir()
+    Image.new("RGB", (1, 1)).save(sub / "kitten.jpg")
+    _stub_pipeline(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+
+    out, _, code = run_main(["-q", "-R", "-k", "dog", "photos"], monkeypatch)
+    assert code == 0
+    assert out == "photos/kitten.jpg\n"
+
+
+def test_recursive_dot_prefix_preserved_like_find(tmp_path, monkeypatch):
+    """`grape -R .` emits ./foo.jpg, matching `find .` and `rg --files .`."""
+    Image.new("RGB", (1, 1)).save(tmp_path / "kitten.jpg")
+    _stub_pipeline(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+
+    out, _, code = run_main(["-q", "-R", "-k", "dog", "."], monkeypatch)
+    assert code == 0
+    assert out == "./kitten.jpg\n"
+
+
+def test_stdin_dot_prefix_preserved(tmp_path, monkeypatch):
+    """`find . | grape -` keeps the leading ./ that find emits."""
+    Image.new("RGB", (1, 1)).save(tmp_path / "kitten.jpg")
+    _stub_pipeline(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    import io
+    monkeypatch.setattr("sys.stdin", io.StringIO("./kitten.jpg\n"))
+
+    out, _, code = run_main(["-q", "-k", "dog", "-"], monkeypatch)
+    assert code == 0
+    assert out == "./kitten.jpg\n"
+
+
+def test_stdin_and_recursive_share_cache_key_through_symlink(tmp_path):
+    """`find <symlink> | grape -` and `grape -R <symlink>` share cache keys.
+
+    Regression: iter_image_records used to push the unresolved entry.path
+    onto its walk stack, so files reached through a symlinked subdirectory
+    were cached under their non-realpath display path.  Stdin mode (which
+    realpaths each file arg) then missed those cache entries and treated
+    the same file as new -- producing the symptom of stdin mode "finding"
+    files recursive mode wouldn't (because they had been silently cached
+    under a different key).
+    """
+    from grape.cache import EmbeddingCache
+    from grape.search import is_image, iter_image_records
+
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    bad = real_dir / "data.bin"
+    bad.write_bytes(b"not an image")
+
+    # /scan/link -> /real, so /scan/link/data.bin and /real/data.bin
+    # are aliases for the same physical file.
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir()
+    (scan_dir / "link").symlink_to(real_dir)
+
+    db_path = tmp_path / "cache.db"
+
+    cache = EmbeddingCache(str(db_path))
+    list(iter_image_records(str(scan_dir), recursive=True, cache=cache))
+    keys_after_recursive = cache.not_image_index()
+    cache.close()
+
+    # Mirrors the stdin path: a Path for the same file via realpath form.
+    cache = EmbeddingCache(str(db_path))
+    is_image(bad, cache=cache)
+    keys_after_stdin = cache.not_image_index()
+    cache.close()
+
+    assert keys_after_recursive == keys_after_stdin
+    assert len(keys_after_recursive) == 1
+    cached_path = next(iter(keys_after_recursive))[0]
+    assert cached_path == os.path.realpath(bad)
+
+
 def test_print0_outputs_raw_nul_terminated_paths(tmp_path, monkeypatch):
     image_path = tmp_path / "my photo.jpg"
     Image.new("RGB", (1, 1)).save(image_path)
@@ -469,7 +569,7 @@ def test_exclude_keywords_adjusts_output_score(tmp_path, monkeypatch):
     @dask.delayed
     def _fake_score_all(
         prepared, model, score_keywords, like_paths, text_emb,
-        cache, quiet,
+        cache, quiet, verbose,
     ):
         _image_emb, _cached_items, uncached_items, scan_done = prepared
         results = [
@@ -511,7 +611,7 @@ def test_exclude_verbose_shows_not_keyword(tmp_path, monkeypatch):
     @dask.delayed
     def _fake_score_all(
         prepared, model, score_keywords, like_paths, text_emb,
-        cache, quiet,
+        cache, quiet, verbose,
     ):
         _image_emb, _cached_items, uncached_items, scan_done = prepared
         results = [
@@ -629,8 +729,8 @@ def test_score_all_uses_in_memory_cache_index():
             raise AssertionError("DB batch lookup should not be called")
 
     items = [
-        _ScannedImage(
-            path=Path("/tmp/a.jpg"),
+        ImageRecord(
+            path="/tmp/a.jpg",
             path_key="/tmp/a.jpg",
             file_stat="stat-a",
         )
@@ -648,11 +748,11 @@ def test_score_all_uses_in_memory_cache_index():
 
     results, _done = _score_all(
         prepared, object(), ["dog"], [], text_emb,
-        _NoDbCache(), True,
+        _NoDbCache(), True, False,
     ).compute()
 
     assert len(results) == 1
-    assert results[0].path == Path("/tmp/a.jpg")
+    assert results[0].path == "/tmp/a.jpg"
     assert results[0].scores["dog"] == pytest.approx(1.0)
     assert results[0].score == pytest.approx(1.0)
 
@@ -676,8 +776,8 @@ def test_score_all_duplicate_like_paths_keep_separate_scores():
             raise AssertionError("DB batch lookup should not be called")
 
     items = [
-        _ScannedImage(
-            path=Path("/tmp/a.jpg"),
+        ImageRecord(
+            path="/tmp/a.jpg",
             path_key="/tmp/a.jpg",
             file_stat="stat-a",
         )
@@ -705,7 +805,7 @@ def test_score_all_duplicate_like_paths_keep_separate_scores():
 
     results, _done = _score_all(
         prepared, object(), text_keywords, like_paths, query_emb,
-        _NoDbCache(), True,
+        _NoDbCache(), True, False,
     ).compute()
 
     assert len(results) == 1
@@ -735,8 +835,8 @@ def test_scan_files_includes_cache_metadata(tmp_path):
 
     assert len(items) == 1
     item = items[0]
-    assert isinstance(item, _ScannedImage)
-    assert item.path == image_path
+    assert isinstance(item, ImageRecord)
+    assert item.path == str(image_path)
     assert item.path_key == str(image_path.resolve())
     assert item.file_stat is not None
     assert item.file_stat.startswith("[")
@@ -766,7 +866,7 @@ def test_scan_files_rejects_non_images_passed_directly(tmp_path):
     ).compute()
 
     assert done.image_count == 1
-    assert items[0].path == jpg
+    assert items[0].path == str(jpg)
 
 
 # --- _format_query_summary ---
@@ -806,7 +906,7 @@ def test_format_query_summary_no_keywords():
 def test_format_results_verbose_shows_like_scores():
     results = [
         ScoredImage(
-            path=Path("/a/img.jpg"),
+            path="/a/img.jpg",
             scores={"dog": 0.8},
             like_scores=[("/x/ref.jpg", 0.95)],
             score=0.875,
@@ -836,9 +936,9 @@ def test_score_all_skips_syntax_error():
     class _TrackingCache:
         def __init__(self):
             self.not_images = []
-        def get(self, path, model_id):
+        def get(self, path, model_id, *, path_key=None, file_stat=None):
             return None
-        def put(self, path, model_id, emb):
+        def put(self, path, model_id, emb, *, path_key=None, file_stat=None):
             pass
         def put_not_image(self, path, *, path_key=None, file_stat=None):
             self.not_images.append(str(path))
@@ -846,8 +946,8 @@ def test_score_all_skips_syntax_error():
             raise AssertionError("should not be called")
 
     items = [
-        _ScannedImage(
-            path=Path("/tmp/bad.png"),
+        ImageRecord(
+            path="/tmp/bad.png",
             path_key="/tmp/bad.png",
             file_stat="stat-bad",
         ),
@@ -863,7 +963,7 @@ def test_score_all_skips_syntax_error():
 
     results, _done = _score_all(
         prepared, _RaisingModel(), ["dog"], [], text_emb,
-        tracking, True,
+        tracking, True, False,
     ).compute()
 
     assert len(results) == 0
@@ -885,8 +985,8 @@ def test_score_all_skips_oserror_no_errno():
             raise OSError("cannot identify image file")
 
     items = [
-        _ScannedImage(
-            path=Path("/tmp/bad.jpg"),
+        ImageRecord(
+            path="/tmp/bad.jpg",
             path_key="/tmp/bad.jpg",
             file_stat="stat-bad",
         ),
@@ -901,7 +1001,7 @@ def test_score_all_skips_oserror_no_errno():
 
     results, _done = _score_all(
         prepared, _RaisingModel(), ["dog"], [], text_emb,
-        None, True,
+        None, True, False,
     ).compute()
 
     assert len(results) == 0
@@ -926,8 +1026,8 @@ def test_score_all_propagates_real_oserror():
             )
 
     items = [
-        _ScannedImage(
-            path=Path("/tmp/gone.jpg"),
+        ImageRecord(
+            path="/tmp/gone.jpg",
             path_key="/tmp/gone.jpg",
             file_stat="stat-gone",
         ),
@@ -943,8 +1043,90 @@ def test_score_all_propagates_real_oserror():
     with pytest.raises(FileNotFoundError):
         _score_all(
             prepared, _RaisingModel(), ["dog"], [], text_emb,
-            None, True,
+            None, True, False,
         ).compute()
+
+
+def test_score_all_verbose_prints_uncached_paths(capsys):
+    """Verbose mode prints each uncached file's path to stderr."""
+    from grape.cli import (
+        _prepare_cached_embeddings,
+        _ScanDone,
+        _score_all,
+    )
+
+    class _StubModel:
+        def model_id(self):
+            return "test-model"
+        def encode_image(self, path):
+            return np.array([[1.0, 0.0]], dtype=np.float32)
+
+    items = [
+        ImageRecord(
+            path="/tmp/photo-one.jpg",
+            path_key="/tmp/photo-one.jpg",
+            file_stat="stat-1",
+        ),
+        ImageRecord(
+            path="/tmp/photo-two.jpg",
+            path_key="/tmp/photo-two.jpg",
+            file_stat="stat-2",
+        ),
+    ]
+    text_emb = np.array([[1.0, 0.0]], dtype=np.float32)
+    scan_result = (items, _ScanDone(image_count=2))
+    cache_context = ("model-id", {})
+
+    prepared = _prepare_cached_embeddings(
+        scan_result, cache_context,
+    ).compute()
+
+    _score_all(
+        prepared, _StubModel(), ["dog"], [], text_emb,
+        None, True, True,
+    ).compute()
+
+    err = capsys.readouterr().err
+    assert "/tmp/photo-one.jpg" in err
+    assert "/tmp/photo-two.jpg" in err
+
+
+def test_score_all_non_verbose_omits_uncached_paths(capsys):
+    """Without -v, per-file paths are not printed during encoding."""
+    from grape.cli import (
+        _prepare_cached_embeddings,
+        _ScanDone,
+        _score_all,
+    )
+
+    class _StubModel:
+        def model_id(self):
+            return "test-model"
+        def encode_image(self, path):
+            return np.array([[1.0, 0.0]], dtype=np.float32)
+
+    items = [
+        ImageRecord(
+            path="/tmp/silent-photo.jpg",
+            path_key="/tmp/silent-photo.jpg",
+            file_stat="stat-s",
+        ),
+    ]
+    text_emb = np.array([[1.0, 0.0]], dtype=np.float32)
+    scan_result = (items, _ScanDone(image_count=1))
+    cache_context = ("model-id", {})
+
+    prepared = _prepare_cached_embeddings(
+        scan_result, cache_context,
+    ).compute()
+
+    _score_all(
+        prepared, _StubModel(), ["dog"], [], text_emb,
+        None, True, False,
+    ).compute()
+
+    err = capsys.readouterr().err
+    assert "/tmp/silent-photo.jpg" not in err
 
 
 # --- _scan_files with cached not-images ---
@@ -967,7 +1149,7 @@ def test_scan_files_skips_direct_file_cached_as_not_image(tmp_path):
     ).compute()
 
     assert done.image_count == 1
-    assert items[0].path == jpg
+    assert items[0].path == str(jpg)
     cache.close()
 
 
@@ -995,9 +1177,9 @@ def test_filter_and_sort_threshold(capsys):
     """--threshold filters results below the cutoff."""
     from grape.cli import _filter_and_sort, _ScanDone
     results = [
-        ScoredImage(path=Path("/a.jpg"), scores={"dog": 0.8}, score=0.8),
-        ScoredImage(path=Path("/b.jpg"), scores={"dog": 0.3}, score=0.3),
-        ScoredImage(path=Path("/c.jpg"), scores={"dog": 0.5}, score=0.5),
+        ScoredImage(path="/a.jpg", scores={"dog": 0.8}, score=0.8),
+        ScoredImage(path="/b.jpg", scores={"dog": 0.3}, score=0.3),
+        ScoredImage(path="/c.jpg", scores={"dog": 0.5}, score=0.5),
     ]
     out = _filter_and_sort(
         (results, _ScanDone(image_count=3)),
@@ -1010,7 +1192,7 @@ def test_filter_and_sort_top_n(capsys):
     """--top limits to N highest-scoring results."""
     from grape.cli import _filter_and_sort, _ScanDone
     results = [
-        ScoredImage(path=Path(f"/{i}.jpg"), scores={"dog": s}, score=s)
+        ScoredImage(path=f"/{i}.jpg", scores={"dog": s}, score=s)
         for i, s in enumerate([0.3, 0.8, 0.5, 0.7])
     ]
     out = _filter_and_sort(
@@ -1026,7 +1208,7 @@ def test_filter_and_sort_status_message(capsys):
     """Without quiet, prints image count and query to stderr."""
     from grape.cli import _filter_and_sort, _ScanDone
     results = [
-        ScoredImage(path=Path("/a.jpg"), scores={"sunset": 0.5}, score=0.5),
+        ScoredImage(path="/a.jpg", scores={"sunset": 0.5}, score=0.5),
     ]
     _filter_and_sort(
         (results, _ScanDone(image_count=1)),

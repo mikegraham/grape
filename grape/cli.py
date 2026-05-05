@@ -14,8 +14,10 @@ from typing import TYPE_CHECKING, Any
 
 import dask
 from dask.threaded import get as _dask_threaded_get
+from PIL import Image, UnidentifiedImageError
 
 from grape.search import (
+    ImageRecord,
     ScoredImage,
     is_image,
     iter_image_records,
@@ -46,41 +48,40 @@ _HTML_TEMPLATE_TEXT = """
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>grape results</title>
   <style>
-    body {
-      margin: 12px;
-      color-scheme: light dark;
+    /* proximity, not mandatory: small wheel scrolls don't snap. */
+    html { scroll-snap-type: y proximity; }
+    body { margin: 12px; color-scheme: light dark; font-family: sans-serif; }
+    .meta { font-size: 12px; line-height: 1.3; margin: 0; }
+    /* Space/PgDn lands on the start of each result. */
+    .path-line {
+      display: flex; align-items: baseline; gap: 8px;
+      scroll-snap-align: start;
     }
-    .meta {
-      font: 12px/1.3 sans-serif;
-      word-break: break-all;
-    }
+    /* flex: 0 1 auto so the path uses its natural width when short
+       (resolution sits right next to it) and shrinks with ellipsis
+       only when there isn't room. */
     .path {
-      margin: 0;
+      flex: 0 1 auto; min-width: 0;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
+    .res { flex: 0 0 auto; opacity: 0.6; font-size: 11px; }
     .scoreline {
-      margin: 0 0 4px 0;
-      color: #555;
-      font-size: 11px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      opacity: 0.6; font-size: 11px; margin-bottom: 4px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
-    img {
-      display: block;
-      max-width: 100%;
-      width: auto;
-      height: auto;
-      margin-bottom: 10px;
-    }
+    /* max-height: 100vh: never taller than one viewport. */
+    img { display: block; max-width: 100%; max-height: 100vh; margin-bottom: 16px; }
   </style>
 </head>
 <body>
-  <p>{{ count }} image(s) for {{ keywords }}</p>
+  <p class="meta">{{ count }} image(s) for {{ keywords }}</p>
   {% for row in rows %}
-  <p class="meta path">{{ row.path_text }}</p>
+  <p class="meta path-line">
+    <span class="path" title="{{ row.path_text }}">{{ row.path_text }}</span>
+    {% if row.resolution %}<span class="res">{{ row.resolution }}</span>{% endif %}
+  </p>
   <p class="meta scoreline" title="{{ row.score_line }}">{{ row.score_line }}</p>
   <img src="{{ row.image_src }}" alt="{{ row.path_text }}">
   {% endfor %}
@@ -277,7 +278,7 @@ def _encode_like_images(
     for p in like_paths:
         cached = None
         if cache is not None and model_id is not None:
-            cached = cache.get(Path(p), model_id)
+            cached = cache.get(p, model_id)
         if cached is not None:
             embeddings.append(cached)
         else:
@@ -336,7 +337,10 @@ def _expand_stdin_paths(path_args: list[str]) -> list[str]:
         if p == "-":
             for raw in sys.stdin:
                 line = raw.rstrip("\n\r")
-                if line:
+                # Skip NUL bytes -- a path with one would crash os.stat
+                # with embedded-null ValueError. Most likely a user
+                # piped find -print0 without xargs -0.
+                if line and "\0" not in line:
                     expanded.append(line)
         else:
             expanded.append(p)
@@ -348,7 +352,7 @@ def _scan_files(
     path_args: list[str],
     recursive: bool,
     cache: "EmbeddingCache | None",
-) -> "tuple[list[_ScannedImage], _ScanDone]":
+) -> "tuple[list[ImageRecord], _ScanDone]":
     """Discover image files from CLI paths. Independent of model loading."""
     if cache is not None:
         image_hits = cache.image_hit_index()
@@ -356,47 +360,38 @@ def _scan_files(
     else:
         image_hits = None
         not_image_hits = None
-    items: list[_ScannedImage] = []
+    items: list[ImageRecord] = []
     error_message: str | None = None
 
     for p in path_args:
-        target = Path(p)
-        if target.is_file():
-            path_key = os.path.realpath(target)
-            st = os.stat(path_key)
-            file_stat = (
-                f"[{st.st_size}, {st.st_mtime_ns},"
-                f" {st.st_ino}, {st.st_dev}, {st.st_ctime_ns}]"
-            )
-            cache_key = (path_key, file_stat)
+        # Use os.path here, not pathlib: pathlib normalizes "./" away,
+        # but `find`/`rg`/`du` (and now grape) preserve the caller's
+        # input style verbatim.
+        if os.path.isfile(p):
+            record = ImageRecord.from_display_path(p)
+            cache_key = (record.path_key, record.file_stat)
             if not_image_hits is not None and cache_key in not_image_hits:
                 continue
             if (
                 image_hits is None or cache_key not in image_hits
             ) and not is_image(
-                target, cache, path_key=path_key, file_stat=file_stat,
+                record.path, cache,
+                path_key=record.path_key, file_stat=record.file_stat,
             ):
                 continue
-            items.append(_ScannedImage(
-                path=target, path_key=path_key, file_stat=file_stat,
-            ))
+            items.append(record)
             continue
-        if target.is_dir():
+        if os.path.isdir(p):
             if not recursive:
                 print(f"grape: {p}: Is a directory", file=sys.stderr)
                 continue
-            for record in iter_image_records(
-                str(target),
+            items.extend(iter_image_records(
+                p,
                 recursive=True,
                 cache=cache,
                 image_hits=image_hits,
                 not_image_hits=not_image_hits,
-            ):
-                items.append(_ScannedImage(
-                    path=record.path,
-                    path_key=record.path_key,
-                    file_stat=record.file_stat,
-                ))
+            ))
             continue
         error_message = f"grape: {p}: No such file or directory"
         break
@@ -409,9 +404,9 @@ def _scan_files(
 
 @dask.delayed
 def _prepare_cached_embeddings(
-    scan_result: "tuple[list[_ScannedImage], _ScanDone]",
+    scan_result: "tuple[list[ImageRecord], _ScanDone]",
     cache_context: tuple[str | None, dict[tuple[str, str], Any] | None],
-) -> "tuple[Any, list[_ScannedImage], list[_ScannedImage], _ScanDone]":
+) -> "tuple[Any, list[ImageRecord], list[ImageRecord], _ScanDone]":
     """Split scanned images into cached/uncached and vstack cached vectors.
 
     Runs as soon as scanning and cache indexing finish -- does not wait for
@@ -423,9 +418,9 @@ def _prepare_cached_embeddings(
     _model_id, cached_index = cache_context
     items, scan_done = scan_result
 
-    cached_items: list[_ScannedImage] = []
+    cached_items: list[ImageRecord] = []
     cached_vectors: list[Any] = []
-    uncached_items: list[_ScannedImage] = []
+    uncached_items: list[ImageRecord] = []
 
     if cached_index is not None:
         for item in items:
@@ -448,13 +443,14 @@ def _prepare_cached_embeddings(
 
 @dask.delayed
 def _score_all(
-    prepared: "tuple[Any, list[_ScannedImage], list[_ScannedImage], _ScanDone]",
+    prepared: "tuple[Any, list[ImageRecord], list[ImageRecord], _ScanDone]",
     model: "CLIPModel",
     score_keywords: list[str],
     like_paths: list[str],
     text_emb: Any,
     cache: "EmbeddingCache | None",
     quiet: bool,
+    verbose: bool,
 ) -> "tuple[list[ScoredImage], _ScanDone]":
     """Score all scanned images against text embeddings.
 
@@ -469,7 +465,7 @@ def _score_all(
     image_emb, cached_items, uncached_items, scan_done = prepared
     n_text = len(score_keywords)
 
-    def _make_result(path: Path, sims: Any) -> ScoredImage:
+    def _make_result(path: str, sims: Any) -> ScoredImage:
         return ScoredImage(
             path=path,
             scores={
@@ -497,6 +493,9 @@ def _score_all(
     for item in tqdm(
         uncached_items, desc="Encoding", file=sys.stderr, disable=quiet,
     ):
+        if verbose:
+            # tqdm.write avoids breaking the progress bar.
+            tqdm.write(item.path, file=sys.stderr)
         try:
             img_emb = _get_embedding(model, item.path, cache)
             sims = (img_emb @ text_emb.T)[0]
@@ -610,7 +609,7 @@ def _emit(
         sys.stdout.flush()
         return len(results)
     for r in results:
-        print(shlex.quote(str(r.path)))
+        print(shlex.quote(r.path))
     return len(results)
 
 
@@ -622,13 +621,6 @@ def _emit(
 class _ScanDone:
     image_count: int
     error_message: str | None = None
-
-
-@dataclass
-class _ScannedImage:
-    path: Path
-    path_key: str
-    file_stat: str
 
 
 # ---------------------------------------------------------------------------
@@ -655,7 +647,7 @@ def _format_results(results: list[ScoredImage], verbose: bool) -> str:
     """Format scored results for display."""
     lines = []
     for r in results:
-        lines.append(f"{r.score:.3f}  {shlex.quote(str(r.path))}")
+        lines.append(f"{r.score:.3f}  {shlex.quote(r.path)}")
         if verbose:
             parts = [f"  {kw}: {s:.3f}" for kw, s in r.scores.items()]
             for lp, s in r.like_scores:
@@ -704,6 +696,16 @@ def _apply_excluded_keywords(
 _html_template_cache: Any = None
 
 
+def _read_resolution(path: str) -> str | None:
+    """Return ``"WIDTHxHEIGHT"`` or ``None`` if the image can't be read."""
+    try:
+        with Image.open(path) as im:
+            w, h = im.size
+    except (OSError, UnidentifiedImageError):
+        return None
+    return f"{w}x{h}"
+
+
 def _format_html(
     results: list[ScoredImage],
     keywords: list[str],
@@ -716,26 +718,20 @@ def _format_html(
     template = _html_template_cache
     rows: list[dict[str, str]] = []
     for r in results:
-        src_path = r.path
-        if not src_path.is_absolute():
-            src_path = src_path.absolute()
-        all_scores = list(r.scores.items()) + [
-            (f"like:{Path(lp).name}", s) for lp, s in r.like_scores
-        ]
-        breakdown = " \N{MIDDLE DOT} ".join(
-            f"{kw}: {score:.3f}"
-            for kw, score in all_scores
-        )
-        score_line = f"score: {r.score:.3f}"
-        if breakdown:
-            score_line = f"{score_line} \N{MIDDLE DOT} {breakdown}"
-        rows.append(
-            {
-                "image_src": src_path.as_uri(),
-                "path_text": str(r.path),
-                "score_line": score_line,
-            }
-        )
+        # Path.as_uri() requires absolute; .absolute() is a no-op when already so.
+        src_uri = Path(r.path).absolute().as_uri()
+        parts: list[str] = [f"score: {r.score:.3f}"]
+        for kw, score in r.scores.items():
+            parts.append(f"{kw}: {score:.3f}")
+        for lp, score in r.like_scores:
+            parts.append(f"like:{Path(lp).name}: {score:.3f}")
+        score_line = " \N{MIDDLE DOT} ".join(parts)
+        rows.append({
+            "image_src": src_uri,
+            "path_text": r.path,
+            "resolution": _read_resolution(r.path) or "",
+            "score_line": score_line,
+        })
     result: str = template.render(
         count=len(results),
         keywords=", ".join(keywords),
@@ -750,6 +746,9 @@ def _show_in_webview(html_doc: str) -> None:
     with tempfile.TemporaryDirectory(prefix="grape-view-") as tmpdir:
         html_path = Path(tmpdir) / "index.html"
         html_path.write_text(html_doc, encoding="utf-8")
+        # debug=True is the only way pywebview 6.x enables the right-click
+        # context menu (Copy Image, Save As) -- all backends hardcode the
+        # coupling. OPEN_DEVTOOLS_IN_DEBUG=False keeps the inspector hidden.
         webview.settings["OPEN_DEVTOOLS_IN_DEBUG"] = False
         webview.create_window(
             "grape results",
@@ -880,8 +879,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-v", "--verbose",
         action="store_true",
-        help="show per-keyword score breakdown"
-             " (implies -s)",
+        help="show per-keyword score breakdown (implies -s);"
+             " print each newly-encoded file's path to stderr",
     )
     parser.add_argument(
         "-q", "--quiet",
@@ -1052,7 +1051,7 @@ def _run_pipeline(
     # Convergence: scoring needs prepared embeddings + query embeddings + model
     score_result = _score_all(
         prepared, model, score_keywords, like_paths, query_emb,
-        cache, quiet,
+        cache, quiet, verbose,
     )
 
     # Single compute call -- dask resolves the whole graph.
