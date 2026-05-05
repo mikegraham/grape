@@ -181,8 +181,13 @@ class CLIPModel:
             tensors.append(self.preprocess(image.convert("RGB")))
         batch = torch.stack(tensors).to(self.device)
         emb = self.model.encode_image(batch)
-        # Per-frame L2-normalize, mean, then re-normalize the mean (the
-        # mean of unit vectors is generally not unit-norm).
+        # Per-frame normalize -> mean -> re-normalize, matching the
+        # parameter-free meanP recipe in CLIP4Clip's modeling.py
+        # (_loose_similarity / _mean_pooling_for_similarity_visual).
+        # The cache stores one unit-norm vector per file, so the
+        # second normalize is required (skipping it leaks "frame
+        # coherence" into the vector norm and makes cross-file
+        # cosine scores incomparable).
         emb = emb / emb.norm(dim=-1, keepdim=True)
         mean = emb.mean(dim=0, keepdim=True)
         mean = mean / mean.norm(dim=-1, keepdim=True)
