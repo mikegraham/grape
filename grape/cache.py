@@ -62,13 +62,18 @@ _INSERT = (
 def _stat_key(path: str) -> str:
     """JSON array of stat fields used for cache invalidation."""
     st = os.stat(path)
-    return _stat_key_from_stat(st)
+    return stat_key_from_stat(st)
 
 
-def _stat_key_from_stat(st: os.stat_result) -> str:
-    """JSON array of stat fields used for cache invalidation."""
-    # Keep exact spacing compatible with json.dumps(list) to preserve
-    # cache-key stability while reducing JSON encoder overhead.
+def stat_key_from_stat(st: os.stat_result) -> str:
+    """Cache invalidation token: (size, mtime, ino, dev, ctime).
+
+    Conservative on purpose: any change to any of these fields
+    invalidates the entry, to maximize the chance a hit really does
+    represent the same file content (incl. across host/mount/backup
+    moves where the same path now refers to a different file).
+    Format must stay byte-identical to ``json.dumps([...])``.
+    """
     return (
         f"[{st.st_size}, {st.st_mtime_ns},"
         f" {st.st_ino}, {st.st_dev}, {st.st_ctime_ns}]"
@@ -98,7 +103,7 @@ class EmbeddingCache:
 
     def get(
         self,
-        path: Path,
+        path: str,
         model_id: str,
         *,
         path_key: str | None = None,
@@ -177,7 +182,7 @@ class EmbeddingCache:
 
     def has_any_embedding(
         self,
-        path: Path,
+        path: str,
         *,
         path_key: str | None = None,
         file_stat: str | None = None,
@@ -212,7 +217,7 @@ class EmbeddingCache:
 
     def put(
         self,
-        path: Path,
+        path: str,
         model_id: str,
         embedding: NDArray[np.float32],
         *,
@@ -233,7 +238,14 @@ class EmbeddingCache:
     def put_many(
         self,
         model_id: str,
-        rows: Sequence[tuple[Path, NDArray[np.float32], str | None, str | None]],
+        rows: Sequence[
+            tuple[
+                str,
+                NDArray[np.float32],
+                str | None,
+                str | None,
+            ]
+        ],
     ) -> None:
         """Insert or replace multiple embeddings in one transaction."""
         payload: list[tuple[str, str, str, bytes]] = []
@@ -249,7 +261,7 @@ class EmbeddingCache:
 
     def is_not_image(
         self,
-        path: Path,
+        path: str,
         *,
         path_key: str | None = None,
         file_stat: str | None = None,
@@ -269,7 +281,7 @@ class EmbeddingCache:
 
     def put_not_image(
         self,
-        path: Path,
+        path: str,
         *,
         path_key: str | None = None,
         file_stat: str | None = None,
