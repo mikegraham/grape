@@ -4,6 +4,8 @@ Avoids redundant CLIP encoding by caching embeddings keyed on
 (absolute_path, model_id) with file-stat-based invalidation.
 """
 
+from __future__ import annotations
+
 import os
 import sqlite3
 import threading

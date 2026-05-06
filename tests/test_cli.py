@@ -707,8 +707,8 @@ def test_view_calls_webview_with_html(tmp_path, monkeypatch):
 
 def test_score_all_uses_in_memory_cache_index():
     from grape.cli import (
+        ScanReport,
         _prepare_cached_embeddings,
-        _ScanDone,
         _score_all,
     )
 
@@ -727,7 +727,7 @@ def test_score_all_uses_in_memory_cache_index():
         ("/tmp/a.jpg", "stat-a"): np.array([1.0, 0.0], dtype=np.float32)
     }
     text_emb = np.array([[1.0, 0.0]], dtype=np.float32)
-    scan_result = (items, _ScanDone(image_count=1))
+    scan_result = (items, ScanReport(image_count=1))
     cache_context = ("model-id", cached_index)
 
     prepared = _prepare_cached_embeddings(
@@ -754,8 +754,8 @@ def test_score_all_duplicate_like_paths_keep_separate_scores():
     (path, similarity) tuples, avoiding collisions entirely.
     """
     from grape.cli import (
+        ScanReport,
         _prepare_cached_embeddings,
-        _ScanDone,
         _score_all,
     )
 
@@ -784,7 +784,7 @@ def test_score_all_duplicate_like_paths_keep_separate_scores():
         ],
         dtype=np.float32,
     )
-    scan_result = (items, _ScanDone(image_count=1))
+    scan_result = (items, ScanReport(image_count=1))
     cache_context = ("model-id", cached_index)
 
     prepared = _prepare_cached_embeddings(
@@ -910,8 +910,8 @@ def test_format_results_verbose_shows_like_scores():
 def test_score_all_skips_syntax_error():
     """SyntaxError during image encoding is caught and recorded as not-image."""
     from grape.cli import (
+        ScanReport,
         _prepare_cached_embeddings,
-        _ScanDone,
         _score_all,
     )
 
@@ -941,7 +941,7 @@ def test_score_all_skips_syntax_error():
         ),
     ]
     text_emb = np.array([[1.0, 0.0]], dtype=np.float32)
-    scan_result = (items, _ScanDone(image_count=1))
+    scan_result = (items, ScanReport(image_count=1))
     cache_context = ("model-id", {})
     tracking = _TrackingCache()
 
@@ -961,8 +961,8 @@ def test_score_all_skips_syntax_error():
 def test_score_all_skips_oserror_no_errno():
     """OSError with errno=None (PIL format error) is caught; real errors propagate."""
     from grape.cli import (
+        ScanReport,
         _prepare_cached_embeddings,
-        _ScanDone,
         _score_all,
     )
 
@@ -980,7 +980,7 @@ def test_score_all_skips_oserror_no_errno():
         ),
     ]
     text_emb = np.array([[1.0, 0.0]], dtype=np.float32)
-    scan_result = (items, _ScanDone(image_count=1))
+    scan_result = (items, ScanReport(image_count=1))
     cache_context = ("model-id", {})
 
     prepared = _prepare_cached_embeddings(
@@ -1000,8 +1000,8 @@ def test_score_all_propagates_real_oserror():
     import errno
 
     from grape.cli import (
+        ScanReport,
         _prepare_cached_embeddings,
-        _ScanDone,
         _score_all,
     )
 
@@ -1021,7 +1021,7 @@ def test_score_all_propagates_real_oserror():
         ),
     ]
     text_emb = np.array([[1.0, 0.0]], dtype=np.float32)
-    scan_result = (items, _ScanDone(image_count=1))
+    scan_result = (items, ScanReport(image_count=1))
     cache_context = ("model-id", {})
 
     prepared = _prepare_cached_embeddings(
@@ -1038,8 +1038,8 @@ def test_score_all_propagates_real_oserror():
 def test_score_all_verbose_prints_uncached_paths(capsys):
     """Verbose mode prints each uncached file's path to stderr."""
     from grape.cli import (
+        ScanReport,
         _prepare_cached_embeddings,
-        _ScanDone,
         _score_all,
     )
 
@@ -1062,7 +1062,7 @@ def test_score_all_verbose_prints_uncached_paths(capsys):
         ),
     ]
     text_emb = np.array([[1.0, 0.0]], dtype=np.float32)
-    scan_result = (items, _ScanDone(image_count=2))
+    scan_result = (items, ScanReport(image_count=2))
     cache_context = ("model-id", {})
 
     prepared = _prepare_cached_embeddings(
@@ -1082,8 +1082,8 @@ def test_score_all_verbose_prints_uncached_paths(capsys):
 def test_score_all_non_verbose_omits_uncached_paths(capsys):
     """Without -v, per-file paths are not printed during encoding."""
     from grape.cli import (
+        ScanReport,
         _prepare_cached_embeddings,
-        _ScanDone,
         _score_all,
     )
 
@@ -1101,7 +1101,7 @@ def test_score_all_non_verbose_omits_uncached_paths(capsys):
         ),
     ]
     text_emb = np.array([[1.0, 0.0]], dtype=np.float32)
-    scan_result = (items, _ScanDone(image_count=1))
+    scan_result = (items, ScanReport(image_count=1))
     cache_context = ("model-id", {})
 
     prepared = _prepare_cached_embeddings(
@@ -1163,14 +1163,14 @@ def test_corrupt_cache_prints_message(tmp_path, monkeypatch):
 
 def test_filter_and_sort_threshold(capsys):
     """--threshold filters results below the cutoff."""
-    from grape.cli import _filter_and_sort, _ScanDone
+    from grape.cli import ScanReport, _filter_and_sort
     results = [
         ScoredImage(path="/a.jpg", scores={"dog": 0.8}, score=0.8),
         ScoredImage(path="/b.jpg", scores={"dog": 0.3}, score=0.3),
         ScoredImage(path="/c.jpg", scores={"dog": 0.5}, score=0.5),
     ]
     out = _filter_and_sort(
-        (results, _ScanDone(image_count=3)),
+        (results, ScanReport(image_count=3)),
         ["dog"], [], [], threshold=0.4, top=None, quiet=True,
     )
     assert [r.score for r in out] == [0.8, 0.5]
@@ -1178,13 +1178,13 @@ def test_filter_and_sort_threshold(capsys):
 
 def test_filter_and_sort_top_n(capsys):
     """--top limits to N highest-scoring results."""
-    from grape.cli import _filter_and_sort, _ScanDone
+    from grape.cli import ScanReport, _filter_and_sort
     results = [
         ScoredImage(path=f"/{i}.jpg", scores={"dog": s}, score=s)
         for i, s in enumerate([0.3, 0.8, 0.5, 0.7])
     ]
     out = _filter_and_sort(
-        (results, _ScanDone(image_count=4)),
+        (results, ScanReport(image_count=4)),
         ["dog"], [], [], threshold=None, top=2, quiet=True,
     )
     assert len(out) == 2
@@ -1194,12 +1194,12 @@ def test_filter_and_sort_top_n(capsys):
 
 def test_filter_and_sort_status_message(capsys):
     """Without quiet, prints image count and query to stderr."""
-    from grape.cli import _filter_and_sort, _ScanDone
+    from grape.cli import ScanReport, _filter_and_sort
     results = [
         ScoredImage(path="/a.jpg", scores={"sunset": 0.5}, score=0.5),
     ]
     _filter_and_sort(
-        (results, _ScanDone(image_count=1)),
+        (results, ScanReport(image_count=1)),
         ["sunset"], [], [], threshold=None, top=None, quiet=False,
     )
     err = capsys.readouterr().err

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple, cast
@@ -18,6 +18,7 @@ from grape.cache import stat_key_from_stat
 # not pull in torch/open_clip (~2 s).  The cache-hit path never needs them.
 if TYPE_CHECKING:
     from grape.cache import EmbeddingCache
+    from grape.cli import _LazyModel
     from grape.model import CLIPModel
 
 
@@ -220,7 +221,7 @@ def _build_result(
 
 
 def _get_embedding(
-    model: CLIPModel,
+    model: CLIPModel | _LazyModel,
     path: str,
     cache: EmbeddingCache | None,
     *,
@@ -333,7 +334,7 @@ def score_image(
 
 def score_images(
     model: CLIPModel,
-    image_paths: list[str] | list[Path],
+    image_paths: Sequence[str | Path],
     keywords: list[str],
     prompt_template: str = "a photo of {}",
     prompt_templates: list[str] | None = None,

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import importlib.util
 import logging
@@ -7,7 +9,7 @@ import sys
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing, nullcontext
+from contextlib import AbstractContextManager, closing, nullcontext
 from dataclasses import dataclass
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
@@ -23,6 +25,10 @@ from grape.search import (
 )
 
 if TYPE_CHECKING:
+    import jinja2
+    import numpy as np
+    from numpy.typing import NDArray
+
     from grape.cache import EmbeddingCache
     from grape.model import CLIPModel
 
@@ -144,10 +150,10 @@ class _LazyModel:
         self._model_name = model_name
         self._pretrained = pretrained
         self._quiet = quiet
-        self._model: Any = None
+        self._model: CLIPModel | None = None
         self._lock = threading.Lock()
 
-    def _ensure_loaded(self) -> Any:
+    def _ensure_loaded(self) -> CLIPModel:
         if self._model is None:
             with self._lock:
                 if self._model is None:
@@ -162,16 +168,20 @@ class _LazyModel:
                     )
         return self._model
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._ensure_loaded(), name)
+    def encode_image(self, image_path: str) -> NDArray[np.float32]:
+        return self._ensure_loaded().encode_image(image_path)
+
+    def encode_texts(self, texts: list[str]) -> NDArray[np.float32]:
+        return self._ensure_loaded().encode_texts(texts)
+
+    def model_id(self) -> str:
+        return self._ensure_loaded().model_id()
 
 
 def _load_model(
-    model_name: str,
-    pretrained: str,
-    quiet: bool,
-) -> Any:
-    """Return a lazy model proxy -- no import until first access.
+    model_name: str, pretrained: str, quiet: bool,
+) -> _LazyModel:
+    """Return a lazy model proxy -- no import until first method call.
 
     When everything is cached, no downstream node touches the model
     and torch/open_clip are never imported.  scan_files runs without
@@ -181,12 +191,12 @@ def _load_model(
 
 
 def _encode_keywords(
-    model: "CLIPModel",
+    model: _LazyModel,
     score_keywords: list[str],
     prompt_templates: list[str],
-    cache_context: tuple[str | None, dict[tuple[str, str], Any] | None],
-    cache: "EmbeddingCache | None",
-) -> Any:
+    cache_context: tuple[str | None, dict[tuple[str, str], NDArray[np.float32]] | None],
+    cache: EmbeddingCache | None,
+) -> NDArray[np.float32]:
     """Encode keyword prompts into text embeddings.
 
     Caches at the prompt level (the actual text sent to the model), not
@@ -208,7 +218,7 @@ def _encode_keywords(
     ]
 
     # Check cache for each prompt.
-    cached_prompts: dict[str, Any] = {}
+    cached_prompts: dict[str, NDArray[np.float32]] = {}
     if cache is not None and model_id is not None:
         cached_prompts = cache.get_text_embeddings(model_id, all_prompts)
 
@@ -231,7 +241,7 @@ def _encode_keywords(
         )
         model_id = real_model_id
 
-        new_pairs: list[tuple[str, Any]] = []
+        new_pairs: list[tuple[str, NDArray[np.float32]]] = []
         for i, prompt in enumerate(uncached_prompts):
             emb = fresh[i : i + 1]
             cached_prompts[prompt] = emb
@@ -242,7 +252,7 @@ def _encode_keywords(
     # Reassemble per-keyword embeddings: average across templates,
     # then L2-normalize (same logic as _encode_keyword_embeddings).
     n_templates = len(prompt_templates)
-    keyword_embs: list[Any] = []
+    keyword_embs: list[NDArray[np.float32]] = []
     for kw in score_keywords:
         prompts = [t.format(kw) for t in prompt_templates]
         embs = np.vstack([cached_prompts[p] for p in prompts])
@@ -259,11 +269,11 @@ def _encode_keywords(
 
 
 def _encode_like_images(
-    model: "CLIPModel",
+    model: _LazyModel,
     like_paths: list[str],
-    cache_context: tuple[str | None, dict[tuple[str, str], Any] | None],
-    cache: "EmbeddingCache | None",
-) -> Any:
+    cache_context: tuple[str | None, dict[tuple[str, str], NDArray[np.float32]] | None],
+    cache: EmbeddingCache | None,
+) -> NDArray[np.float32]:
     """Encode --like reference images into query embeddings.
 
     Uses cached embeddings when available so that --like self-matches
@@ -285,9 +295,9 @@ def _encode_like_images(
 
 
 def _combine_query_embeddings(
-    text_emb: Any,
-    like_emb: Any,
-) -> Any:
+    text_emb: NDArray[np.float32] | None,
+    like_emb: NDArray[np.float32] | None,
+) -> NDArray[np.float32]:
     """Stack text and --like image query embeddings into one matrix."""
     import numpy as np
     parts = [e for e in (text_emb, like_emb) if e is not None]
@@ -298,7 +308,7 @@ def _resolve_and_index_cache(
     model_name: str,
     pretrained: str,
     cache: "EmbeddingCache | None",
-) -> tuple[str | None, dict[tuple[str, str], Any] | None]:
+) -> tuple[str | None, dict[tuple[str, str], NDArray[np.float32]] | None]:
     """Resolve model_id and materialize the cache index.
 
     Caches model_id in SQLite so subsequent runs skip the torch import.
@@ -347,7 +357,7 @@ def _scan_files(
     path_args: list[str],
     recursive: bool,
     cache: "EmbeddingCache | None",
-) -> "tuple[list[ImageRecord], _ScanDone]":
+) -> tuple[list[ImageRecord], ScanReport]:
     """Discover image files from CLI paths. Independent of model loading."""
     if cache is not None:
         image_hits = cache.image_hit_index()
@@ -392,15 +402,17 @@ def _scan_files(
         break
 
     log.debug("scan_files: %d images found", len(items))
-    return items, _ScanDone(
+    return items, ScanReport(
         image_count=len(items), error_message=error_message,
     )
 
 
 def _prepare_cached_embeddings(
-    scan_result: "tuple[list[ImageRecord], _ScanDone]",
-    cache_context: tuple[str | None, dict[tuple[str, str], Any] | None],
-) -> "tuple[Any, list[ImageRecord], list[ImageRecord], _ScanDone]":
+    scan_result: tuple[list[ImageRecord], ScanReport],
+    cache_context: tuple[str | None, dict[tuple[str, str], NDArray[np.float32]] | None],
+) -> tuple[
+    NDArray[np.float32] | None, list[ImageRecord], list[ImageRecord], ScanReport,
+]:
     """Split scanned images into cached/uncached and vstack cached vectors.
 
     Runs as soon as scanning and cache indexing finish -- does not wait for
@@ -413,7 +425,7 @@ def _prepare_cached_embeddings(
     items, scan_done = scan_result
 
     cached_items: list[ImageRecord] = []
-    cached_vectors: list[Any] = []
+    cached_vectors: list[NDArray[np.float32]] = []
     uncached_items: list[ImageRecord] = []
 
     if cached_index is not None:
@@ -436,15 +448,17 @@ def _prepare_cached_embeddings(
 
 
 def _score_all(
-    prepared: "tuple[Any, list[ImageRecord], list[ImageRecord], _ScanDone]",
-    model: "CLIPModel",
+    prepared: tuple[
+        NDArray[np.float32] | None, list[ImageRecord], list[ImageRecord], ScanReport,
+    ],
+    model: _LazyModel,
     score_keywords: list[str],
     like_paths: list[str],
-    text_emb: Any,
-    cache: "EmbeddingCache | None",
+    text_emb: NDArray[np.float32],
+    cache: EmbeddingCache | None,
     quiet: bool,
     verbose: bool,
-) -> "tuple[list[ScoredImage], _ScanDone]":
+) -> tuple[list[ScoredImage], ScanReport]:
     """Score all scanned images against text embeddings.
 
     ``score_keywords`` are text keyword labels (include + exclude).
@@ -458,7 +472,7 @@ def _score_all(
     image_emb, cached_items, uncached_items, scan_done = prepared
     n_text = len(score_keywords)
 
-    def _make_result(path: str, sims: Any) -> ScoredImage:
+    def _make_result(path: str, sims: NDArray[np.float32]) -> ScoredImage:
         return ScoredImage(
             path=path,
             scores={
@@ -519,7 +533,7 @@ def _score_all(
 
 
 def _filter_and_sort(
-    score_result: "tuple[list[ScoredImage], _ScanDone]",
+    score_result: tuple[list[ScoredImage], ScanReport],
     keywords: list[str],
     exclude_keywords: list[str],
     like_names: list[str],
@@ -611,7 +625,7 @@ def _emit(
 # ---------------------------------------------------------------------------
 
 @dataclass
-class _ScanDone:
+class ScanReport:
     image_count: int
     error_message: str | None = None
 
@@ -686,7 +700,7 @@ def _apply_excluded_keywords(
         result.scores = labeled_scores
 
 
-_html_template_cache: Any = None
+_html_template_cache: jinja2.Template | None = None
 
 
 def _read_resolution(path: str) -> str | None:
@@ -1094,7 +1108,7 @@ def main() -> None:
 
     # Open cache before scanning so find_images can skip files
     # already known not to be images.
-    cache_cm: Any
+    cache_cm: AbstractContextManager[EmbeddingCache | None]
     if not args.no_cache:
         import sqlite3
 

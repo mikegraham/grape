@@ -15,6 +15,8 @@ This module contains some crazy hacks to reduce latency.
 # The bottom half of this file is startup hacks. They are ugly but save ~2s
 # of import/init time on every invocation.
 
+from __future__ import annotations
+
 import importlib
 import os
 import sys

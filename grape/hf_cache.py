@@ -6,6 +6,8 @@ and pathlib.  This lets the CLI skip the ~1.5s torch import on
 warm-cache runs.
 """
 
+from __future__ import annotations
+
 import os
 from pathlib import Path
 
