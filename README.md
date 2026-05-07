@@ -4,13 +4,13 @@ Find images matching keywords using [CLIP](https://arxiv.org/abs/2103.00020)
 (Radford et al., 2021). Like grep, but for images.
 
 ```
-$ grape -R -s -k sunset ~/Pictures
+$ grape -R -s --keywords sunset ~/Pictures
 0.327  ~/Pictures/vacation/beach_golden_hour.jpg
 0.285  ~/Pictures/vacation/pier_evening.jpg
 0.241  ~/Pictures/hiking/mountain_view.jpg
 ```
 
-<img src="docs/screenshot_view.png" alt="grape --view screenshot" width="600">
+<img src="https://raw.githubusercontent.com/mikegraham/grape/master/docs/screenshot_view.png" alt="grape --view screenshot" width="600">
 
 ## Install
 
@@ -18,13 +18,13 @@ $ grape -R -s -k sunset ~/Pictures
 pip install grape-image-search
 ```
 
-Python 3.10+. Model weights (~1.7 GB for the default) download on first run.
+Python 3.10+. Model weights (~900 MB for the default) download on first run.
 
 For a headless install without the `--view` GUI deps:
 
 ```
 pip install grape-image-search --no-deps
-pip install open-clip-torch torch dask Pillow platformdirs tqdm transformers sentencepiece
+pip install open-clip-torch torch Pillow platformdirs tqdm transformers sentencepiece
 ```
 
 ## Usage
@@ -34,34 +34,34 @@ At least one of `-k` or `--like` is required.
 
 ```bash
 # text search
-grape -R -k sunset ~/Pictures
+grape -R --keywords sunset ~/Pictures
 
 # find images similar to a reference
 grape -R --like ref.jpg ~/Pictures
 
 # combine text + reference, and penalize something
-grape -R -k dog -x cat --like my_dog.jpg ~/Pictures
+grape -R --keywords dog --exclude cat --like my_dog.jpg ~/Pictures
 
 # top 5 above a threshold, with scores
-grape -R -s -n 5 -t 0.25 -k sunset ~/Pictures
+grape -R -s -n 5 -t 0.25 --keywords sunset ~/Pictures
 
 # browse results in a GUI window
-grape -R -k sunset --view ~/Pictures
+grape -R --keywords sunset --view ~/Pictures
 
 # aesthetic ranking (skip default templating -- prompts are already full sentences)
-grape -R -n 20 --ensemble-prompts '{}' -k 'beautiful photo' -x 'ugly photo' ~/Pictures
+grape -R -n 20 --ensemble-prompts '{}' --keywords 'beautiful photo' --exclude 'ugly photo' ~/Pictures
 
 # read paths from stdin
-find ~/Pictures -mtime -7 -type f | grape -k selfie -
+find ~/Pictures -mtime -7 -type f | grape --keywords selfie -
 
 # copy the top 10 cat photos to a folder
-grape -R -print0 -n 10 -k cat ~/Pictures | xargs -0 cp -t ~/cats/
+grape -R -print0 -n 10 --keywords cat ~/Pictures | xargs -0 cp -t ~/cats/
 
 # open the best match directly
-grape -R -k 'golden gate bridge' -n 1 ~/Pictures | xargs open
+grape -R --keywords 'golden gate bridge' -n 1 ~/Pictures | xargs open
 
 # interactive selection with fzf
-grape -R -k dog ~/Pictures | fzf --preview 'chafa {}'
+grape -R --keywords dog ~/Pictures | fzf --preview 'chafa {}'
 ```
 
 Run `grape --help` for the full flag list.
@@ -151,8 +151,8 @@ cost. Pick any [OpenCLIP](https://github.com/mlfoundations/open_clip)
 checkpoint with `--model model_name/pretrained_tag`:
 
 ```bash
-grape --model ViT-B-32/laion2b_s34b_b79k -R -k sunset ~/Pictures   # fast
-grape --model ViT-L-14/laion2b_s32b_b82k -R -k sunset ~/Pictures   # strong
+grape --model ViT-B-32/laion2b_s34b_b79k -R --keywords sunset ~/Pictures   # fast
+grape --model ViT-L-14/laion2b_s32b_b82k -R --keywords sunset ~/Pictures   # strong
 ```
 
 Embeddings are scoped per model; switching re-encodes everything.

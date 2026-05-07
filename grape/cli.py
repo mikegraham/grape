@@ -1079,6 +1079,10 @@ def _run_pipeline(
 
 
 def main() -> None:
+    # Hard-exit on Ctrl-C: torch threads otherwise wedge the shutdown.
+    import signal
+    signal.signal(signal.SIGINT, lambda *_: os._exit(128 + signal.SIGINT))
+
     parser = _build_parser()
 
     args = parser.parse_args()
