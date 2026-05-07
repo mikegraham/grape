@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Cache-key parity between stdin file inputs (`find ... | grape -`) and `grape -R`: both now write to the same cache row even when symlinks are involved (previously they fragmented).
 - Stdin paths containing NUL bytes are silently dropped instead of crashing with `ValueError` from `os.stat` (most often hit when piping `find -print0` without `xargs -0`).
+- `--cache PATH` is now taken as-is (matches `cp`, `sqlite3`, `tar`); only the default cache auto-creates its parent directory. Fixes a startup crash on `--cache grape.db` (bare filename) and stops silently materializing typo'd parent directories. Cache failures at the default location now degrade to a warning instead of being fatal.
 
 ### Internal
 - `EmbeddingCache` path-argument types narrowed from `str | os.PathLike[str]` to `str`.

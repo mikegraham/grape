@@ -370,6 +370,19 @@ def test_no_images_exits(tmp_path, monkeypatch):
     assert "no images found" in err
 
 
+def test_cache_bare_filename_is_accepted(tmp_path, monkeypatch):
+    """``--cache grape.db`` (no directory part) opens the cache in CWD."""
+    image = tmp_path / "img.jpg"
+    Image.new("RGB", (1, 1)).save(image, format="JPEG")
+    _stub_pipeline(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    _, _, code = run_main(
+        ["-q", "--cache", "grape.db", "-k", "dog", str(image)], monkeypatch,
+    )
+    assert code == 0
+    assert (tmp_path / "grape.db").exists()
+
+
 def _stub_pipeline(monkeypatch, score=0.75):
     """Stub the delayed pipeline tasks so tests don't load the real model.
 

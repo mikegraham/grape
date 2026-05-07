@@ -1114,16 +1114,34 @@ def main() -> None:
 
         from grape.cache import EmbeddingCache
 
-        os.makedirs(os.path.dirname(args.cache), exist_ok=True)
+        # Default cache: auto-mkdir, fail soft. User --cache: as-is, fail hard.
+        is_default_cache = args.cache == parser.get_default("cache")
         try:
+            if is_default_cache:
+                os.makedirs(os.path.dirname(args.cache), exist_ok=True)
             cache_cm = closing(EmbeddingCache(args.cache))
-        except sqlite3.DatabaseError:
-            print(
-                f"grape: cache corrupted: {args.cache}\n"
-                f"grape: delete it and retry",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+        except sqlite3.OperationalError as e:
+            if is_default_cache:
+                print(f"grape: cache disabled: {args.cache}: {e}", file=sys.stderr)
+                cache_cm = nullcontext()
+            else:
+                print(f"grape: cannot open cache {args.cache}: {e}", file=sys.stderr)
+                sys.exit(1)
+        except sqlite3.DatabaseError as e:
+            if is_default_cache:
+                print(f"grape: cache disabled: {args.cache}: {e}", file=sys.stderr)
+                cache_cm = nullcontext()
+            else:
+                print(
+                    f"grape: cache corrupted: {args.cache}\n"
+                    f"grape: delete it and retry",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+        except OSError as e:
+            # makedirs of the default cache parent failed.
+            print(f"grape: cache disabled: {args.cache}: {e}", file=sys.stderr)
+            cache_cm = nullcontext()
     else:
         cache_cm = nullcontext()
 
