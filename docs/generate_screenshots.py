@@ -27,11 +27,13 @@ FIXTURES = REPO / "tests" / "fixtures"
 DOCS = REPO / "docs"
 MODEL = "ViT-B-32/laion2b_s34b_b79k"
 
+# Repo-relative fixture path here (subprocess runs with cwd=REPO) so the
+# hash is reproducible across machines.
 SAMPLE_SCORES_ARGS = [
-    "--scores", "--keywords", "sunset", "--top", "5", "-R", str(FIXTURES),
+    "--scores", "--keywords", "sunset", "--top", "5", "-R", "tests/fixtures",
 ]
 SAMPLE_VERBOSE_ARGS = [
-    "-v", "--keywords", "sunset,beach", "--top", "3", "-R", str(FIXTURES),
+    "-v", "--keywords", "sunset,beach", "--top", "3", "-R", "tests/fixtures",
 ]
 
 
@@ -70,10 +72,9 @@ def screenshot_inputs_hash() -> str:
 def _run_grape(args: list[str]) -> str:
     result = subprocess.run(
         [sys.executable, "-m", "grape", "--no-cache", "--model", MODEL, *args],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, check=True, cwd=REPO,
     )
-    # Strip absolute fixture prefix so snapshots are repo-relative.
-    return result.stdout.replace(str(FIXTURES), "tests/fixtures")
+    return result.stdout
 
 
 def generate_view_screenshot() -> None:
@@ -87,9 +88,9 @@ def generate_view_screenshot() -> None:
             "--no-cache", "--model", MODEL,
             "--scores", "--keywords", "sunset",
             "--top", "5",
-            "-R", str(FIXTURES),
+            "-R", "tests/fixtures",
         ],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, check=True, cwd=REPO,
     )
 
     results = []
