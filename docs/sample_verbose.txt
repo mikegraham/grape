@@ -1,0 +1,6 @@
+0.195  tests/fixtures/beach.jpg
+  sunset: 0.157  beach: 0.234
+0.191  tests/fixtures/subdir/sunset.jpg
+  sunset: 0.278  beach: 0.104
+0.129  tests/fixtures/city.jpg
+  sunset: 0.110  beach: 0.149

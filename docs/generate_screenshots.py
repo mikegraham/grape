@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Regenerate README screenshot from the test fixtures.
+"""Regenerate the documentation samples from the test fixtures.
 
 Usage:
     .venv/bin/python docs/generate_screenshots.py
 
 Produces:
-    docs/screenshot_view.png  -- browser render of --view HTML output
+    docs/screenshot_view.png       - browser render of --view HTML output
+    docs/sample_scores.txt         - text output with -s (scores)
+    docs/sample_verbose.txt        - text output with -v (per-keyword)
+    docs/sample_inputs.sha256      - hash of the inputs that produced the above
+
+A test (tests/test_docs.py) guards against drift by comparing the saved
+hash to the current inputs.
 
 Requirements: playwright (with firefox installed).
 """
@@ -21,17 +27,22 @@ FIXTURES = REPO / "tests" / "fixtures"
 DOCS = REPO / "docs"
 MODEL = "ViT-B-32/laion2b_s34b_b79k"
 
+SAMPLE_SCORES_ARGS = [
+    "--scores", "--keywords", "sunset", "--top", "5", "-R", str(FIXTURES),
+]
+SAMPLE_VERBOSE_ARGS = [
+    "-v", "--keywords", "sunset,beach", "--top", "3", "-R", str(FIXTURES),
+]
+
 
 def screenshot_inputs_hash() -> str:
-    """Hash of everything the rendered screenshot depends on.
+    """Hash of everything the rendered samples depend on.
 
-    If this changes, docs/screenshot_view.png is stale and must be
-    regenerated with this script.  A test (tests/test_docs.py) guards
-    against drift by comparing this hash to docs/screenshot_view.inputs.sha256.
+    If this changes, the saved sample files are stale and must be
+    regenerated with this script.
     """
     h = hashlib.sha256()
 
-    # All fixture files, in sorted order.
     for p in sorted(FIXTURES.rglob("*")):
         if p.is_file() and not p.name.startswith("."):
             h.update(str(p.relative_to(FIXTURES)).encode())
@@ -39,20 +50,30 @@ def screenshot_inputs_hash() -> str:
             h.update(p.read_bytes())
             h.update(b"\0")
 
-    # The HTML template used to render --view.
     from grape.cli import _HTML_TEMPLATE_TEXT
     h.update(b"template\0")
     h.update(_HTML_TEMPLATE_TEXT.encode())
 
-    # The generator script itself (this file).
     h.update(b"generator\0")
     h.update(Path(__file__).read_bytes())
 
-    # The model used to score -- embedding changes would change results.
     h.update(b"model\0")
     h.update(MODEL.encode())
 
+    for args in (SAMPLE_SCORES_ARGS, SAMPLE_VERBOSE_ARGS):
+        h.update(b"args\0")
+        h.update("\0".join(args).encode())
+
     return h.hexdigest()
+
+
+def _run_grape(args: list[str]) -> str:
+    result = subprocess.run(
+        [sys.executable, "-m", "grape", "--no-cache", "--model", MODEL, *args],
+        capture_output=True, text=True, check=True,
+    )
+    # Strip absolute fixture prefix so snapshots are repo-relative.
+    return result.stdout.replace(str(FIXTURES), "tests/fixtures")
 
 
 def generate_view_screenshot() -> None:
@@ -60,7 +81,6 @@ def generate_view_screenshot() -> None:
     from grape.cli import _format_html
     from grape.search import ScoredImage
 
-    # Run grape to get real scores against fixtures.
     result = subprocess.run(
         [
             sys.executable, "-m", "grape",
@@ -69,17 +89,16 @@ def generate_view_screenshot() -> None:
             "--top", "5",
             "-R", str(FIXTURES),
         ],
-        capture_output=True, text=True,
+        capture_output=True, text=True, check=True,
     )
 
-    # Parse output into ScoredImage objects.
     results = []
     for line in result.stdout.strip().splitlines():
         parts = line.split("  ", 1)
         if len(parts) != 2:
             continue
         score_str, path_str = parts
-        path = Path(path_str.strip())
+        path = path_str.strip()
         results.append(ScoredImage(
             path=path,
             scores={"sunset": float(score_str)},
@@ -105,11 +124,23 @@ def generate_view_screenshot() -> None:
         page.screenshot(path=str(out), full_page=True)
         browser.close()
         html_path.unlink()
-    hash_file = DOCS / "screenshot_view.inputs.sha256"
-    hash_file.write_text(screenshot_inputs_hash() + "\n")
     print(f"wrote {out}")
+
+
+def generate_text_samples() -> None:
+    (DOCS / "sample_scores.txt").write_text(_run_grape(SAMPLE_SCORES_ARGS))
+    print(f"wrote {DOCS / 'sample_scores.txt'}")
+    (DOCS / "sample_verbose.txt").write_text(_run_grape(SAMPLE_VERBOSE_ARGS))
+    print(f"wrote {DOCS / 'sample_verbose.txt'}")
+
+
+def main() -> None:
+    generate_view_screenshot()
+    generate_text_samples()
+    hash_file = DOCS / "sample_inputs.sha256"
+    hash_file.write_text(screenshot_inputs_hash() + "\n")
     print(f"wrote {hash_file}")
 
 
 if __name__ == "__main__":
-    generate_view_screenshot()
+    main()

@@ -1,0 +1,5 @@
+0.278  tests/fixtures/subdir/sunset.jpg
+0.157  tests/fixtures/beach.jpg
+0.133  tests/fixtures/omelette.jpg
+0.126  tests/fixtures/toms_diner.jpg
+0.122  tests/fixtures/lenna.png

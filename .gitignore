@@ -36,6 +36,7 @@ dask_graph.*
 grape_dask_graph.*
 /grape_timeline_*.py
 /cluster.py
+/find_pairs.py
 
 # Local editor / tool state
 .claude/
