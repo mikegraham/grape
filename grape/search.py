@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from collections.abc import Iterator, Sequence
@@ -20,6 +21,8 @@ if TYPE_CHECKING:
     from grape.cache import EmbeddingCache
     from grape.cli import _LazyModel
     from grape.model import CLIPModel
+
+log = logging.getLogger("grape")
 
 
 class ImageRecord(NamedTuple):
@@ -66,10 +69,9 @@ def is_image(
     When a cache is provided, consults and updates it to avoid
     re-opening files already known not to be images.
 
-    Uses ``im.load()`` instead of ``im.verify()`` because verify only
-    checks headers -- truncated images and some video containers pass
-    verify but fail when actual pixel data is decoded later.
-    See https://github.com/python-pillow/Pillow/issues/3012
+    Uses ``im.load()`` to catch truncated images and video containers
+    that pass header-only checks (e.g. ``im.verify()``). Only called
+    for files grape has never seen; known paths skip this via image_paths.
     """
     if cache is not None and cache.is_not_image(
         path, path_key=path_key, file_stat=file_stat
@@ -77,8 +79,6 @@ def is_image(
         return False
     try:
         with Image.open(path) as im:
-            # load() decodes pixel data, catching truncated files and
-            # formats that verify() lets through (e.g. some .mp4 files).
             im.load()
         return True
     except SyntaxError:
@@ -111,6 +111,7 @@ def iter_image_records(
     cache: EmbeddingCache | None = None,
     *,
     image_hits: set[tuple[str, str]] | None = None,
+    image_paths: set[str] | None = None,
     not_image_hits: set[tuple[str, str]] | None = None,
 ) -> Iterator[ImageRecord]:
     """Yield image records under *directory* with cache key metadata.
@@ -126,6 +127,8 @@ def iter_image_records(
         return
     if image_hits is None and cache is not None:
         image_hits = cache.image_hit_index()
+    if image_paths is None and image_hits is not None:
+        image_paths = {p for p, _ in image_hits}
     if not_image_hits is None and cache is not None:
         not_image_hits = cache.not_image_index()
     # Track visited real directory paths to avoid infinite loops from
@@ -137,6 +140,7 @@ def iter_image_records(
     stack: list[tuple[str, str]] = [(directory, real_root)]
     while stack:
         display_dir, real_dir = stack.pop()
+        log.debug("scanning dir %s", display_dir)
         with os.scandir(real_dir) as entries:
             for entry in entries:
                 # Check file first to avoid calling is_dir() on every file.
@@ -170,6 +174,17 @@ def iter_image_records(
                 if not_image_hits is not None and cache_key in not_image_hits:
                     continue
                 if image_hits is not None and cache_key in image_hits:
+                    yield ImageRecord(
+                        path=display_path,
+                        path_key=real_path,
+                        file_stat=stat_key,
+                    )
+                    continue
+                # image_paths covers all models: whether a file is an image
+                # doesn't depend on which model encoded it, so a hit under
+                # any model (or with a stale stat) skips the format check,
+                # which requires opening the file to read its header.
+                if image_paths is not None and real_path in image_paths:
                     yield ImageRecord(
                         path=display_path,
                         path_key=real_path,

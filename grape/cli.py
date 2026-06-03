@@ -361,9 +361,11 @@ def _scan_files(
     """Discover image files from CLI paths. Independent of model loading."""
     if cache is not None:
         image_hits = cache.image_hit_index()
+        image_paths = {p for p, _ in image_hits}
         not_image_hits = cache.not_image_index()
     else:
         image_hits = None
+        image_paths = None
         not_image_hits = None
     items: list[ImageRecord] = []
     error_message: str | None = None
@@ -378,10 +380,12 @@ def _scan_files(
             if not_image_hits is not None and cache_key in not_image_hits:
                 continue
             if (
-                image_hits is None or cache_key not in image_hits
-            ) and not is_image(
-                record.path, cache,
-                path_key=record.path_key, file_stat=record.file_stat,
+                (image_hits is None or cache_key not in image_hits)
+                and (image_paths is None or record.path_key not in image_paths)
+                and not is_image(
+                    record.path, cache,
+                    path_key=record.path_key, file_stat=record.file_stat,
+                )
             ):
                 continue
             items.append(record)
@@ -390,11 +394,13 @@ def _scan_files(
             if not recursive:
                 print(f"grape: {p}: Is a directory", file=sys.stderr)
                 continue
+            log.debug("scanning %s ...", p)
             items.extend(iter_image_records(
                 p,
                 recursive=True,
                 cache=cache,
                 image_hits=image_hits,
+                image_paths=image_paths,
                 not_image_hits=not_image_hits,
             ))
             continue
