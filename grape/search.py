@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import warnings
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -78,8 +79,16 @@ def is_image(
     ):
         return False
     try:
-        with Image.open(path) as im:
-            im.load()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(path) as im:
+                im.load()
+        return True
+    except Image.DecompressionBombWarning as e:
+        log.warning("%s: %s", path, e)
+        return True
+    except Image.DecompressionBombError as e:
+        log.warning("%s: %s", path, e)
         return True
     except SyntaxError:
         # PIL raises SyntaxError for some corrupt/unrecognized formats.

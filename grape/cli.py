@@ -8,6 +8,7 @@ import shlex
 import sys
 import tempfile
 import threading
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractContextManager, closing, nullcontext
 from dataclasses import dataclass
@@ -712,9 +713,13 @@ _html_template_cache: jinja2.Template | None = None
 def _read_resolution(path: str) -> str | None:
     """Return ``"WIDTHxHEIGHT"`` or ``None`` if the image can't be read."""
     try:
-        with Image.open(path) as im:
-            w, h = im.size
-    except (OSError, UnidentifiedImageError):
+        # Suppress DecompressionBombWarning: we're reading the header only,
+        # not decompressing pixels, so the DOS-attack guard is a false positive.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+            with Image.open(path) as im:
+                w, h = im.size
+    except (OSError, UnidentifiedImageError, Image.DecompressionBombError):
         return None
     return f"{w}x{h}"
 
@@ -1095,9 +1100,10 @@ def main() -> None:
 
     if args.verbose:
         logging.basicConfig(
-            level=logging.DEBUG, format="%(name)s: %(message)s",
+            level=logging.WARNING, format="%(name)s: %(message)s",
             stream=sys.stderr,
         )
+        logging.getLogger("grape").setLevel(logging.DEBUG)
     elif not args.quiet:
         logging.basicConfig(
             level=logging.INFO, format="%(name)s: %(message)s",
