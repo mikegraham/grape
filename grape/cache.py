@@ -375,6 +375,27 @@ class EmbeddingCache:
             )
             self._conn.commit()
 
+    def rename_model_id(self, old_id: str, new_id: str) -> None:
+        """Rename all cache entries from old_id to new_id.
+
+        Used when the model_id format changes (e.g. bare hf_hub path gains
+        a @commit suffix) so existing embeddings don't need to be recomputed.
+        """
+        with self._lock:
+            self._conn.execute(
+                "UPDATE embeddings SET model = ? WHERE model = ?",
+                (new_id, old_id),
+            )
+            self._conn.execute(
+                "UPDATE text_embeddings SET model = ? WHERE model = ?",
+                (new_id, old_id),
+            )
+            self._conn.execute(
+                "UPDATE model_ids SET model_id = ? WHERE model_id = ?",
+                (new_id, old_id),
+            )
+            self._conn.commit()
+
     def close(self) -> None:
         """Close the database connection."""
         with self._lock:

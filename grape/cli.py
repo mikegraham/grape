@@ -236,10 +236,19 @@ def _encode_keywords(
         # Now that the model is loaded, verify our cached model_id
         # is still correct (could be stale if HF cache was updated).
         real_model_id = model.model_id()
-        assert model_id is None or real_model_id == model_id, (
-            f"model_id mismatch: cached {model_id!r},"
-            f" resolved {real_model_id!r}"
-        )
+        if model_id is not None and real_model_id != model_id:
+            if real_model_id.startswith(model_id + "@"):
+                # Format migration: bare hf_hub path gained a @commit suffix.
+                # Rename all existing cache entries so they don't need
+                # to be recomputed.
+                log.debug("migrating model_id %r -> %r", model_id, real_model_id)
+                if cache is not None:
+                    cache.rename_model_id(model_id, real_model_id)
+            else:
+                raise AssertionError(
+                    f"model_id mismatch: cached {model_id!r},"
+                    f" resolved {real_model_id!r}"
+                )
         model_id = real_model_id
 
         new_pairs: list[tuple[str, NDArray[np.float32]]] = []
