@@ -6,6 +6,7 @@ Avoids redundant CLIP encoding by caching embeddings keyed on
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import threading
@@ -70,16 +71,45 @@ def _stat_key(path: str) -> str:
 def stat_key_from_stat(st: os.stat_result) -> str:
     """Cache invalidation token: (size, mtime, ino, dev, ctime).
 
-    Conservative on purpose: any change to any of these fields
-    invalidates the entry, to maximize the chance a hit really does
-    represent the same file content (incl. across host/mount/backup
-    moves where the same path now refers to a different file).
-    Format must stay byte-identical to ``json.dumps([...])``.
+    Conservative on purpose: a change to size, mtime, ino, or ctime
+    invalidates the entry, maximizing the chance a hit really is the
+    same file content. Format must stay byte-identical to
+    ``json.dumps([...])``.
+
+    The dev slot is deliberately pinned to 0, not ``st.st_dev``. On
+    anonymous-device filesystems (ecryptfs, overlay, NFS, btrfs...) the
+    kernel assigns the major-0 minor at mount time, so it renumbers
+    across reboots/remounts even though the file never changed --
+    including it invalidated the whole library on every reboot. ino
+    still guards against the path pointing at a different file on the
+    same volume. The slot is kept as a constant rather than dropped so
+    the field positions stay stable and ``_canonical_stat`` can
+    neutralize the real dev stored in pre-0.3.0 rows.
     """
     return (
         f"[{st.st_size}, {st.st_mtime_ns},"
-        f" {st.st_ino}, {st.st_dev}, {st.st_ctime_ns}]"
+        f" {st.st_ino}, 0, {st.st_ctime_ns}]"
     )
+
+
+def _canonical_stat(token: str) -> str:
+    """Return *token* with the dev field (index 3) zeroed for comparison.
+
+    Rows cached before dev was pinned to 0 stored the real st_dev there.
+    Canonicalizing both sides at compare time lets those rows keep
+    matching the current file without rewriting the DB or re-encoding.
+    A token that is not the expected 5-element integer array is returned
+    unchanged, so opaque sentinels (e.g. test values like "stat-a")
+    still compare exactly.
+    """
+    try:
+        fields = json.loads(token)
+    except (ValueError, TypeError):
+        return token
+    if not isinstance(fields, list) or len(fields) != 5:
+        return token
+    fields[3] = 0
+    return json.dumps(fields)
 
 
 class EmbeddingCache:
@@ -123,7 +153,7 @@ class EmbeddingCache:
             return None
         stored_stat, blob = row
         stat_key = file_stat or _stat_key(resolved)
-        if stored_stat != stat_key:
+        if _canonical_stat(stored_stat) != _canonical_stat(stat_key):
             return None
         arr: NDArray[np.float32] = (
             np.frombuffer(blob, dtype=np.float32)
@@ -162,7 +192,9 @@ class EmbeddingCache:
                 rows = self._conn.execute(sql, params).fetchall()
             for row_path, row_stat, blob in rows:
                 expected_stat = path_stats.get(row_path)
-                if expected_stat is None or row_stat != expected_stat:
+                if expected_stat is None or (
+                    _canonical_stat(row_stat) != _canonical_stat(expected_stat)
+                ):
                     continue
                 out[row_path] = np.frombuffer(blob, dtype=np.float32).copy()
         return out
@@ -178,7 +210,8 @@ class EmbeddingCache:
                 (model_id,),
             ).fetchall()
         return {
-            (path, file_stat): np.frombuffer(blob, dtype=np.float32).copy()
+            (path, _canonical_stat(file_stat)):
+                np.frombuffer(blob, dtype=np.float32).copy()
             for path, file_stat, blob in rows
         }
 
@@ -191,15 +224,15 @@ class EmbeddingCache:
     ) -> bool:
         """Return ``True`` if any cached embedding matches current file stat."""
         resolved = path_key or os.path.realpath(path)
-        stat_key = file_stat or _stat_key(resolved)
+        stat_key = _canonical_stat(file_stat or _stat_key(resolved))
+        # Can't filter file_stat in SQL: older rows store a different
+        # dev, so match on canonical form in Python instead.
         with self._lock:
-            row = self._conn.execute(
-                "SELECT 1 FROM embeddings"
-                " WHERE path = ? AND file_stat = ?"
-                " LIMIT 1",
-                (resolved, stat_key),
-            ).fetchone()
-        return row is not None
+            rows = self._conn.execute(
+                "SELECT file_stat FROM embeddings WHERE path = ?",
+                (resolved,),
+            ).fetchall()
+        return any(_canonical_stat(s) == stat_key for (s,) in rows)
 
     def image_hit_index(self) -> set[tuple[str, str]]:
         """Return ``(path, file_stat)`` pairs known to have embeddings."""
@@ -207,7 +240,7 @@ class EmbeddingCache:
             rows = self._conn.execute(
                 "SELECT DISTINCT path, file_stat FROM embeddings"
             ).fetchall()
-        return {(path, file_stat) for path, file_stat in rows}
+        return {(path, _canonical_stat(file_stat)) for path, file_stat in rows}
 
     def not_image_index(self) -> set[tuple[str, str]]:
         """Return ``(path, file_stat)`` pairs known to be non-images."""
@@ -215,7 +248,7 @@ class EmbeddingCache:
             rows = self._conn.execute(
                 "SELECT path, file_stat FROM not_images"
             ).fetchall()
-        return {(path, file_stat) for path, file_stat in rows}
+        return {(path, _canonical_stat(file_stat)) for path, file_stat in rows}
 
     def put(
         self,
@@ -279,7 +312,7 @@ class EmbeddingCache:
             return False
         stored_stat: str = row[0]
         stat_key = file_stat or _stat_key(resolved)
-        return stored_stat == stat_key
+        return _canonical_stat(stored_stat) == _canonical_stat(stat_key)
 
     def put_not_image(
         self,

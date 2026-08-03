@@ -1,11 +1,13 @@
 """Unit tests for the embedding cache (no model needed)."""
 
+import json
+import os
 import time
 
 import numpy as np
 import pytest
 
-from grape.cache import EmbeddingCache
+from grape.cache import EmbeddingCache, stat_key_from_stat
 
 EMBED_DIM = 512
 
@@ -181,6 +183,64 @@ def test_not_image_index_contains_cached_non_image(cache, img):
         (str(img.resolve()),),
     ).fetchone()[0]
     assert (str(img.resolve()), stat) in cache.not_image_index()
+
+
+# --- legacy rows: dev field baked into stored file_stat ---
+#
+# Rows cached before st_dev was pinned to 0 stored the real device number
+# at index 3. The device renumbers on anonymous-dev filesystems across
+# reboots, so those rows must keep matching the current file without a
+# re-encode or DB rewrite.
+
+def _bake_legacy_dev(cache, table, path, dev):
+    """Rewrite the stored file_stat's dev slot to simulate a pre-pin row."""
+    row = cache._conn.execute(
+        f"SELECT file_stat FROM {table} WHERE path = ?", (path,)
+    ).fetchone()
+    fields = json.loads(row[0])
+    fields[3] = dev
+    cache._conn.execute(
+        f"UPDATE {table} SET file_stat = ? WHERE path = ?",
+        (json.dumps(fields), path),
+    )
+    cache._conn.commit()
+
+
+def test_legacy_dev_embedding_still_hits(cache, img):
+    emb = _rand_embedding(40)
+    cache.put(img, "model-a", emb)
+    path = str(img.resolve())
+    _bake_legacy_dev(cache, "embeddings", path, 4242)
+
+    live_stat = stat_key_from_stat(os.stat(path))
+    got = cache.get(img, "model-a")
+    assert got is not None
+    np.testing.assert_array_equal(got, emb)
+    assert cache.has_any_embedding(img)
+    assert (path, live_stat) in cache.image_hit_index()
+    assert (path, live_stat) in cache.embedding_index_for_model("model-a")
+    assert path in cache.get_many_for_paths("model-a", {path: live_stat})
+
+
+def test_legacy_dev_does_not_mask_real_change(cache, img):
+    """Neutralizing dev must not neutralize the rest of the token."""
+    cache.put(img, "model-a", _rand_embedding(41))
+    path = str(img.resolve())
+    _bake_legacy_dev(cache, "embeddings", path, 4242)
+    time.sleep(0.05)
+    img.write_bytes(img.read_bytes())  # bumps mtime_ns/ctime_ns
+    assert cache.get(img, "model-a") is None
+    assert not cache.has_any_embedding(img)
+
+
+def test_legacy_dev_not_image_still_hits(cache, img):
+    cache.put_not_image(img)
+    path = str(img.resolve())
+    _bake_legacy_dev(cache, "not_images", path, 4242)
+
+    live_stat = stat_key_from_stat(os.stat(path))
+    assert cache.is_not_image(img)
+    assert (path, live_stat) in cache.not_image_index()
 
 
 # --- text embedding cache ---
