@@ -7,7 +7,7 @@ import time
 import numpy as np
 import pytest
 
-from grape.cache import EmbeddingCache, stat_key_from_stat
+from grape.cache import EmbeddingCache, _canonical_stat, stat_key_from_stat
 
 EMBED_DIM = 512
 
@@ -241,6 +241,33 @@ def test_legacy_dev_not_image_still_hits(cache, img):
     live_stat = stat_key_from_stat(os.stat(path))
     assert cache.is_not_image(img)
     assert (path, live_stat) in cache.not_image_index()
+
+
+def test_canonical_stat_zeroes_dev_only():
+    assert _canonical_stat("[1, 2, 3, 64, 5]") == "[1, 2, 3, 0, 5]"
+
+
+def test_canonical_stat_passes_through_non_tokens():
+    # Opaque sentinels and malformed arrays must compare exactly, so they
+    # are returned unchanged rather than mangled.
+    assert _canonical_stat("stat-a") == "stat-a"      # not JSON
+    assert _canonical_stat("123") == "123"            # JSON, but not a list
+    assert _canonical_stat("[1, 2]") == "[1, 2]"      # wrong length
+
+
+# --- model_id rename (format migrations) ---
+
+def test_rename_model_id_moves_all_tables(cache, img):
+    cache.put(img, "old-model", _rand_embedding(50))
+    cache.put_text_embeddings("old-model", [("a cat", _rand_embedding(51))])
+    cache.put_model_id("ViT-B-32", "laion", "old-model")
+
+    cache.rename_model_id("old-model", "new-model")
+
+    assert cache.get(img, "new-model") is not None
+    assert cache.get(img, "old-model") is None
+    assert "a cat" in cache.get_text_embeddings("new-model", ["a cat"])
+    assert cache.get_model_id("ViT-B-32", "laion") == "new-model"
 
 
 # --- text embedding cache ---
