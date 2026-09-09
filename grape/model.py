@@ -690,13 +690,21 @@ def _init_from_state_dict(
         interpolation=pt_cfg.get("interpolation"),
         resize_mode=pt_cfg.get("resize_mode"),
     )
-    with _suppress_open_clip_no_weights_warning():
-        model = open_clip.create_model(
-            model_name,
-            load_weights=False,
-            device="cpu",
-            force_preprocess_cfg=force_pp,
-        )
+    def _build(device: str) -> Any:
+        with _suppress_open_clip_no_weights_warning():
+            return open_clip.create_model(
+                model_name,
+                load_weights=False,
+                device=device,
+                force_preprocess_cfg=force_pp,
+            )
+
+    # Build under meta: every parameter is overwritten by the state dict
+    # below, so the uniform_/normal_ init open_clip runs is wasted work
+    # (~6s on an L-size model). device="meta" also makes open_clip's
+    # closing .to(device) a no-op; without it that call raises.
+    with torch.device("meta"):
+        model = _build("meta")
     # Some checkpoints store weights in float16 (e.g. EVA02-L-14).
     # Convert to float32 before loading so all parameters match the
     # float32 input tensors produced by the image preprocessor.
@@ -705,6 +713,11 @@ def _init_from_state_dict(
         for k, v in state_dict.items()
     }
     model.load_state_dict(state_dict, assign=True, strict=True)
+    # A tensor the checkpoint doesn't supply (e.g. a non-persistent buffer)
+    # would still be meta here, and would fail at forward time. Rebuild.
+    if any(t.is_meta for t in [*model.parameters(), *model.buffers()]):
+        model = _build("cpu")
+        model.load_state_dict(state_dict, assign=True, strict=True)
     clip.model = model
     from open_clip.transform import PreprocessCfg, image_transform_v2
     pp_cfg = PreprocessCfg(**model.visual.preprocess_cfg)
