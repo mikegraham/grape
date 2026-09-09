@@ -55,6 +55,16 @@ CREATE TABLE IF NOT EXISTS text_embeddings (
 )
 """
 
+# Metadata-only scans (image_hit_index) would otherwise walk the table
+# itself, whose pages are ~97% embedding blob -- and at >=1024 dims every
+# row spills to an overflow page. This index covers those queries so they
+# read a small b-tree instead. Column order matters: model first so
+# ``WHERE model = ?`` can seek.
+_CREATE_COVER_INDEX = """\
+CREATE INDEX IF NOT EXISTS idx_embeddings_cover
+    ON embeddings (model, path, file_stat)
+"""
+
 _INSERT = (
     "INSERT OR REPLACE INTO embeddings"
     " (path, file_stat, model, embedding)"
@@ -136,6 +146,7 @@ class EmbeddingCache:
                 self._conn.execute(_CREATE_NOT_IMAGES)
                 self._conn.execute(_CREATE_TEXT_EMBEDDINGS)
                 self._conn.execute(_CREATE_MODEL_IDS)
+                self._conn.execute(_CREATE_COVER_INDEX)
                 self._conn.commit()
         except sqlite3.DatabaseError:
             self._conn.close()
@@ -246,7 +257,10 @@ class EmbeddingCache:
         """Return ``(path, file_stat)`` pairs known to have embeddings."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT DISTINCT path, file_stat FROM embeddings"
+                # No DISTINCT: the set comprehension below already dedups,
+                # and DISTINCT forces a temp b-tree that stops SQLite from
+                # using the covering index (48ms -> 9ms at 20k rows).
+                "SELECT path, file_stat FROM embeddings"
             ).fetchall()
         return {(path, _canonical_stat(file_stat)) for path, file_stat in rows}
 

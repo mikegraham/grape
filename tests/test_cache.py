@@ -362,3 +362,31 @@ def test_put_many_stores_and_retrieves(cache, tmp_path):
 def test_put_many_empty_is_noop(cache):
     """Empty list should be a no-op, not an error."""
     cache.put_many("model-a", [])
+
+
+def test_covering_index_created(tmp_path):
+    """Metadata scans depend on this index to avoid walking blob pages."""
+    cache = EmbeddingCache(tmp_path / "c.db")
+    names = {
+        row[0] for row in cache._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index'"
+        ).fetchall()
+    }
+    cache.close()
+    assert "idx_embeddings_cover" in names
+
+
+def test_image_hit_index_dedups_across_models(tmp_path):
+    """DISTINCT was dropped from the query; the set must still dedup."""
+    cache = EmbeddingCache(tmp_path / "c.db")
+    path = str(tmp_path / "x.jpg")
+    stat = json.dumps([1, 2.0, 3, 0, 4.0])
+    for model in ("model-a", "model-b"):
+        cache._conn.execute(
+            "INSERT INTO embeddings (path, file_stat, model, embedding)"
+            " VALUES (?, ?, ?, ?)",
+            (path, stat, model, _rand_embedding().tobytes()),
+        )
+    cache._conn.commit()
+    assert cache.image_hit_index() == {(path, stat)}
+    cache.close()
