@@ -348,6 +348,9 @@ def _install_import_stubs(*, stub_timm: bool = True) -> None:
     # by torch.compiler.disable and torch._compile.inner) and `utils` with
     # `is_compile_supported`. Since we never call torch.compile, `disable`
     # just returns the decorated function unchanged.
+    #
+    # The stub is tagged with _grape_stub=True so remove_dynamo_stubs() can
+    # find and purge it when the caller actually wants torch.compile.
     if "torch._dynamo" not in sys.modules:
 
         def _dynamo_disable_noop(fn=None, recursive=True, **kwargs):
@@ -360,15 +363,32 @@ def _install_import_stubs(*, stub_timm: bool = True) -> None:
             "torch._dynamo",
             "grape startup stub: torch.compile not used",
             disable=_dynamo_disable_noop,
+            _grape_stub=True,
         )
         dynamo_utils_stub = _make_stub(
             "torch._dynamo.utils",
             "grape startup stub: deferred",
             is_compile_supported=lambda: False,
+            _grape_stub=True,
         )
         dynamo_stub.utils = dynamo_utils_stub  # type: ignore[attr-defined]
         sys.modules["torch._dynamo"] = dynamo_stub
         sys.modules["torch._dynamo.utils"] = dynamo_utils_stub
+
+
+def remove_dynamo_stubs() -> None:
+    """Remove grape's torch._dynamo stubs from sys.modules.
+
+    Call this before torch.compile to let the real torch._dynamo load.
+    The stubs are only installed to skip the ~620ms torchvision.ops import
+    cost on startup; once open_clip is loaded they are no longer needed.
+    Does nothing if the real module is already loaded.
+    """
+    for key in list(sys.modules):
+        if (key == "torch._dynamo" or key.startswith("torch._dynamo.")) and (
+            getattr(sys.modules[key], "_grape_stub", False)
+        ):
+            del sys.modules[key]
 
 
 def _import_open_clip(
@@ -398,6 +418,7 @@ def _import_open_clip(
                     getattr(mod, "__file__", None) is None
                 ):
                     del sys.modules[key]
+        remove_dynamo_stubs()  # transformers' lazy imports trip on it
         _open_clip_module = importlib.import_module("open_clip")
         _open_clip_fast_path = False
         return _open_clip_module
