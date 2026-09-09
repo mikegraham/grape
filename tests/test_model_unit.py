@@ -1,7 +1,10 @@
 """Fast unit tests for model-loading helpers."""
 
 import os
+import time
 from types import SimpleNamespace
+
+import pytest
 
 from grape.model import (
     _has_cached_weights,
@@ -87,6 +90,91 @@ def test_suppress_filter_removed_after_context_exits():
     with _suppress_open_clip_no_weights_warning():
         assert len(root.filters) == len(before) + 1
     assert root.filters == before
+
+
+def test_no_parameter_init_stubs_nn_init_but_not_tensor_methods():
+    """nn.init is stubbed; Tensor methods that build real buffers are not.
+
+    Module code builds the causal attention mask with
+    ``empty(77, 77).fill_(-inf).triu_(1)``.  Stubbing ``fill_`` would
+    silently yield a garbage mask, so the context manager must leave
+    Tensor methods alone.
+    """
+    import torch
+    import torch.nn.init as init
+
+    from grape.model import _no_parameter_init
+
+    with _no_parameter_init():
+        param = torch.zeros(4)
+        assert init.normal_(param).equal(torch.zeros(4))
+        assert torch.empty(3).fill_(2.5).equal(torch.full((3,), 2.5))
+        assert torch.empty(3).zero_().equal(torch.zeros(3))
+
+
+def test_no_parameter_init_restores_on_exception():
+    import torch
+    import torch.nn.init as init
+
+    from grape.model import _no_parameter_init
+
+    before = init.normal_
+    with pytest.raises(RuntimeError):
+        with _no_parameter_init():
+            raise RuntimeError("boom")
+    assert init.normal_ is before
+    assert not init.normal_(torch.zeros(64)).equal(torch.zeros(64))
+
+
+def test_no_parameter_init_serializes_overlapping_builds():
+    """Overlapping builds must never be inside the patch at the same time.
+
+    It mutates a global module: if a second thread entered while the
+    first held the patch, it would save the *stub* as its original and
+    restore that, leaving torch.nn.init no-oped process-wide.
+    """
+    import threading
+
+    import torch
+    import torch.nn.init as init
+
+    from grape.model import _no_parameter_init
+
+    real = init.normal_
+    state = {"inside": 0, "peak": 0}
+    guard = threading.Lock()
+
+    def worker():
+        with _no_parameter_init():
+            with guard:
+                state["inside"] += 1
+                state["peak"] = max(state["peak"], state["inside"])
+            time.sleep(0.05)
+            with guard:
+                state["inside"] -= 1
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+    assert not any(t.is_alive() for t in threads), "deadlock"
+
+    assert state["peak"] == 1, "two builds were inside the patch at once"
+    assert init.normal_ is real
+    assert not init.normal_(torch.zeros(32)).equal(torch.zeros(32))
+
+
+def test_no_parameter_init_nests():
+    import torch.nn.init as init
+
+    from grape.model import _no_parameter_init
+
+    real = init.normal_
+    with _no_parameter_init():
+        with _no_parameter_init():
+            pass
+    assert init.normal_ is real
 
 
 def test_preloaded_tokenizer_not_reused_across_models(monkeypatch):

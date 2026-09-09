@@ -665,6 +665,48 @@ def _take_preloaded_state_dict() -> dict | None:
     return sd
 
 
+_INIT_PATCH_LOCK = threading.RLock()
+
+
+@contextmanager
+def _no_parameter_init():
+    """Make ``torch.nn.init.*`` a no-op for the duration of a model build.
+
+    Every parameter is overwritten by the ``strict=True`` load_state_dict
+    that follows, so the random values open_clip generates are dead on
+    arrival -- and generating them for an L-size model costs ~1.7s.
+
+    Only ``nn.init`` is patched, never Tensor methods like ``fill_`` or
+    ``zero_``: module code uses those to construct real buffers (the
+    causal attention mask is ``empty(77,77).fill_(-inf).triu_(1)``), and
+    stubbing them would silently produce a garbage mask.  Guarded by
+    test_no_parameter_init_stubs_nn_init_but_not_tensor_methods.
+
+    Serialized on a lock because it mutates a global module: two
+    overlapping builds would otherwise have the second save the *stub* as
+    its original and restore that, leaving torch.nn.init permanently
+    no-oped for the whole process. Reentrant so a nested build still
+    works.
+    """
+    import torch.nn.init as init
+    with _INIT_PATCH_LOCK:
+        names = [
+            n for n in dir(init) if n.endswith("_") and not n.startswith("_")
+        ]
+        saved = {n: getattr(init, n) for n in names}
+
+        def _noop(tensor, *args, **kwargs):
+            return tensor
+
+        try:
+            for n in names:
+                setattr(init, n, _noop)
+            yield
+        finally:
+            for n, fn in saved.items():
+                setattr(init, n, fn)
+
+
 def _init_from_state_dict(
     clip: CLIPModel,
     open_clip: Any,
@@ -716,7 +758,12 @@ def _init_from_state_dict(
     # A tensor the checkpoint doesn't supply (e.g. a non-persistent buffer)
     # would still be meta here, and would fail at forward time. Rebuild.
     if any(t.is_meta for t in [*model.parameters(), *model.buffers()]):
-        model = _build("cpu")
+        # Rebuild on CPU, skipping parameter init. EVA02-L-14 leaves just
+        # two non-persistent buffers on meta (rope.pos_embed, attn_mask,
+        # 38k elements total), and regenerating 428M random parameters to
+        # recover them cost ~1.7s of a ~6s run.
+        with _no_parameter_init():
+            model = _build("cpu")
         model.load_state_dict(state_dict, assign=True, strict=True)
     clip.model = model
     from open_clip.transform import PreprocessCfg, image_transform_v2
