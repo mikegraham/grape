@@ -12,9 +12,11 @@ import sqlite3
 import threading
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import numpy as np
-from numpy.typing import NDArray
+if TYPE_CHECKING:
+    import numpy as np
+    from numpy.typing import NDArray
 
 _CREATE_EMBEDDINGS = """\
 CREATE TABLE IF NOT EXISTS embeddings (
@@ -177,6 +179,8 @@ class EmbeddingCache:
         file_stat: str | None = None,
     ) -> NDArray[np.float32] | None:
         """Return the cached embedding, or ``None`` on miss/stale."""
+        import numpy as np
+
         resolved = path_key or os.path.realpath(path)
         with self._lock:
             row = self._conn.execute(
@@ -210,6 +214,8 @@ class EmbeddingCache:
         Only rows whose ``file_stat`` matches the provided value are
         returned.
         """
+        import numpy as np
+
         if not path_stats:
             return {}
 
@@ -239,6 +245,8 @@ class EmbeddingCache:
         model_id: str,
     ) -> dict[tuple[str, str], NDArray[np.float32]]:
         """Return in-memory ``(path, file_stat) -> embedding`` for a model."""
+        import numpy as np
+
         with self._lock:
             rows = self._conn.execute(
                 "SELECT path, file_stat, embedding FROM embeddings WHERE model = ?",
@@ -379,6 +387,8 @@ class EmbeddingCache:
 
         Returns a dict mapping text -> embedding for cache hits only.
         """
+        import numpy as np
+
         if not texts:
             return {}
         placeholders = ",".join("?" for _ in texts)
