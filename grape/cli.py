@@ -35,9 +35,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("grape")
 
-# EVA-CLIP: Improved Training Techniques for CLIP at Scale
-# (Sun et al., 2023) https://arxiv.org/abs/2303.15389
-DEFAULT_MODEL = "EVA02-L-14/merged2b_s4b_b131k"
+# SigLIP 2 (Tschannen et al., 2025) https://arxiv.org/abs/2502.14786
+DEFAULT_MODEL = "ViT-L-16-SigLIP2-256/webli"
 
 # Prompt ensembling: average embeddings across multiple prompt templates
 # per keyword, then L2-normalize. Improves zero-shot accuracy over a

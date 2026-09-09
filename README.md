@@ -18,7 +18,7 @@ $ grape -R -s --keywords sunset ~/Pictures
 pip install grape-image-search
 ```
 
-Python 3.10+. Model weights (~900 MB for the default) download on first run.
+Python 3.10+. Model weights (~3.5 GB for the default) download on first run.
 
 For a headless install without the `--view` GUI deps:
 
@@ -145,15 +145,19 @@ Use `--no-cache` to disable or `--cache PATH` to relocate.
 ## Models
 
 The default is
-[EVA-CLIP's EVA02-L-14](https://arxiv.org/abs/2303.15389) (Sun et al., 2023)
-pretrained as `merged2b_s4b_b131k` -- strong zero-shot accuracy at moderate
-cost. Pick any [OpenCLIP](https://github.com/mlfoundations/open_clip)
-checkpoint with `--model model_name/pretrained_tag`:
+[SigLIP 2's ViT-L-16-SigLIP2-256](https://arxiv.org/abs/2502.14786)
+(Tschannen et al., 2025) pretrained as `webli` -- the strongest text-to-image
+retrieval available at this encoding cost. Pick any
+[OpenCLIP](https://github.com/mlfoundations/open_clip) checkpoint with
+`--model model_name/pretrained_tag`:
 
 ```bash
-grape --model ViT-B-32/laion2b_s34b_b79k -R --keywords sunset ~/Pictures   # fast
-grape --model ViT-L-14/laion2b_s32b_b82k -R --keywords sunset ~/Pictures   # strong
+grape --model ViT-B-16-SigLIP2-256/webli -R --keywords sunset ~/Pictures    # 3.5x faster
+grape --model ViT-SO400M-14-SigLIP2/webli -R --keywords sunset ~/Pictures   # strongest
 ```
+
+`ViT-B-16-SigLIP2-256` encodes ~3.5x faster for a 1.5 GB download, giving up
+a few points of zero-shot accuracy.
 
 Embeddings are scoped per model; switching re-encodes everything.
 
