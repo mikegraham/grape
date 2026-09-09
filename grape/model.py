@@ -58,7 +58,8 @@ class CLIPModel:
         self._model_id: str | None = None
         self.device = "cpu"
         open_clip = _import_open_clip(
-            use_transformers=False, model_name=model_name,
+            use_transformers=_model_needs_transformers(model_name),
+            model_name=model_name,
         )
         if not quiet:
             print("Loading model...", end=" ", flush=True, file=sys.stderr)
@@ -108,7 +109,7 @@ class CLIPModel:
                     device=self.device,
                 )
             )
-        self.tokenizer = open_clip.get_tokenizer(model_name)
+        self.tokenizer = _load_tokenizer(open_clip, model_name)
 
     def _init_model_fast(
         self,
@@ -322,6 +323,14 @@ def _model_needs_timm(model_name: str) -> bool:
     return isinstance(vcfg, dict) and "timm_model_name" in vcfg
 
 
+def _model_needs_transformers(model_name: str) -> bool:
+    """True when the model's tokenizer comes from transformers (SigLIP, SigLIP 2)."""
+    cfg = _builtin_model_config(model_name)
+    if cfg is None:
+        return True  # unknown model, assume yes (safe)
+    return bool(cfg.get("text_cfg", {}).get("hf_tokenizer_name"))
+
+
 def _install_import_stubs(*, stub_timm: bool = True) -> None:
     """Inject stub modules into sys.modules to skip heavy imports.
 
@@ -434,7 +443,13 @@ def _import_open_clip(
 def _requires_transformers(exc: Exception) -> bool:
     """Return True when open_clip failed due to missing transformers."""
     text = str(exc).lower()
-    return "transformers" in text and "install" in text
+    if "transformers" not in text:
+        return False
+    if "install" in text:
+        return True
+    # Against our stub, HF tokenizers fail with "cannot import name", not "install".
+    stub = sys.modules.get("transformers")
+    return stub is not None and getattr(stub, "__file__", None) is None
 
 
 # -- Hack 2: HF cache probing ---------------------------------------------
@@ -482,6 +497,24 @@ def _temporary_env(name: str, value: str):
             os.environ[name] = previous
         else:
             os.environ.pop(name, None)
+
+
+def _load_tokenizer(open_clip: Any, model_name: str) -> Any:
+    """HF tokenizers probe the Hub even when cached; load from the snapshot dir."""
+    cfg = open_clip.get_model_config(model_name) or {}
+    text_cfg = cfg.get("text_cfg", {})
+    repo = text_cfg.get("hf_tokenizer_name")
+    local = _cached_file_from_repo(repo, "tokenizer_config.json") if repo else None
+    if local is None:
+        return open_clip.get_tokenizer(model_name)  # built-in tokenizer, or first run
+    return open_clip.tokenizer.HFTokenizer(
+        str(Path(local).parent),
+        context_length=text_cfg.get(
+            "context_length", open_clip.tokenizer.DEFAULT_CONTEXT_LENGTH,
+        ),
+        tokenizer_mode=text_cfg.get("tokenizer_mode"),
+        **text_cfg.get("tokenizer_kwargs", {}),
+    )
 
 
 def _temporary_hf_hub_offline():
@@ -633,4 +666,4 @@ def _init_from_state_dict(
     from open_clip.transform import PreprocessCfg, image_transform_v2
     pp_cfg = PreprocessCfg(**model.visual.preprocess_cfg)
     clip.preprocess = image_transform_v2(pp_cfg, is_train=False)
-    clip.tokenizer = open_clip.get_tokenizer(model_name)
+    clip.tokenizer = _load_tokenizer(open_clip, model_name)

@@ -299,3 +299,46 @@ def test_model_id_format(clip_model):
 
 def test_embed_dim(clip_model):
     assert clip_model.embed_dim() == 512
+
+
+def test_hf_tokenizer_loads_from_local_snapshot(monkeypatch, tmp_path):
+    """Regression: HFTokenizer given a repo id probes the Hub for config.json
+    on every load, and fails hard offline because a 404 is never cached.
+    We must hand it the cached snapshot directory instead."""
+    import grape.model as m
+
+    snapshot = tmp_path / "snap"
+    snapshot.mkdir()
+    (snapshot / "tokenizer_config.json").write_text("{}")
+    seen = {}
+
+    class FakeHFTokenizer:
+        def __init__(self, source, **kwargs):
+            seen["source"] = source
+            seen["kwargs"] = kwargs
+
+    class FakeOpenClip:
+        class tokenizer:
+            HFTokenizer = FakeHFTokenizer
+            DEFAULT_CONTEXT_LENGTH = 77
+
+        @staticmethod
+        def get_model_config(name):
+            return {"text_cfg": {
+                "hf_tokenizer_name": "org/repo",
+                "context_length": 64,
+                "tokenizer_kwargs": {"clean": "canonicalize"},
+            }}
+
+        @staticmethod
+        def get_tokenizer(name):
+            raise AssertionError("must not fall back to Hub-probing path")
+
+    monkeypatch.setattr(
+        m, "_cached_file_from_repo",
+        lambda repo, fn: str(snapshot / fn) if fn == "tokenizer_config.json" else None,
+    )
+    m._load_tokenizer(FakeOpenClip, "some-model")
+    assert seen["source"] == str(snapshot)
+    assert seen["kwargs"]["context_length"] == 64
+    assert seen["kwargs"]["clean"] == "canonicalize"
