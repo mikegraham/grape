@@ -109,7 +109,10 @@ class CLIPModel:
                     device=self.device,
                 )
             )
-        self.tokenizer = _load_tokenizer(open_clip, model_name)
+        self.tokenizer = (
+            _take_preloaded_tokenizer(model_name)
+            or _load_tokenizer(open_clip, model_name)
+        )
 
     def _init_model_fast(
         self,
@@ -271,6 +274,8 @@ _open_clip_module = None
 _open_clip_fast_path = False
 _preloaded_state_dict: dict | None = None
 _preload_thread: "threading.Thread | None" = None
+_tokenizer_thread: "threading.Thread | None" = None
+_preloaded_tokenizer: Any | None = None
 
 
 # -- Hack 1: Import stubs -------------------------------------------------
@@ -582,8 +587,12 @@ def preload_weights(model_name: str, pretrained: str) -> None:
     global _preload_thread, _preloaded_state_dict
     if _preload_thread is not None:
         return  # already started
-    # Side effect: installs import stubs for open_clip.
-    _import_open_clip(use_transformers=False, model_name=model_name)
+    # Side effect: installs import stubs for open_clip (unless the model
+    # needs the real transformers).
+    needs_tf = _model_needs_transformers(model_name)
+    open_clip = _import_open_clip(use_transformers=needs_tf, model_name=model_name)
+    if needs_tf:
+        _preload_tokenizer(open_clip, model_name)
     path = _cached_weight_path(model_name, pretrained)
     if path is None:
         return
@@ -600,6 +609,40 @@ def preload_weights(model_name: str, pretrained: str) -> None:
 
     _preload_thread = threading.Thread(target=_load, daemon=True)
     _preload_thread.start()
+
+
+def _preload_tokenizer(open_clip: Any, model_name: str) -> None:
+    """Import transformers and build the tokenizer while weights are read."""
+    global _tokenizer_thread, _preloaded_tokenizer
+    if _tokenizer_thread is not None:
+        return
+
+    def _load():
+        global _preloaded_tokenizer
+        # Tagged with the model it belongs to. A load that overran the
+        # take() timeout stays tracked, so without the tag a later,
+        # different model would be handed this tokenizer and would
+        # silently embed with the wrong vocab.
+        _preloaded_tokenizer = (model_name, _load_tokenizer(open_clip, model_name))
+
+    _tokenizer_thread = threading.Thread(target=_load, daemon=True)
+    _tokenizer_thread.start()
+
+
+def _take_preloaded_tokenizer(model_name: str) -> Any | None:
+    """Consume the preloaded tokenizer, but only if it is for *model_name*."""
+    global _tokenizer_thread, _preloaded_tokenizer
+    if _tokenizer_thread is None:
+        return None
+    _tokenizer_thread.join(timeout=30)
+    if _tokenizer_thread.is_alive():
+        return None
+    loaded = _preloaded_tokenizer
+    _tokenizer_thread = None
+    _preloaded_tokenizer = None
+    if loaded is None or loaded[0] != model_name:
+        return None
+    return loaded[1]
 
 
 def _take_preloaded_state_dict() -> dict | None:
@@ -666,4 +709,7 @@ def _init_from_state_dict(
     from open_clip.transform import PreprocessCfg, image_transform_v2
     pp_cfg = PreprocessCfg(**model.visual.preprocess_cfg)
     clip.preprocess = image_transform_v2(pp_cfg, is_train=False)
-    clip.tokenizer = _load_tokenizer(open_clip, model_name)
+    clip.tokenizer = (
+        _take_preloaded_tokenizer(model_name)
+        or _load_tokenizer(open_clip, model_name)
+    )
