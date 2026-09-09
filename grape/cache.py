@@ -128,6 +128,10 @@ class EmbeddingCache:
                 # blobs make this file large (~4 KB/row), and mmap cut a
                 # full scan from 263ms to 113ms at 50k rows.
                 self._conn.execute("PRAGMA mmap_size=1073741824")
+                # Validate b-tree cell bounds on every page read, so a
+                # damaged file is caught instead of followed into
+                # unrelated memory. Measured cost on a full scan: nil.
+                self._conn.execute("PRAGMA cell_size_check=ON")
                 self._conn.execute(_CREATE_EMBEDDINGS)
                 self._conn.execute(_CREATE_NOT_IMAGES)
                 self._conn.execute(_CREATE_TEXT_EMBEDDINGS)
