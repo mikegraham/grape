@@ -294,13 +294,8 @@ def _make_stub(name: str, doc: str, **attrs: Any) -> types.ModuleType:
     return stub
 
 
-def _model_needs_timm(model_name: str) -> bool:
-    """Check whether a model architecture requires timm.
-
-    Reads the JSON config from open_clip's installed model_configs directory
-    without importing open_clip itself. Returns True (safe default) if the
-    config can't be found.
-    """
+def _builtin_model_config(model_name: str) -> dict | None:
+    """Read open_clip's built-in JSON config without importing open_clip."""
     oc_init = sys.modules.get("open_clip", None)
     if oc_init is not None and getattr(oc_init, "__file__", None) is not None:
         cfg_dir = Path(oc_init.__file__).parent / "model_configs"  # type: ignore[arg-type]
@@ -308,13 +303,21 @@ def _model_needs_timm(model_name: str) -> bool:
         import importlib.util
         spec = importlib.util.find_spec("open_clip")
         if spec is None or spec.origin is None:
-            return True  # can't tell, assume yes (safe)
+            return None
         cfg_dir = Path(spec.origin).parent / "model_configs"
     cfg_file = cfg_dir / f"{model_name}.json"
     if not cfg_file.is_file():
-        return True  # unknown model, assume yes (safe)
+        return None
     import json
-    cfg = json.loads(cfg_file.read_text())
+    cfg: dict = json.loads(cfg_file.read_text())
+    return cfg
+
+
+def _model_needs_timm(model_name: str) -> bool:
+    """Check whether a model architecture requires timm."""
+    cfg = _builtin_model_config(model_name)
+    if cfg is None:
+        return True  # can't tell, assume yes (safe)
     vcfg = cfg.get("vision_cfg", {})
     return isinstance(vcfg, dict) and "timm_model_name" in vcfg
 
