@@ -390,3 +390,54 @@ def test_image_hit_index_dedups_across_models(tmp_path):
     cache._conn.commit()
     assert cache.image_hit_index() == {(path, stat)}
     cache.close()
+
+
+def _canonical_stat_slow(token: str) -> str:
+    """The pre-fast-path implementation, kept as a test oracle."""
+    try:
+        fields = json.loads(token)
+    except (ValueError, TypeError):
+        return token
+    if not isinstance(fields, list) or len(fields) != 5:
+        return token
+    fields[3] = 0
+    return json.dumps(fields)
+
+
+@pytest.mark.parametrize("token", [
+    json.dumps([1000, 1700000000.0, 42, 0, 1700000000.0]),     # canonical
+    json.dumps([1000, 1700000000.0, 42, 2049, 1700000000.0]),  # legacy dev
+    json.dumps([1, 2, 3, 0, 4]),                               # all ints
+    json.dumps([1, 2, 3]),                                     # wrong length
+    json.dumps({"a": 1}),                                      # not a list
+    "stat-a",                                                  # opaque sentinel
+    "[not, valid, json, 0, here]",                             # bracketed non-json
+    "",
+])
+def test_canonical_stat_fast_path_matches_slow_path(token):
+    """The fast path must be indistinguishable from the json round-trip."""
+    assert _canonical_stat(token) == _canonical_stat_slow(token)
+
+
+def test_canonical_stat_zeroes_legacy_dev_field():
+    legacy = json.dumps([10, 20.0, 30, 2049, 40.0])
+    assert json.loads(_canonical_stat(legacy))[3] == 0
+
+
+def test_canonical_stat_never_merges_distinct_stats():
+    """The invariant the fast path must hold.
+
+    It may skip normalizing a token grape did not write, which costs a
+    re-encode. It must never make two distinct stats compare equal, which
+    would serve a stale embedding.
+    """
+    a = json.dumps([1, 2.0, 3, 0, 4.0])
+    b = json.dumps([1, 2.0, 3, 0, 5.0])
+    assert _canonical_stat(a) != _canonical_stat(b)
+
+    # json.dumps renders this exponent as "1.5e-09", so a hand-written row
+    # using "1.5e-9" compares unequal and re-encodes rather than reusing.
+    foreign = "[1.5e-9, 2, 3, 0, 4]"
+    assert _canonical_stat(foreign) != _canonical_stat(
+        json.dumps([1.5e-9, 2, 3, 0, 4])
+    )

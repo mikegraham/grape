@@ -112,6 +112,22 @@ def _canonical_stat(token: str) -> str:
     unchanged, so opaque sentinels (e.g. test values like "stat-a")
     still compare exactly.
     """
+    # Fast path: every token written since dev was pinned to 0 is already
+    # canonical, so skip the json round-trip (~2us/row, paid on every row
+    # of every index scan). Tokens grape writes are returned unchanged,
+    # which is what the round-trip below would produce anyway.
+    #
+    # A token grape did not write may skip normalization here (json.dumps
+    # would render "1.5e-9" as "1.5e-09"). That is safe in the only
+    # direction that matters: this is used to compare a stored token
+    # against a freshly computed one, and returning a token verbatim
+    # cannot make two distinct stats compare equal. Worst case is a
+    # re-encode, never a stale hit. Guarded by
+    # test_canonical_stat_never_merges_distinct_stats.
+    if token.startswith("[") and token.endswith("]"):
+        parts = token[1:-1].split(", ")
+        if len(parts) == 5 and parts[3] == "0":
+            return token
     try:
         fields = json.loads(token)
     except (ValueError, TypeError):
