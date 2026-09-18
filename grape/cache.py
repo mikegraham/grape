@@ -11,8 +11,9 @@ import os
 import sqlite3
 import threading
 from collections.abc import Mapping, Sequence
+from itertools import chain
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 if TYPE_CHECKING:
     import numpy as np
@@ -140,6 +141,14 @@ def _canonical_stat(token: str) -> str:
     return json.dumps(fields)
 
 
+class EmbeddingIndex(NamedTuple):
+    """Every cached image embedding for one model, as a single matrix."""
+
+    # (path, canonical file_stat) -> row of ``matrix``
+    rows: dict[tuple[str, str], int]
+    matrix: NDArray[np.float32]
+
+
 class EmbeddingCache:
     """Read-through cache for CLIP image embeddings stored in SQLite."""
 
@@ -240,23 +249,37 @@ class EmbeddingCache:
                 out[row_path] = np.frombuffer(blob, dtype=np.float32).copy()
         return out
 
-    def embedding_index_for_model(
-        self,
-        model_id: str,
-    ) -> dict[tuple[str, str], NDArray[np.float32]]:
-        """Return in-memory ``(path, file_stat) -> embedding`` for a model."""
+    def embedding_index_for_model(self, model_id: str) -> EmbeddingIndex:
+        """Load every cached embedding for *model_id* into one matrix."""
         import numpy as np
 
+        rows: dict[tuple[str, str], int] = {}
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT path, file_stat, embedding FROM embeddings WHERE model = ?",
+            (capacity,) = self._conn.execute(
+                "SELECT count(*) FROM embeddings WHERE model = ?", (model_id,),
+            ).fetchone()
+            cursor = self._conn.execute(
+                "SELECT path, file_stat, embedding FROM embeddings"
+                " WHERE model = ?",
                 (model_id,),
-            ).fetchall()
-        return {
-            (path, _canonical_stat(file_stat)):
-                np.frombuffer(blob, dtype=np.float32).copy()
-            for path, file_stat, blob in rows
-        }
+            )
+            first = cursor.fetchone()
+            if first is None:
+                return EmbeddingIndex({}, np.empty((0, 0), dtype=np.float32))
+            # Copy blobs straight into one matrix: an array per row plus a
+            # vstack cost ~420ms at 20k rows, this ~70ms.
+            size = len(first[2])
+            matrix = np.empty((capacity, size // 4), dtype=np.float32)
+            buf = matrix.data.cast("B")
+            row = 0
+            for path, file_stat, blob in chain((first,), cursor):
+                # Another process inserted rows since the count.
+                if row == capacity:
+                    break
+                buf[row * size:(row + 1) * size] = blob
+                rows[(path, _canonical_stat(file_stat))] = row
+                row += 1
+        return EmbeddingIndex(rows, matrix[:row])
 
     def has_any_embedding(
         self,

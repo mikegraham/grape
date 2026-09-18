@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from grape.cache import EmbeddingIndex
 from grape.cli import (
     DEFAULT_PROMPT_ENSEMBLE,
     _apply_excluded_keywords,
@@ -405,13 +406,13 @@ def _stub_pipeline(monkeypatch, score=0.75):
 
     def _fake_prepare_cached_embeddings(scan_result, cache_context):
         items, scan_done = scan_result
-        return (None, [], items, scan_done)
+        return (None, [], [], items, scan_done)
 
     def _fake_score_all(
         prepared, model, score_keywords, like_paths, text_emb,
         cache, quiet, verbose,
     ):
-        _image_emb, _cached_items, uncached_items, scan_done = prepared
+        *_, uncached_items, scan_done = prepared
         results = [
             ScoredImage(path=item.path, score=score,
                         scores={kw: score for kw in score_keywords})
@@ -575,7 +576,7 @@ def test_exclude_keywords_adjusts_output_score(tmp_path, monkeypatch):
         prepared, model, score_keywords, like_paths, text_emb,
         cache, quiet, verbose,
     ):
-        _image_emb, _cached_items, uncached_items, scan_done = prepared
+        *_, uncached_items, scan_done = prepared
         results = [
             ScoredImage(path=item.path,
                         scores={"dog": 0.9, "cat": 0.2})
@@ -616,7 +617,7 @@ def test_exclude_verbose_shows_not_keyword(tmp_path, monkeypatch):
         prepared, model, score_keywords, like_paths, text_emb,
         cache, quiet, verbose,
     ):
-        _image_emb, _cached_items, uncached_items, scan_done = prepared
+        *_, uncached_items, scan_done = prepared
         results = [
             ScoredImage(path=item.path,
                         scores={"dog": 0.9, "cat": 0.2})
@@ -736,9 +737,10 @@ def test_score_all_uses_in_memory_cache_index():
             file_stat="stat-a",
         )
     ]
-    cached_index = {
-        ("/tmp/a.jpg", "stat-a"): np.array([1.0, 0.0], dtype=np.float32)
-    }
+    cached_index = EmbeddingIndex(
+        rows={("/tmp/a.jpg", "stat-a"): 0},
+        matrix=np.array([[1.0, 0.0]], dtype=np.float32),
+    )
     text_emb = np.array([[1.0, 0.0]], dtype=np.float32)
     scan_result = (items, ScanReport(image_count=1))
     cache_context = ("model-id", cached_index)
@@ -800,14 +802,16 @@ def test_reboot_does_not_reencode_cached_images(tmp_path):
 
     items = list(iter_image_records(str(scan_dir), cache=cache))
     cached_index = cache.embedding_index_for_model("model-a")
-    image_emb, cached_items, uncached_items, _done = _prepare_cached_embeddings(
-        (items, ScanReport(image_count=len(items))),
-        ("model-a", cached_index),
+    image_emb, cached_rows, cached_items, uncached_items, _done = (
+        _prepare_cached_embeddings(
+            (items, ScanReport(image_count=len(items))),
+            ("model-a", cached_index),
+        )
     )
 
     assert [r.path for r in cached_items] == [str(img)]
     assert uncached_items == []
-    np.testing.assert_array_equal(image_emb, emb)
+    np.testing.assert_array_equal(image_emb[cached_rows], emb)
     cache.close()
 
 
@@ -836,9 +840,10 @@ def test_score_all_duplicate_like_paths_keep_separate_scores():
             file_stat="stat-a",
         )
     ]
-    cached_index = {
-        ("/tmp/a.jpg", "stat-a"): np.array([1.0, 0.0], dtype=np.float32)
-    }
+    cached_index = EmbeddingIndex(
+        rows={("/tmp/a.jpg", "stat-a"): 0},
+        matrix=np.array([[1.0, 0.0]], dtype=np.float32),
+    )
     # One text keyword + two like images (same basename, different dirs).
     text_keywords = ["dog"]
     like_paths = ["/x/ref.jpg", "/y/ref.jpg"]
@@ -1010,7 +1015,7 @@ def test_score_all_skips_syntax_error():
     ]
     text_emb = np.array([[1.0, 0.0]], dtype=np.float32)
     scan_result = (items, ScanReport(image_count=1))
-    cache_context = ("model-id", {})
+    cache_context = ("model-id", None)
     tracking = _TrackingCache()
 
     prepared = _prepare_cached_embeddings(
@@ -1049,7 +1054,7 @@ def test_score_all_skips_oserror_no_errno():
     ]
     text_emb = np.array([[1.0, 0.0]], dtype=np.float32)
     scan_result = (items, ScanReport(image_count=1))
-    cache_context = ("model-id", {})
+    cache_context = ("model-id", None)
 
     prepared = _prepare_cached_embeddings(
         scan_result, cache_context,
@@ -1090,7 +1095,7 @@ def test_score_all_propagates_real_oserror():
     ]
     text_emb = np.array([[1.0, 0.0]], dtype=np.float32)
     scan_result = (items, ScanReport(image_count=1))
-    cache_context = ("model-id", {})
+    cache_context = ("model-id", None)
 
     prepared = _prepare_cached_embeddings(
         scan_result, cache_context,
@@ -1131,7 +1136,7 @@ def test_score_all_verbose_prints_uncached_paths(capsys):
     ]
     text_emb = np.array([[1.0, 0.0]], dtype=np.float32)
     scan_result = (items, ScanReport(image_count=2))
-    cache_context = ("model-id", {})
+    cache_context = ("model-id", None)
 
     prepared = _prepare_cached_embeddings(
         scan_result, cache_context,
@@ -1170,7 +1175,7 @@ def test_score_all_non_verbose_omits_uncached_paths(capsys):
     ]
     text_emb = np.array([[1.0, 0.0]], dtype=np.float32)
     scan_result = (items, ScanReport(image_count=1))
-    cache_context = ("model-id", {})
+    cache_context = ("model-id", None)
 
     prepared = _prepare_cached_embeddings(
         scan_result, cache_context,

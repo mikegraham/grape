@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     import numpy as np
     from numpy.typing import NDArray
 
-    from grape.cache import EmbeddingCache
+    from grape.cache import EmbeddingCache, EmbeddingIndex
     from grape.model import CLIPModel
 
 log = logging.getLogger("grape")
@@ -194,7 +194,7 @@ def _encode_keywords(
     model: _LazyModel,
     score_keywords: list[str],
     prompt_templates: list[str],
-    cache_context: tuple[str | None, dict[tuple[str, str], NDArray[np.float32]] | None],
+    cache_context: tuple[str | None, EmbeddingIndex | None],
     cache: EmbeddingCache | None,
 ) -> NDArray[np.float32]:
     """Encode keyword prompts into text embeddings.
@@ -280,7 +280,7 @@ def _encode_keywords(
 def _encode_like_images(
     model: _LazyModel,
     like_paths: list[str],
-    cache_context: tuple[str | None, dict[tuple[str, str], NDArray[np.float32]] | None],
+    cache_context: tuple[str | None, EmbeddingIndex | None],
     cache: EmbeddingCache | None,
 ) -> NDArray[np.float32]:
     """Encode --like reference images into query embeddings.
@@ -317,7 +317,7 @@ def _resolve_and_index_cache(
     model_name: str,
     pretrained: str,
     cache: "EmbeddingCache | None",
-) -> tuple[str | None, dict[tuple[str, str], NDArray[np.float32]] | None]:
+) -> tuple[str | None, EmbeddingIndex | None]:
     """Resolve model_id and materialize the cache index.
 
     Caches model_id in SQLite so subsequent runs skip the torch import.
@@ -339,7 +339,7 @@ def _resolve_and_index_cache(
         log.debug("model_id from cache: %s", model_id)
 
     cached_index = cache.embedding_index_for_model(model_id)
-    log.debug("cache index: %d image embeddings", len(cached_index))
+    log.debug("cache index: %d image embeddings", len(cached_index.rows))
     return model_id, cached_index
 
 
@@ -424,31 +424,30 @@ def _scan_files(
 
 def _prepare_cached_embeddings(
     scan_result: tuple[list[ImageRecord], ScanReport],
-    cache_context: tuple[str | None, dict[tuple[str, str], NDArray[np.float32]] | None],
+    cache_context: tuple[str | None, EmbeddingIndex | None],
 ) -> tuple[
-    NDArray[np.float32] | None, list[ImageRecord], list[ImageRecord], ScanReport,
+    NDArray[np.float32] | None, list[int],
+    list[ImageRecord], list[ImageRecord], ScanReport,
 ]:
-    """Split scanned images into cached/uncached and vstack cached vectors.
+    """Split scanned images into cached/uncached.
 
-    Runs as soon as scanning and cache indexing finish -- does not wait for
-    model loading or text encoding, so the ~23ms vstack overlaps with those.
-    Returns (image_emb_matrix | None, cached_items, uncached_items, scan_done).
+    Returns (cache matrix | None, matrix row of each cached item,
+    cached_items, uncached_items, scan_done).
     """
-    import numpy as np
-
     _model_id, cached_index = cache_context
     items, scan_done = scan_result
 
     cached_items: list[ImageRecord] = []
-    cached_vectors: list[NDArray[np.float32]] = []
+    cached_rows: list[int] = []
     uncached_items: list[ImageRecord] = []
 
     if cached_index is not None:
+        rows = cached_index.rows
         for item in items:
-            emb = cached_index.get((item.path_key, item.file_stat))
-            if emb is not None:
+            row = rows.get((item.path_key, item.file_stat))
+            if row is not None:
                 cached_items.append(item)
-                cached_vectors.append(emb)
+                cached_rows.append(row)
             else:
                 uncached_items.append(item)
     else:
@@ -458,13 +457,17 @@ def _prepare_cached_embeddings(
         "prepare: %d cached, %d uncached images",
         len(cached_items), len(uncached_items),
     )
-    image_emb = np.vstack(cached_vectors) if cached_vectors else None
-    return image_emb, cached_items, uncached_items, scan_done
+    image_emb = (
+        cached_index.matrix
+        if cached_index is not None and cached_rows else None
+    )
+    return image_emb, cached_rows, cached_items, uncached_items, scan_done
 
 
 def _score_all(
     prepared: tuple[
-        NDArray[np.float32] | None, list[ImageRecord], list[ImageRecord], ScanReport,
+        NDArray[np.float32] | None, list[int],
+        list[ImageRecord], list[ImageRecord], ScanReport,
     ],
     model: _LazyModel,
     score_keywords: list[str],
@@ -484,7 +487,7 @@ def _score_all(
 
     from grape.search import _get_embedding
 
-    image_emb, cached_items, uncached_items, scan_done = prepared
+    image_emb, cached_rows, cached_items, uncached_items, scan_done = prepared
     n_text = len(score_keywords)
 
     def _make_result(path: str, sims: NDArray[np.float32]) -> ScoredImage:
@@ -505,7 +508,9 @@ def _score_all(
 
     # Fast path: score cached items via a single matrix multiply.
     if image_emb is not None:
-        sims_matrix = image_emb @ text_emb.T
+        # Score every cached row, then pick ours: indexing image_emb first
+        # would copy the whole matrix.
+        sims_matrix = (image_emb @ text_emb.T)[cached_rows]
         for idx, item in enumerate(cached_items):
             results.append(_make_result(item.path, sims_matrix[idx]))
 
