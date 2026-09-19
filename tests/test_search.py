@@ -170,7 +170,7 @@ def test_mp4_rejected(fixtures_dir):
 
 
 def test_not_image_takes_priority_over_image_hit(tmp_path):
-    """A file in both image_hits and not_image_hits is excluded.
+    """A file in both image_paths and not_image_hits is excluded.
 
     This happens when a file was once embedded successfully but later
     found to be broken (e.g. truncated).  not_images must win.

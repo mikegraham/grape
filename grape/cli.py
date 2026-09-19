@@ -368,14 +368,11 @@ def _scan_files(
     cache: "EmbeddingCache | None",
 ) -> tuple[list[ImageRecord], ScanReport]:
     """Discover image files from CLI paths. Independent of model loading."""
+    image_paths: set[str] | None = None
+    not_image_hits: set[tuple[str, str]] | None = None
     if cache is not None:
-        image_hits = cache.image_hit_index()
-        image_paths = {p for p, _ in image_hits}
+        image_paths = cache.image_paths()
         not_image_hits = cache.not_image_index()
-    else:
-        image_hits = None
-        image_paths = None
-        not_image_hits = None
     items: list[ImageRecord] = []
     error_message: str | None = None
 
@@ -389,8 +386,7 @@ def _scan_files(
             if not_image_hits is not None and cache_key in not_image_hits:
                 continue
             if (
-                (image_hits is None or cache_key not in image_hits)
-                and (image_paths is None or record.path_key not in image_paths)
+                (image_paths is None or record.path_key not in image_paths)
                 and not is_image(
                     record.path, cache,
                     path_key=record.path_key, file_stat=record.file_stat,
@@ -408,7 +404,6 @@ def _scan_files(
                 p,
                 recursive=True,
                 cache=cache,
-                image_hits=image_hits,
                 image_paths=image_paths,
                 not_image_hits=not_image_hits,
             ))

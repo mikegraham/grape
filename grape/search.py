@@ -119,7 +119,6 @@ def iter_image_records(
     recursive: bool = False,
     cache: EmbeddingCache | None = None,
     *,
-    image_hits: set[tuple[str, str]] | None = None,
     image_paths: set[str] | None = None,
     not_image_hits: set[tuple[str, str]] | None = None,
 ) -> Iterator[ImageRecord]:
@@ -134,10 +133,8 @@ def iter_image_records(
     real_root = os.path.realpath(directory)
     if not os.path.isdir(real_root):
         return
-    if image_hits is None and cache is not None:
-        image_hits = cache.image_hit_index()
-    if image_paths is None and image_hits is not None:
-        image_paths = {p for p, _ in image_hits}
+    if image_paths is None and cache is not None:
+        image_paths = cache.image_paths()
     if not_image_hits is None and cache is not None:
         not_image_hits = cache.not_image_index()
     # Track visited real directory paths to avoid infinite loops from
@@ -182,29 +179,14 @@ def iter_image_records(
                 # video container, etc.) must stay excluded.
                 if not_image_hits is not None and cache_key in not_image_hits:
                     continue
-                if image_hits is not None and cache_key in image_hits:
-                    yield ImageRecord(
-                        path=display_path,
-                        path_key=real_path,
-                        file_stat=stat_key,
-                    )
-                    continue
                 # image_paths covers all models: whether a file is an image
                 # doesn't depend on which model encoded it, so a hit under
                 # any model (or with a stale stat) skips the format check,
                 # which requires opening the file to read its header.
-                if image_paths is not None and real_path in image_paths:
-                    yield ImageRecord(
-                        path=display_path,
-                        path_key=real_path,
-                        file_stat=stat_key,
-                    )
-                    continue
-                if is_image(
-                    display_path,
-                    cache,
-                    path_key=real_path,
-                    file_stat=stat_key,
+                if (
+                    image_paths is not None and real_path in image_paths
+                ) or is_image(
+                    display_path, cache, path_key=real_path, file_stat=stat_key,
                 ):
                     yield ImageRecord(
                         path=display_path,
@@ -218,7 +200,6 @@ def iter_images(
     recursive: bool = False,
     cache: EmbeddingCache | None = None,
     *,
-    image_hits: set[tuple[str, str]] | None = None,
     not_image_hits: set[tuple[str, str]] | None = None,
 ) -> Iterator[str]:
     """Yield display image paths under *directory* (path-only wrapper)."""
@@ -226,7 +207,6 @@ def iter_images(
         directory,
         recursive=recursive,
         cache=cache,
-        image_hits=image_hits,
         not_image_hits=not_image_hits,
     ):
         yield record.path

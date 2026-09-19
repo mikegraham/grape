@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS text_embeddings (
 )
 """
 
-# Metadata-only scans (image_hit_index) would otherwise walk the table
+# Metadata-only scans (image_paths) would otherwise walk the table
 # itself, whose pages are ~97% embedding blob -- and at >=1024 dims every
 # row spills to an overflow page. This index covers those queries so they
 # read a small b-tree instead. Column order matters: model first so
@@ -300,16 +300,16 @@ class EmbeddingCache:
             ).fetchall()
         return any(_canonical_stat(s) == stat_key for (s,) in rows)
 
-    def image_hit_index(self) -> set[tuple[str, str]]:
-        """Return ``(path, file_stat)`` pairs known to have embeddings."""
+    def image_paths(self) -> set[str]:
+        """Return paths that have an embedding under any model."""
         with self._lock:
             rows = self._conn.execute(
                 # No DISTINCT: the set comprehension below already dedups,
                 # and DISTINCT forces a temp b-tree that stops SQLite from
                 # using the covering index (48ms -> 9ms at 20k rows).
-                "SELECT path, file_stat FROM embeddings"
+                "SELECT path FROM embeddings"
             ).fetchall()
-        return {(path, _canonical_stat(file_stat)) for path, file_stat in rows}
+        return {path for (path,) in rows}
 
     def not_image_index(self) -> set[tuple[str, str]]:
         """Return ``(path, file_stat)`` pairs known to be non-images."""

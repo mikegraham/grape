@@ -159,13 +159,9 @@ def test_has_any_embedding_invalidated_on_change(cache, img):
     assert not cache.has_any_embedding(img)
 
 
-def test_image_hit_index_contains_cached_file(cache, img):
+def test_image_paths_contains_cached_file(cache, img):
     cache.put(img, "model-a", _rand_embedding(32))
-    stat = cache._conn.execute(
-        "SELECT file_stat FROM embeddings WHERE path = ?",
-        (str(img.resolve()),),
-    ).fetchone()[0]
-    assert (str(img.resolve()), stat) in cache.image_hit_index()
+    assert str(img.resolve()) in cache.image_paths()
 
 
 # --- not-image tracking ---
@@ -224,7 +220,6 @@ def test_legacy_dev_embedding_still_hits(cache, img):
     assert got is not None
     np.testing.assert_array_equal(got, emb)
     assert cache.has_any_embedding(img)
-    assert (path, live_stat) in cache.image_hit_index()
     assert (path, live_stat) in cache.embedding_index_for_model("model-a").rows
     assert path in cache.get_many_for_paths("model-a", {path: live_stat})
 
@@ -383,7 +378,7 @@ def test_covering_index_created(tmp_path):
     assert "idx_embeddings_cover" in names
 
 
-def test_image_hit_index_dedups_across_models(tmp_path):
+def test_image_paths_dedups_across_models(tmp_path):
     """DISTINCT was dropped from the query; the set must still dedup."""
     cache = EmbeddingCache(tmp_path / "c.db")
     path = str(tmp_path / "x.jpg")
@@ -395,7 +390,7 @@ def test_image_hit_index_dedups_across_models(tmp_path):
             (path, stat, model, _rand_embedding().tobytes()),
         )
     cache._conn.commit()
-    assert cache.image_hit_index() == {(path, stat)}
+    assert cache.image_paths() == {path}
     cache.close()
 
 
