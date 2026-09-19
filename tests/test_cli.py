@@ -959,7 +959,7 @@ def test_scan_files_includes_cache_metadata(tmp_path):
 
     # _scan_files returns its tuple directly now (no dask)
     items, done = _scan_files(
-        [str(image_path)], False, None,
+        [str(image_path)], False, None, (None, None),
     )
 
     assert len(items) == 1
@@ -974,6 +974,34 @@ def test_scan_files_includes_cache_metadata(tmp_path):
     assert item.file_stat == stat_key_from_stat(os.stat(item.path_key))
     assert done.image_count == 1
     assert done.error_message is None
+
+
+def test_scan_files_trusts_loaded_index_without_opening_files(
+    tmp_path, monkeypatch,
+):
+    """image_paths() leaves out the loaded model's rows, so the index must
+    supply them, or every cached image gets opened again."""
+    from grape.cache import EmbeddingCache
+    from grape.cli import _scan_files
+
+    scan_dir = tmp_path / "images"
+    scan_dir.mkdir()
+    image_path = scan_dir / "a.jpg"
+    Image.new("RGB", (2, 2)).save(image_path)
+
+    cache = EmbeddingCache(tmp_path / "c.db")
+    cache.put(image_path, "model-a", np.ones((1, 4), dtype=np.float32))
+    index = cache.embedding_index_for_model("model-a")
+
+    def _fail_open(*_args, **_kwargs):
+        raise AssertionError("cached image should not be opened")
+
+    monkeypatch.setattr("PIL.Image.open", _fail_open)
+    items, done = _scan_files([str(scan_dir)], True, cache, ("model-a", index))
+    cache.close()
+
+    assert [item.path for item in items] == [str(image_path)]
+    assert done.image_count == 1
 
 
 def test_scan_files_rejects_non_images_passed_directly(tmp_path):
@@ -993,7 +1021,7 @@ def test_scan_files_rejects_non_images_passed_directly(tmp_path):
     txt.write_text("not an image")
 
     items, done = _scan_files(
-        [str(jpg), str(mp4), str(txt)], False, None,
+        [str(jpg), str(mp4), str(txt)], False, None, (None, None),
     )
 
     assert done.image_count == 1
@@ -1278,7 +1306,7 @@ def test_scan_files_skips_direct_file_cached_as_not_image(tmp_path):
     cache.put_not_image(bad)
 
     items, done = _scan_files(
-        [str(jpg), str(bad)], False, cache,
+        [str(jpg), str(bad)], False, cache, (None, None),
     )
 
     assert done.image_count == 1
