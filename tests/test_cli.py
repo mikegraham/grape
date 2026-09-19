@@ -771,6 +771,59 @@ def test_score_all_uses_in_memory_cache_index():
     assert results[0].score == pytest.approx(1.0)
 
 
+def test_reboot_does_not_reencode_cached_images(tmp_path):
+    """End-to-end guard for the 0.3.0 device-id fix.
+
+    A pre-0.3.0 row stored the real st_dev; after a reboot/remount the
+    live scan computes a different dev. Through the real scan + index +
+    split, the file must route to cached_items (reuse), never
+    uncached_items (re-encode). Unlike the cache-unit tests, this covers
+    the actual pipeline decision a user depends on -- and it would still
+    fail if canonicalization regressed, since the scan record's fresh
+    stat differs from the stored one only in the dev field.
+    """
+    import json
+
+    from grape.cache import EmbeddingCache
+    from grape.cli import ScanReport, _prepare_cached_embeddings
+    from grape.search import iter_image_records
+
+    scan_dir = tmp_path / "images"
+    scan_dir.mkdir()
+    img = scan_dir / "real.jpg"
+    Image.new("RGB", (2, 2)).save(img, format="JPEG")
+
+    cache = EmbeddingCache(tmp_path / "c.db")
+    emb = np.arange(4, dtype=np.float32).reshape(1, 4)
+    cache.put(img, "model-a", emb)
+
+    # Rewrite the stored row to hold a real device number, as a row
+    # cached before 0.3.0 would.
+    key = str(img.resolve())
+    stored = cache._conn.execute(
+        "SELECT file_stat FROM embeddings WHERE path = ?", (key,)
+    ).fetchone()[0]
+    fields = json.loads(stored)
+    fields[3] = 4242
+    cache._conn.execute(
+        "UPDATE embeddings SET file_stat = ? WHERE path = ?",
+        (json.dumps(fields), key),
+    )
+    cache._conn.commit()
+
+    items = list(iter_image_records(str(scan_dir), cache=cache))
+    cached_index = cache.embedding_index_for_model("model-a")
+    image_emb, cached_items, uncached_items, _done = _prepare_cached_embeddings(
+        (items, ScanReport(image_count=len(items))),
+        ("model-a", cached_index),
+    )
+
+    assert [r.path for r in cached_items] == [str(img)]
+    assert uncached_items == []
+    np.testing.assert_array_equal(image_emb, emb)
+    cache.close()
+
+
 def test_score_all_duplicate_like_paths_keep_separate_scores():
     """--like /a/ref.jpg --like /b/ref.jpg must preserve both scores.
 
@@ -852,9 +905,11 @@ def test_scan_files_includes_cache_metadata(tmp_path):
     assert isinstance(item, ImageRecord)
     assert item.path == str(image_path)
     assert item.path_key == str(image_path.resolve())
-    assert item.file_stat is not None
-    assert item.file_stat.startswith("[")
-    assert item.file_stat.endswith("]")
+    # file_stat must be the exact stat token the cache keys on, not just
+    # some bracketed string. Asserting equality with the real token keeps
+    # this behavioral (and insensitive to the token's internal format).
+    from grape.cache import stat_key_from_stat
+    assert item.file_stat == stat_key_from_stat(os.stat(item.path_key))
     assert done.image_count == 1
     assert done.error_message is None
 
