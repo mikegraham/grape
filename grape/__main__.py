@@ -1,3 +1,3 @@
-from grape.cli import main
+from grape.cli import run
 
-main()
+run()

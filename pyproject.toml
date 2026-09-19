@@ -49,7 +49,7 @@ dev = [
 include = ["grape*"]
 
 [project.scripts]
-grape = "grape.cli:main"
+grape = "grape.cli:run"
 
 # --- pytest ---
 [tool.pytest.ini_options]
