@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "grape-image-search"
-version = "0.3.0"
+version = "0.4.0"
 description = "Find images matching keywords using CLIP. Like grep, but for images."
 readme = "README.md"
 license = "MIT"

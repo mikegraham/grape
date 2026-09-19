@@ -5,13 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-09-19
 
 ### Changed
-- Runs that load the model finish about 1 s sooner, by skipping interpreter teardown on exit.
 - Default model is now `ViT-L-16-SigLIP2-256/webli` (was `EVA02-L-14/merged2b_s4b_b131k`): +2.7 zero-shot ImageNet, better retrieval, same encode speed. **First run re-encodes your library.** Download is ~3.5 GB (was ~900 MB).
 - Fully cached searches are ~2.5x faster (about 0.9s -> 0.35s at 20k images) and use ~7x less CPU.
-- Runs that load a SigLIP model (new keywords or images) start ~3 s sooner.
+- Runs that load the model (new keywords or images) finish ~4 s sooner with the default model.
 
 ### Fixed
 - Models with a Hugging Face tokenizer (SigLIP, SigLIP 2) now load offline once cached, and no longer contact the Hub on every run.
