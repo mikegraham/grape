@@ -541,7 +541,7 @@ def _filter_and_sort(
     threshold: float | None,
     top: int | None,
     quiet: bool,
-) -> list[ScoredImage]:
+) -> Ranking:
     """Rank, apply threshold and top-N, and validate scan status.
 
     Runs on the main thread after the executor finishes.
@@ -575,8 +575,21 @@ def _filter_and_sort(
     if top is not None:
         order = order[:top]
 
-    # Only shown results become ScoredImages: one per scanned image cost
-    # ~165ms at 20k, mostly thrown away by -n.
+    return Ranking(
+        table=table, order=order.tolist(), scores=scores[order].tolist(),
+    )
+
+
+def _scored_images(
+    ranking: Ranking,
+    keywords: list[str],
+    exclude_keywords: list[str],
+    like_paths: list[str],
+) -> list[ScoredImage]:
+    """Per-query score breakdown of each ranked image, for -s/-v/--view."""
+    import numpy as np
+
+    table = ranking.table
     labels = keywords + [f"not:{kw}" for kw in exclude_keywords]
     n_text = len(labels)
     return [
@@ -587,18 +600,18 @@ def _filter_and_sort(
             score=score,
         )
         for i, sims, score in zip(
-            order.tolist(),
-            table.sims[order].astype(np.float64).tolist(),
-            scores[order].tolist(),
+            ranking.order,
+            table.sims[ranking.order].astype(np.float64).tolist(),
+            ranking.scores,
         )
     ]
 
 
 def _emit(
-    results: list[ScoredImage],
+    ranking: Ranking,
     keywords: list[str],
     exclude_keywords: list[str],
-    like_names: list[str],
+    like_paths: list[str],
     scores: bool,
     verbose: bool,
     print0: bool,
@@ -610,7 +623,7 @@ def _emit(
     Runs after the pipeline finishes, so pywebview
     and stdout output happen on the main thread where they belong.
     """
-    if not results:
+    if not ranking.order:
         print("grape: no images above threshold", file=sys.stderr)
         return 0
 
@@ -618,23 +631,31 @@ def _emit(
     if view:
         display_keywords = (
             keywords
-            + [f"like:{name}" for name in like_names]
+            + [f"like:{Path(p).name}" for p in like_paths]
             + [f"not:{kw}" for kw in exclude_keywords]
+        )
+        results = _scored_images(
+            ranking, keywords, exclude_keywords, like_paths,
         )
         html_doc = _format_html(results, display_keywords)
         _show_in_webview(html_doc)
         return len(results)
     if show_scores:
+        results = _scored_images(
+            ranking, keywords, exclude_keywords, like_paths,
+        )
         print(_format_results(results, verbose=verbose))
         return len(results)
+    # Path-only output skips the breakdowns: ~30ms at 20k results.
+    paths = [ranking.table.paths[i] for i in ranking.order]
     if print0:
-        for r in results:
-            sys.stdout.write(f"{r.path}\0")
+        for p in paths:
+            sys.stdout.write(f"{p}\0")
         sys.stdout.flush()
-        return len(results)
-    for r in results:
-        print(shlex.quote(r.path))
-    return len(results)
+        return len(paths)
+    for p in paths:
+        print(shlex.quote(p))
+    return len(paths)
 
 
 # ---------------------------------------------------------------------------
@@ -657,6 +678,15 @@ class ScoreTable:
     """
     paths: list[str]
     sims: NDArray[np.float32]
+
+
+@dataclass
+class Ranking:
+    """The ``ScoreTable`` rows to show, best first."""
+    table: ScoreTable
+    order: list[int]
+    # Combined score of each shown row, parallel to ``order``.
+    scores: list[float]
 
 
 # ---------------------------------------------------------------------------
@@ -1031,8 +1061,6 @@ def _run_pipeline(
     view: bool,
 ) -> None:
     """Run the full CLI pipeline on a small ThreadPoolExecutor."""
-    like_names = [Path(p).name for p in like_paths]
-
     # Each dependent task is wrapped in a closure that calls .result()
     # on its inputs -- the executor schedules Futures, workers blocked
     # on .result() don't consume CPU. max_workers=4 matches our truly
@@ -1085,12 +1113,12 @@ def _run_pipeline(
 
     # Post-processing and output run on the main thread (pywebview
     # requires it, and stdout is cleaner without thread interleaving).
-    results = _filter_and_sort(
+    ranking = _filter_and_sort(
         score_result_value, keywords, exclude_keywords, like_paths,
         threshold, top, quiet,
     )
     _emit(
-        results, keywords, exclude_keywords, like_names,
+        ranking, keywords, exclude_keywords, like_paths,
         scores, verbose, print0, view, quiet,
     )
 

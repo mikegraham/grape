@@ -140,14 +140,15 @@ def _table(paths, sims):
     return ScoreTable(paths=paths, sims=np.array(sims, dtype=np.float32))
 
 
-def test_filter_and_sort_adjusts_score_and_labels_excludes():
-    from grape.cli import ScanReport, _filter_and_sort
+def test_scored_images_adjusts_score_and_labels_excludes():
+    from grape.cli import ScanReport, _filter_and_sort, _scored_images
 
     table = _table(["/a/img.jpg"], [[0.9, 0.2]])
-    results = _filter_and_sort(
+    ranking = _filter_and_sort(
         (table, ScanReport(image_count=1)), ["dog"], ["cat"], [],
         None, None, True,
     )
+    results = _scored_images(ranking, ["dog"], ["cat"], [])
     assert results[0].score == pytest.approx(0.7)
     assert results[0].scores["dog"] == pytest.approx(0.9)
     assert results[0].scores["not:cat"] == pytest.approx(0.2)
@@ -171,12 +172,13 @@ def test_filter_and_sort_ranks_best_first_ties_in_scan_order():
         ["/low.jpg", "/tie1.jpg", "/high.jpg", "/tie2.jpg"],
         [[0.1], [0.5], [0.9], [0.5]],
     )
-    ranked = _filter_and_sort(
+    ranking = _filter_and_sort(
         (table, ScanReport(image_count=4)), ["dog"], [], [], None, None, True,
     )
-    assert [r.path for r in ranked] == [
+    assert [table.paths[i] for i in ranking.order] == [
         "/high.jpg", "/tie1.jpg", "/tie2.jpg", "/low.jpg",
     ]
+    assert ranking.scores == pytest.approx([0.9, 0.5, 0.5, 0.1])
 
 
 def test_format_html_embeds_images(tmp_path):
@@ -476,6 +478,25 @@ def test_default_output_shell_quotes_paths(tmp_path, monkeypatch):
     out, _, code = run_main(["-q", "-k", "dog", str(image_path)], monkeypatch)
     assert code == 0
     assert out == f"{shlex.quote(str(image_path))}\n"
+
+
+def test_path_output_skips_score_breakdowns(tmp_path, monkeypatch):
+    """Plain and -print0 output need only paths."""
+    import grape.cli as cli_mod
+
+    image_path = tmp_path / "a.jpg"
+    Image.new("RGB", (1, 1)).save(image_path)
+    _stub_pipeline(monkeypatch)
+
+    def _fail(*_args, **_kwargs):
+        raise AssertionError("score breakdowns built for path-only output")
+
+    monkeypatch.setattr(cli_mod, "_scored_images", _fail)
+    for flags in ([], ["-print0"]):
+        _, _, code = run_main(
+            ["-q", *flags, "-k", "dog", str(image_path)], monkeypatch,
+        )
+        assert code == 0
 
 
 def test_relative_file_path_kept_relative_in_output(tmp_path, monkeypatch):
@@ -834,6 +855,7 @@ def test_score_all_duplicate_like_paths_keep_separate_scores():
         _filter_and_sort,
         _prepare_cached_embeddings,
         _score_all,
+        _scored_images,
     )
 
     class _NoDbCache:
@@ -873,9 +895,10 @@ def test_score_all_duplicate_like_paths_keep_separate_scores():
         prepared, object(), query_emb,
         _NoDbCache(), True, False,
     )
-    results = _filter_and_sort(
+    ranking = _filter_and_sort(
         score_result, text_keywords, [], like_paths, None, None, True,
     )
+    results = _scored_images(ranking, text_keywords, [], like_paths)
 
     assert len(results) == 1
     r = results[0]
@@ -1254,7 +1277,7 @@ def test_filter_and_sort_threshold(capsys):
         (table, ScanReport(image_count=3)),
         ["dog"], [], [], threshold=0.4, top=None, quiet=True,
     )
-    assert [r.score for r in out] == pytest.approx([0.8, 0.5])
+    assert out.scores == pytest.approx([0.8, 0.5])
 
 
 def test_filter_and_sort_top_n(capsys):
@@ -1267,7 +1290,7 @@ def test_filter_and_sort_top_n(capsys):
         (table, ScanReport(image_count=4)),
         ["dog"], [], [], threshold=None, top=2, quiet=True,
     )
-    assert [r.score for r in out] == pytest.approx([0.8, 0.7])
+    assert out.scores == pytest.approx([0.8, 0.7])
 
 
 def test_filter_and_sort_status_message(capsys):
