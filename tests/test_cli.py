@@ -41,6 +41,22 @@ def run_main(args, monkeypatch):
     return out.getvalue(), err.getvalue(), code
 
 
+def test_cached_run_imports_stay_light():
+    """A fully cached run needs none of PIL, tqdm or torch."""
+    import subprocess
+    import sys
+
+    code = (
+        "import sys, grape.cli;"
+        "print([m for m in ('PIL', 'tqdm', 'torch') if m in sys.modules])"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True, text=True, check=True,
+    )
+    assert out.stdout.strip() == "[]"
+
+
 @pytest.mark.skipif(
     not os.path.isdir("/proc/self/task"), reason="needs /proc/self/task",
 )

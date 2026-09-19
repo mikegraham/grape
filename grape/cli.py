@@ -25,8 +25,6 @@ import numpy  # noqa: E402, F401, ICN001
 if _blas_threads is None:
     del os.environ["OPENBLAS_NUM_THREADS"]
 
-from PIL import Image, UnidentifiedImageError  # noqa: E402
-
 from grape.search import (  # noqa: E402
     ImageRecord,
     ScoredImage,
@@ -729,6 +727,8 @@ _html_template_cache: jinja2.Template | None = None
 
 def _read_resolution(path: str) -> str | None:
     """Return ``"WIDTHxHEIGHT"`` or ``None`` if the image can't be read."""
+    from PIL import Image, UnidentifiedImageError
+
     try:
         # Suppress DecompressionBombWarning: we're reading the header only,
         # not decompressing pixels, so the DOS-attack guard is a false positive.
