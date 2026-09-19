@@ -221,3 +221,64 @@ def test_preloaded_tokenizer_returned_for_matching_model(monkeypatch):
     monkeypatch.setattr(gm, "_preloaded_tokenizer", None)
     gm._preload_tokenizer(None, "ModelA")
     assert gm._take_preloaded_tokenizer("ModelA") == "tok-ModelA"
+
+
+def _tiny_hf_tokenizer(snapshot):
+    """A tokenizer.json + tokenizer_config.json shaped like SigLIP's."""
+    import json
+
+    from tokenizers import Tokenizer, models, pre_tokenizers, processors
+
+    words = "a photo of the dog cat".split()
+    vocab = {"<pad>": 0, "<eos>": 1, "<unk>": 2}
+    vocab.update({w: i + 3 for i, w in enumerate(words)})
+    tok = Tokenizer(models.WordLevel(vocab, unk_token="<unk>"))
+    tok.pre_tokenizer = pre_tokenizers.Whitespace()
+    tok.post_processor = processors.TemplateProcessing(
+        single="$A <eos>", special_tokens=[("<eos>", 1)],
+    )
+    tok.save(str(snapshot / "tokenizer.json"))
+    (snapshot / "tokenizer_config.json").write_text(json.dumps({
+        "tokenizer_class": "PreTrainedTokenizerFast",
+        "pad_token": "<pad>", "eos_token": "<eos>", "unk_token": "<unk>",
+    }))
+
+
+def test_fast_hf_tokenizer_matches_open_clip_hf_tokenizer(tmp_path):
+    """Same ids as open_clip's HFTokenizer: cleaning, <eos>, padding, truncation."""
+    import torch
+
+    import grape.model as gm
+
+    _tiny_hf_tokenizer(tmp_path)
+    texts = ["a photo of a dog", "A  Photo of THE cat!", "", "dog " * 20]
+    open_clip = gm._import_open_clip(use_transformers=True)
+    ref = open_clip.tokenizer.HFTokenizer(
+        str(tmp_path), context_length=8, clean="canonicalize",
+    )
+    fast = gm._FastHFTokenizer(tmp_path, 8, "canonicalize")
+    assert torch.equal(fast(texts), ref(texts))
+
+
+def test_model_needs_transformers_only_without_fast_tokenizer(monkeypatch):
+    import grape.model as gm
+
+    cached = {"tokenizer.json", "tokenizer_config.json"}
+    monkeypatch.setattr(
+        gm, "_cached_file_from_repo",
+        lambda repo, fn: f"/snap/{fn}" if fn in cached else None,
+    )
+
+    def needs(text_cfg):
+        monkeypatch.setattr(
+            gm, "_builtin_model_config", lambda _name: {"text_cfg": text_cfg},
+        )
+        return gm._model_needs_transformers("m")
+
+    siglip = {"hf_tokenizer_name": "org/r", "tokenizer_kwargs": {"clean": "x"}}
+    assert needs({}) is False
+    assert needs(siglip) is False
+    assert needs({**siglip, "hf_model_name": "roberta"}) is True
+    assert needs({**siglip, "tokenizer_kwargs": {"strip_sep_token": True}}) is True
+    cached.discard("tokenizer.json")
+    assert needs(siglip) is True

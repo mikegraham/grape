@@ -342,3 +342,31 @@ def test_hf_tokenizer_loads_from_local_snapshot(monkeypatch, tmp_path):
     assert seen["source"] == str(snapshot)
     assert seen["kwargs"]["context_length"] == 64
     assert seen["kwargs"]["clean"] == "canonicalize"
+
+
+def test_fast_tokenizer_matches_hf_tokenizer_for_default_model():
+    """Real SigLIP 2 files: the lightweight tokenizer must give HFTokenizer's ids."""
+    import torch
+
+    import grape.model as gm
+    from grape.cli import DEFAULT_MODEL
+
+    model_name = DEFAULT_MODEL.split("/", 1)[0]
+    open_clip = gm._import_open_clip(use_transformers=True)
+    text_cfg = open_clip.get_model_config(model_name)["text_cfg"]
+    snapshot = gm._fast_tokenizer_dir(text_cfg)
+    if snapshot is None:
+        pytest.skip("default model's tokenizer files not cached")
+    texts = [
+        "", "a photo of a dog", "A Photo Of THE Dog!!", "  tabs\tand\nnewlines ",
+        "caf\u00e9 cr\u00e8me", "\u732b\u306e\u5199\u771f", "&amp; &lt;b&gt;",
+        "dog " * 200,
+    ]
+    ctx = text_cfg["context_length"]
+    ref = open_clip.tokenizer.HFTokenizer(
+        str(snapshot), context_length=ctx, **text_cfg["tokenizer_kwargs"],
+    )
+    fast = gm._FastHFTokenizer(
+        snapshot, ctx, text_cfg["tokenizer_kwargs"]["clean"],
+    )
+    assert torch.equal(fast(texts), ref(texts))

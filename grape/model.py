@@ -329,11 +329,58 @@ def _model_needs_timm(model_name: str) -> bool:
 
 
 def _model_needs_transformers(model_name: str) -> bool:
-    """True when the model's tokenizer comes from transformers (SigLIP, SigLIP 2)."""
+    """True when the model's text tower or tokenizer needs transformers."""
     cfg = _builtin_model_config(model_name)
     if cfg is None:
         return True  # unknown model, assume yes (safe)
-    return bool(cfg.get("text_cfg", {}).get("hf_tokenizer_name"))
+    text_cfg = cfg.get("text_cfg", {})
+    if not text_cfg.get("hf_tokenizer_name"):
+        return False
+    return _fast_tokenizer_dir(text_cfg) is None
+
+
+def _fast_tokenizer_dir(text_cfg: dict) -> Path | None:
+    """Cached snapshot dir, if _FastHFTokenizer can stand in for HFTokenizer."""
+    if text_cfg.get("hf_model_name") or text_cfg.get("tokenizer_mode"):
+        return None
+    if set(text_cfg.get("tokenizer_kwargs", {})) - {"clean"}:
+        return None
+    repo = text_cfg["hf_tokenizer_name"]
+    config = _cached_file_from_repo(repo, "tokenizer_config.json")
+    if config is None or _cached_file_from_repo(repo, "tokenizer.json") is None:
+        return None
+    return Path(config).parent
+
+
+class _FastHFTokenizer:
+    """open_clip's HFTokenizer on the tokenizers library, without transformers.
+
+    HFTokenizer only cleans the text and has transformers pad and truncate;
+    importing transformers for that costs ~2.5s.
+    """
+
+    def __init__(self, snapshot: Path, context_length: int, clean: str) -> None:
+        import json
+
+        from open_clip.tokenizer import get_clean_fn
+        from tokenizers import Tokenizer
+
+        config = json.loads((snapshot / "tokenizer_config.json").read_text())
+        pad = config["pad_token"]
+        pad = pad["content"] if isinstance(pad, dict) else pad
+        self._clean = get_clean_fn(clean)
+        self._tokenizer = Tokenizer.from_file(str(snapshot / "tokenizer.json"))
+        self._tokenizer.enable_truncation(context_length)
+        self._tokenizer.enable_padding(
+            direction=config.get("padding_side", "right"),
+            pad_id=self._tokenizer.token_to_id(pad),
+            pad_token=pad,
+            length=context_length,
+        )
+
+    def __call__(self, texts: list[str]) -> torch.Tensor:
+        encodings = self._tokenizer.encode_batch([self._clean(t) for t in texts])
+        return torch.tensor([e.ids for e in encodings], dtype=torch.long)
 
 
 def _install_import_stubs(*, stub_timm: bool = True) -> None:
@@ -508,15 +555,20 @@ def _load_tokenizer(open_clip: Any, model_name: str) -> Any:
     """HF tokenizers probe the Hub even when cached; load from the snapshot dir."""
     cfg = open_clip.get_model_config(model_name) or {}
     text_cfg = cfg.get("text_cfg", {})
+    context_length = text_cfg.get(
+        "context_length", open_clip.tokenizer.DEFAULT_CONTEXT_LENGTH,
+    )
+    fast = _fast_tokenizer_dir(text_cfg) if "hf_tokenizer_name" in text_cfg else None
+    if fast is not None:
+        clean = text_cfg.get("tokenizer_kwargs", {}).get("clean", "whitespace")
+        return _FastHFTokenizer(fast, context_length, clean)
     repo = text_cfg.get("hf_tokenizer_name")
     local = _cached_file_from_repo(repo, "tokenizer_config.json") if repo else None
     if local is None:
         return open_clip.get_tokenizer(model_name)  # built-in tokenizer, or first run
     return open_clip.tokenizer.HFTokenizer(
         str(Path(local).parent),
-        context_length=text_cfg.get(
-            "context_length", open_clip.tokenizer.DEFAULT_CONTEXT_LENGTH,
-        ),
+        context_length=context_length,
         tokenizer_mode=text_cfg.get("tokenizer_mode"),
         **text_cfg.get("tokenizer_kwargs", {}),
     )
@@ -591,7 +643,8 @@ def preload_weights(model_name: str, pretrained: str) -> None:
     # needs the real transformers).
     needs_tf = _model_needs_transformers(model_name)
     open_clip = _import_open_clip(use_transformers=needs_tf, model_name=model_name)
-    if needs_tf:
+    cfg = _builtin_model_config(model_name) or {}
+    if cfg.get("text_cfg", {}).get("hf_tokenizer_name"):
         _preload_tokenizer(open_clip, model_name)
     path = _cached_weight_path(model_name, pretrained)
     if path is None:
