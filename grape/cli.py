@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     import numpy as np
     from numpy.typing import NDArray
 
-    from grape.cache import EmbeddingCache
+    from grape.cache import EmbeddingCache, EmbeddingIndex
     from grape.model import CLIPModel
 
 log = logging.getLogger("grape")
@@ -194,7 +194,7 @@ def _encode_keywords(
     model: _LazyModel,
     score_keywords: list[str],
     prompt_templates: list[str],
-    cache_context: tuple[str | None, dict[tuple[str, str], NDArray[np.float32]] | None],
+    cache_context: tuple[str | None, EmbeddingIndex | None],
     cache: EmbeddingCache | None,
 ) -> NDArray[np.float32]:
     """Encode keyword prompts into text embeddings.
@@ -282,7 +282,7 @@ def _encode_keywords(
 def _encode_like_images(
     model: _LazyModel,
     like_paths: list[str],
-    cache_context: tuple[str | None, dict[tuple[str, str], NDArray[np.float32]] | None],
+    cache_context: tuple[str | None, EmbeddingIndex | None],
     cache: EmbeddingCache | None,
 ) -> NDArray[np.float32]:
     """Encode --like reference images into query embeddings.
@@ -319,7 +319,7 @@ def _resolve_and_index_cache(
     model_name: str,
     pretrained: str,
     cache: "EmbeddingCache | None",
-) -> tuple[str | None, dict[tuple[str, str], NDArray[np.float32]] | None]:
+) -> tuple[str | None, EmbeddingIndex | None]:
     """Resolve model_id and materialize the cache index.
 
     Caches model_id in SQLite so subsequent runs skip the torch import.
@@ -341,7 +341,7 @@ def _resolve_and_index_cache(
         log.debug("model_id from cache: %s", model_id)
 
     cached_index = cache.embedding_index_for_model(model_id)
-    log.debug("cache index: %d image embeddings", len(cached_index))
+    log.debug("cache index: %d image embeddings", len(cached_index.rows))
     return model_id, cached_index
 
 
@@ -426,31 +426,30 @@ def _scan_files(
 
 def _prepare_cached_embeddings(
     scan_result: tuple[list[ImageRecord], ScanReport],
-    cache_context: tuple[str | None, dict[tuple[str, str], NDArray[np.float32]] | None],
+    cache_context: tuple[str | None, EmbeddingIndex | None],
 ) -> tuple[
-    NDArray[np.float32] | None, list[ImageRecord], list[ImageRecord], ScanReport,
+    NDArray[np.float32] | None, list[int],
+    list[ImageRecord], list[ImageRecord], ScanReport,
 ]:
-    """Split scanned images into cached/uncached and vstack cached vectors.
+    """Split scanned images into cached/uncached.
 
-    Runs as soon as scanning and cache indexing finish -- does not wait for
-    model loading or text encoding, so the ~23ms vstack overlaps with those.
-    Returns (image_emb_matrix | None, cached_items, uncached_items, scan_done).
+    Returns (cache matrix | None, matrix row of each cached item,
+    cached_items, uncached_items, scan_done).
     """
-    import numpy as np
-
     _model_id, cached_index = cache_context
     items, scan_done = scan_result
 
     cached_items: list[ImageRecord] = []
-    cached_vectors: list[NDArray[np.float32]] = []
+    cached_rows: list[int] = []
     uncached_items: list[ImageRecord] = []
 
     if cached_index is not None:
+        rows = cached_index.rows
         for item in items:
-            emb = cached_index.get((item.path_key, item.file_stat))
-            if emb is not None:
+            row = rows.get((item.path_key, item.file_stat))
+            if row is not None:
                 cached_items.append(item)
-                cached_vectors.append(emb)
+                cached_rows.append(row)
             else:
                 uncached_items.append(item)
     else:
@@ -460,56 +459,41 @@ def _prepare_cached_embeddings(
         "prepare: %d cached, %d uncached images",
         len(cached_items), len(uncached_items),
     )
-    image_emb = np.vstack(cached_vectors) if cached_vectors else None
-    return image_emb, cached_items, uncached_items, scan_done
+    image_emb = (
+        cached_index.matrix
+        if cached_index is not None and cached_rows else None
+    )
+    return image_emb, cached_rows, cached_items, uncached_items, scan_done
 
 
 def _score_all(
     prepared: tuple[
-        NDArray[np.float32] | None, list[ImageRecord], list[ImageRecord], ScanReport,
+        NDArray[np.float32] | None, list[int],
+        list[ImageRecord], list[ImageRecord], ScanReport,
     ],
     model: _LazyModel,
-    score_keywords: list[str],
-    like_paths: list[str],
     text_emb: NDArray[np.float32],
     cache: EmbeddingCache | None,
     quiet: bool,
     verbose: bool,
-) -> tuple[list[ScoredImage], ScanReport]:
-    """Score all scanned images against text embeddings.
-
-    ``score_keywords`` are text keyword labels (include + exclude).
-    ``like_paths`` are --like image paths.  Keeping them separate avoids
-    score-dict key collisions when basenames repeat or match a keyword.
-    """
+) -> tuple[ScoreTable, ScanReport]:
+    """Compute every scanned image's similarity to each query embedding."""
+    import numpy as np
     from tqdm import tqdm
 
     from grape.search import _get_embedding
 
-    image_emb, cached_items, uncached_items, scan_done = prepared
-    n_text = len(score_keywords)
+    image_emb, cached_rows, cached_items, uncached_items, scan_done = prepared
 
-    def _make_result(path: str, sims: NDArray[np.float32]) -> ScoredImage:
-        return ScoredImage(
-            path=path,
-            scores={
-                kw: float(s)
-                for kw, s in zip(score_keywords, sims[:n_text])
-            },
-            like_scores=[
-                (lp, float(s))
-                for lp, s in zip(like_paths, sims[n_text:])
-            ],
-            score=float(sims.mean()),
-        )
-
-    results: list[ScoredImage] = []
+    paths: list[str] = []
+    sims: list[NDArray[np.float32]] = []
 
     # Fast path: score cached items via a single matrix multiply.
     if image_emb is not None:
-        sims_matrix = image_emb @ text_emb.T
-        for idx, item in enumerate(cached_items):
-            results.append(_make_result(item.path, sims_matrix[idx]))
+        # Score every cached row, then pick ours: indexing image_emb first
+        # would copy the whole matrix.
+        sims.append((image_emb @ text_emb.T)[cached_rows])
+        paths.extend(item.path for item in cached_items)
 
     # Slow path: encode uncached images through the model one at a time.
     if uncached_items:
@@ -523,8 +507,8 @@ def _score_all(
             tqdm.write(item.path, file=sys.stderr)
         try:
             img_emb = _get_embedding(model, item.path, cache)
-            sims = (img_emb @ text_emb.T)[0]
-            results.append(_make_result(item.path, sims))
+            sims.append(img_emb @ text_emb.T)
+            paths.append(item.path)
         except SyntaxError as e:
             if not quiet:
                 print(f"  skipping {item.path}: {e}", file=sys.stderr)
@@ -547,23 +531,27 @@ def _score_all(
                     file_stat=item.file_stat,
                 )
 
-    return results, scan_done
+    if not sims:
+        sims.append(np.empty((0, len(text_emb)), dtype=np.float32))
+    return ScoreTable(paths=paths, sims=np.vstack(sims)), scan_done
 
 
 def _filter_and_sort(
-    score_result: tuple[list[ScoredImage], ScanReport],
+    score_result: tuple[ScoreTable, ScanReport],
     keywords: list[str],
     exclude_keywords: list[str],
-    like_names: list[str],
+    like_paths: list[str],
     threshold: float | None,
     top: int | None,
     quiet: bool,
-) -> list[ScoredImage]:
-    """Apply excludes, sort, threshold, top-N, and validate scan status.
+) -> Ranking:
+    """Rank, apply threshold and top-N, and validate scan status.
 
     Runs on the main thread after the executor finishes.
     """
-    results, scan_done = score_result
+    import numpy as np
+
+    table, scan_done = score_result
 
     if scan_done.error_message:
         print(scan_done.error_message, file=sys.stderr)
@@ -573,33 +561,60 @@ def _filter_and_sort(
         sys.exit(1)
 
     if not quiet:
-        n = len(results)
+        n = len(table.paths)
         query_text = _format_query_summary(
-            keywords, exclude_keywords, like_names,
+            keywords, exclude_keywords, [Path(p).name for p in like_paths],
         )
         print(
             f"{n} image{'s' * (n != 1)}, {query_text}",
             file=sys.stderr,
         )
 
-    _apply_excluded_keywords(
-        results, keywords, exclude_keywords,
+    scores = _combined_scores(table.sims, len(keywords), len(exclude_keywords))
+    # Stable, so ties keep scan order.
+    order = np.argsort(-scores, kind="stable")
+    if threshold is not None:
+        order = order[scores[order] >= threshold]
+    if top is not None:
+        order = order[:top]
+
+    return Ranking(
+        table=table, order=order.tolist(), scores=scores[order].tolist(),
     )
 
-    results.sort(key=lambda r: r.score, reverse=True)
 
-    if threshold is not None:
-        results = [r for r in results if r.score >= threshold]
-    if top is not None:
-        results = results[:top]
-    return results
+def _scored_images(
+    ranking: Ranking,
+    keywords: list[str],
+    exclude_keywords: list[str],
+    like_paths: list[str],
+) -> list[ScoredImage]:
+    """Per-query score breakdown of each ranked image, for -s/-v/--view."""
+    import numpy as np
+
+    table = ranking.table
+    labels = keywords + [f"not:{kw}" for kw in exclude_keywords]
+    n_text = len(labels)
+    return [
+        ScoredImage(
+            path=table.paths[i],
+            scores=dict(zip(labels, sims[:n_text])),
+            like_scores=list(zip(like_paths, sims[n_text:])),
+            score=score,
+        )
+        for i, sims, score in zip(
+            ranking.order,
+            table.sims[ranking.order].astype(np.float64).tolist(),
+            ranking.scores,
+        )
+    ]
 
 
 def _emit(
-    results: list[ScoredImage],
+    ranking: Ranking,
     keywords: list[str],
     exclude_keywords: list[str],
-    like_names: list[str],
+    like_paths: list[str],
     scores: bool,
     verbose: bool,
     print0: bool,
@@ -611,7 +626,7 @@ def _emit(
     Runs after the pipeline finishes, so pywebview
     and stdout output happen on the main thread where they belong.
     """
-    if not results:
+    if not ranking.order:
         print("grape: no images above threshold", file=sys.stderr)
         return 0
 
@@ -619,23 +634,31 @@ def _emit(
     if view:
         display_keywords = (
             keywords
-            + [f"like:{name}" for name in like_names]
+            + [f"like:{Path(p).name}" for p in like_paths]
             + [f"not:{kw}" for kw in exclude_keywords]
+        )
+        results = _scored_images(
+            ranking, keywords, exclude_keywords, like_paths,
         )
         html_doc = _format_html(results, display_keywords)
         _show_in_webview(html_doc)
         return len(results)
     if show_scores:
+        results = _scored_images(
+            ranking, keywords, exclude_keywords, like_paths,
+        )
         print(_format_results(results, verbose=verbose))
         return len(results)
+    # Path-only output skips the breakdowns: ~30ms at 20k results.
+    paths = [ranking.table.paths[i] for i in ranking.order]
     if print0:
-        for r in results:
-            sys.stdout.write(f"{r.path}\0")
+        for p in paths:
+            sys.stdout.write(f"{p}\0")
         sys.stdout.flush()
-        return len(results)
-    for r in results:
-        print(shlex.quote(r.path))
-    return len(results)
+        return len(paths)
+    for p in paths:
+        print(shlex.quote(p))
+    return len(paths)
 
 
 # ---------------------------------------------------------------------------
@@ -646,6 +669,27 @@ def _emit(
 class ScanReport:
     image_count: int
     error_message: str | None = None
+
+
+@dataclass
+class ScoreTable:
+    """Raw similarities of every scanned image, before ranking.
+
+    ``sims[i, j]`` is ``paths[i]`` against query j. Queries are ordered
+    include keywords, exclude keywords, --like images; --like columns are
+    kept by path so repeated basenames can't collide.
+    """
+    paths: list[str]
+    sims: NDArray[np.float32]
+
+
+@dataclass
+class Ranking:
+    """The ``ScoreTable`` rows to show, best first."""
+    table: ScoreTable
+    order: list[int]
+    # Combined score of each shown row, parallel to ``order``.
+    scores: list[float]
 
 
 # ---------------------------------------------------------------------------
@@ -681,41 +725,26 @@ def _format_results(results: list[ScoredImage], verbose: bool) -> str:
     return "\n".join(lines)
 
 
-def _apply_excluded_keywords(
-    results: list[ScoredImage],
-    include_keywords: list[str],
-    exclude_keywords: list[str],
-) -> None:
-    """Adjust result scores using include-vs-exclude keyword means.
+def _combined_scores(
+    sims: NDArray[np.float32],
+    n_include: int,
+    n_exclude: int,
+) -> NDArray[np.float64]:
+    """Per-image score: mean(include and --like sims) - mean(exclude sims).
 
-    ``include_keywords`` are the text keywords to keep (not --like).
-    Like scores contribute to the include mean via ``result.like_scores``.
+    Columns of ``sims`` are ordered as in ``ScoreTable``.
     """
-    for result in results:
-        raw_scores = result.scores
-        include_values = [raw_scores[kw] for kw in include_keywords]
-        include_values += [s for _, s in result.like_scores]
+    import numpy as np
 
-        include_mean = (
-            sum(include_values) / len(include_values)
-            if include_values else 0.0
-        )
-
-        if exclude_keywords:
-            exclude_components = [raw_scores[kw] for kw in exclude_keywords]
-            exclude_mean = sum(exclude_components) / len(exclude_components)
-        else:
-            exclude_components = []
-            exclude_mean = 0.0
-        result.score = float(include_mean - exclude_mean)
-
-        # Keep verbose output readable by labeling excluded keywords.
-        labeled_scores: dict[str, float] = {}
-        for kw in include_keywords:
-            labeled_scores[kw] = raw_scores[kw]
-        for kw, component in zip(exclude_keywords, exclude_components):
-            labeled_scores[f"not:{kw}"] = component
-        result.scores = labeled_scores
+    sims64 = sims.astype(np.float64)
+    exclude = slice(n_include, n_include + n_exclude)
+    include_sims = np.delete(sims64, exclude, axis=1)
+    scores: NDArray[np.float64] = np.zeros(len(sims64))
+    if include_sims.shape[1]:
+        scores += include_sims.mean(axis=1)
+    if n_exclude:
+        scores -= sims64[:, exclude].mean(axis=1)
+    return scores
 
 
 _html_template_cache: jinja2.Template | None = None
@@ -1035,8 +1064,6 @@ def _run_pipeline(
     view: bool,
 ) -> None:
     """Run the full CLI pipeline on a small ThreadPoolExecutor."""
-    like_names = [Path(p).name for p in like_paths]
-
     # Each dependent task is wrapped in a closure that calls .result()
     # on its inputs -- the executor schedules Futures, workers blocked
     # on .result() don't consume CPU. max_workers=4 matches our truly
@@ -1081,8 +1108,7 @@ def _run_pipeline(
         # Convergence: scoring needs prepared + query + model.
         f_score = ex.submit(
             lambda: _score_all(
-                f_prepared.result(), f_model.result(),
-                score_keywords, like_paths, f_query.result(),
+                f_prepared.result(), f_model.result(), f_query.result(),
                 cache, quiet, verbose,
             ),
         )
@@ -1090,12 +1116,12 @@ def _run_pipeline(
 
     # Post-processing and output run on the main thread (pywebview
     # requires it, and stdout is cleaner without thread interleaving).
-    results = _filter_and_sort(
-        score_result_value, keywords, exclude_keywords, like_names,
+    ranking = _filter_and_sort(
+        score_result_value, keywords, exclude_keywords, like_paths,
         threshold, top, quiet,
     )
     _emit(
-        results, keywords, exclude_keywords, like_names,
+        ranking, keywords, exclude_keywords, like_paths,
         scores, verbose, print0, view, quiet,
     )
 

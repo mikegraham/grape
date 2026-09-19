@@ -108,6 +108,12 @@ def test_get_many_for_paths_filters_stale_stats(cache, img):
     assert got == {}
 
 
+def test_embedding_index_for_unknown_model_is_empty(cache):
+    index = cache.embedding_index_for_model("no-such-model")
+    assert index.rows == {}
+    assert len(index.matrix) == 0
+
+
 def test_embedding_index_for_model_returns_all_rows(cache, img, tmp_path):
     img2 = tmp_path / "image2.jpg"
     img2.write_bytes(b"\xff\xd8\xff\xe0" + b"\x11" * 80)
@@ -127,12 +133,13 @@ def test_embedding_index_for_model_returns_all_rows(cache, img, tmp_path):
         str(img.resolve()): emb1,
         str(img2.resolve()): emb2,
     }
-    assert len(index) == 2
+    assert len(index.rows) == 2
+    assert index.matrix.shape == (2, emb1.shape[1])
     for path, file_stat in rows:
         key = (path, file_stat)
-        assert key in index
+        assert key in index.rows
         np.testing.assert_array_equal(
-            index[key].reshape(1, -1),
+            index.matrix[index.rows[key]].reshape(1, -1),
             expected_by_path[path],
         )
 
@@ -218,7 +225,7 @@ def test_legacy_dev_embedding_still_hits(cache, img):
     np.testing.assert_array_equal(got, emb)
     assert cache.has_any_embedding(img)
     assert (path, live_stat) in cache.image_hit_index()
-    assert (path, live_stat) in cache.embedding_index_for_model("model-a")
+    assert (path, live_stat) in cache.embedding_index_for_model("model-a").rows
     assert path in cache.get_many_for_paths("model-a", {path: live_stat})
 
 
