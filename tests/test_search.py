@@ -150,6 +150,55 @@ def test_recursive_symlink_cycle_terminates(tmp_path):
     assert names.count("img.jpg") == 1
 
 
+def _symlinked_tree(root):
+    """Images reached directly, via a symlinked file, a symlinked dir, and
+    a symlink cycle; plus a non-image and a dangling link."""
+    real = root / "real"
+    (real / "sub").mkdir(parents=True)
+    other = root / "other"
+    other.mkdir()
+    Image.new("RGB", (2, 2)).save(real / "a.jpg")
+    Image.new("RGB", (2, 2)).save(real / "sub" / "sp ace.png")
+    Image.new("RGB", (2, 2)).save(other / "b.jpg")
+    (real / "notes.txt").write_text("not an image")
+    (real / "linkdir").symlink_to(other)
+    (real / "filelink.jpg").symlink_to(other / "b.jpg")
+    (real / "sub" / "cycle").symlink_to(real)
+    (real / "dangling.jpg").symlink_to(root / "missing")
+    return real
+
+
+def test_scan_without_dir_fd_support_matches(tmp_path, monkeypatch):
+    """Where os.scandir can't take an fd (Windows), the path-based fallback
+    must yield the same display paths, cache keys, and stat tokens."""
+    real = _symlinked_tree(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    via_fd = sorted(iter_image_records("real", recursive=True))
+    monkeypatch.setattr(os, "supports_fd", set())
+    via_path = sorted(iter_image_records("real", recursive=True))
+
+    assert via_path == via_fd
+    assert [r.path for r in via_fd] == [
+        "real/a.jpg", "real/filelink.jpg", "real/linkdir/b.jpg",
+        "real/sub/sp ace.png",
+    ]
+    assert via_fd[1].path_key == str((tmp_path / "other" / "b.jpg").resolve())
+    assert via_fd[0].path_key == str((real / "a.jpg").resolve())
+
+
+@pytest.mark.skipif(
+    not os.path.isdir("/proc/self/fd"), reason="needs /proc/self/fd",
+)
+def test_scan_closes_directory_fds(tmp_path):
+    real = _symlinked_tree(tmp_path)
+    before = len(os.listdir("/proc/self/fd"))
+    list(iter_image_records(str(real), recursive=True))
+    abandoned = iter_image_records(str(real), recursive=True)
+    next(abandoned)
+    abandoned.close()
+    assert len(os.listdir("/proc/self/fd")) == before
+
+
 def test_truncated_image_rejected(fixtures_dir):
     """Truncated JPEG (valid header, incomplete body) is not an image.
 
