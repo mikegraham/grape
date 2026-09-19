@@ -159,6 +159,16 @@ def test_has_any_embedding_invalidated_on_change(cache, img):
     assert not cache.has_any_embedding(img)
 
 
+def test_image_paths_exclude_model(cache, img, tmp_path):
+    img2 = tmp_path / "image2.jpg"
+    img2.write_bytes(b"\xff\xd8\xff\xe0" + b"\x11" * 80)
+    cache.put(img, "model-a", _rand_embedding(33))
+    cache.put(img2, "model-b", _rand_embedding(34))
+
+    assert cache.image_paths() == {str(img.resolve()), str(img2.resolve())}
+    assert cache.image_paths(exclude_model="model-a") == {str(img2.resolve())}
+
+
 def test_image_paths_contains_cached_file(cache, img):
     cache.put(img, "model-a", _rand_embedding(32))
     assert str(img.resolve()) in cache.image_paths()

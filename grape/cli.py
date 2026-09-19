@@ -113,9 +113,11 @@ def _get_webview() -> Any:
 #   _load_model (instant) ------+-- _encode_keywords ------+
 #                                \-- _encode_like_images --+ |
 #                                                    _combine +
-#   _resolve_and_index_cache --+                             |
-#   _scan_files ------+--------+-- _prepare                  |
+#   _resolve_and_index_cache -- _scan_files -- _prepare      |
 #                                   \-- _score_all ----------+
+#
+# _scan_files waits for the cache index on purpose: both hold the GIL, so
+# running them concurrently was slower than back to back.
 #
 # After the graph completes, _filter_and_sort and _emit run on the main
 # thread (pywebview requires it, stdout is cleaner without interleaving).
@@ -366,12 +368,17 @@ def _scan_files(
     path_args: list[str],
     recursive: bool,
     cache: "EmbeddingCache | None",
+    cache_context: tuple[str | None, EmbeddingIndex | None],
 ) -> tuple[list[ImageRecord], ScanReport]:
     """Discover image files from CLI paths. Independent of model loading."""
+    model_id, cached_index = cache_context
     image_paths: set[str] | None = None
     not_image_hits: set[tuple[str, str]] | None = None
     if cache is not None:
-        image_paths = cache.image_paths()
+        # This model's rows are already in memory; read only the others.
+        image_paths = cache.image_paths(exclude_model=model_id)
+        if cached_index is not None:
+            image_paths.update(p for p, _ in cached_index.rows)
         not_image_hits = cache.not_image_index()
     items: list[ImageRecord] = []
     error_message: str | None = None
@@ -1058,17 +1065,21 @@ def _run_pipeline(
     """Run the full CLI pipeline on a small ThreadPoolExecutor."""
     # Each dependent task is wrapped in a closure that calls .result()
     # on its inputs -- the executor schedules Futures, workers blocked
-    # on .result() don't consume CPU. max_workers=4 matches our truly
-    # independent roots (model+resolve+scan, plus one for score_all);
+    # on .result() don't consume CPU. max_workers=4 covers the model,
+    # cache index + scan, query encoding and scoring branches;
     # higher counts left idle threads competing during the encode loop
     # and added ~9% to cold-large wall time.
     with ThreadPoolExecutor(max_workers=4, thread_name_prefix="grape") as ex:
-        # Three independent roots, started in parallel.
+        # Two independent roots, started in parallel.
         f_model = ex.submit(_load_model, model_name, pretrained, quiet)
         f_cache_ctx = ex.submit(
             _resolve_and_index_cache, model_name, pretrained, cache,
         )
-        f_scan = ex.submit(_scan_files, path_args, recursive, cache)
+        f_scan = ex.submit(
+            lambda: _scan_files(
+                path_args, recursive, cache, f_cache_ctx.result(),
+            ),
+        )
 
         # Text keyword embeddings (None when no text keywords).
         f_text_emb = ex.submit(

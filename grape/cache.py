@@ -300,14 +300,19 @@ class EmbeddingCache:
             ).fetchall()
         return any(_canonical_stat(s) == stat_key for (s,) in rows)
 
-    def image_paths(self) -> set[str]:
-        """Return paths that have an embedding under any model."""
+    def image_paths(self, exclude_model: str | None = None) -> set[str]:
+        """Return paths that have an embedding under any model.
+
+        Rows of *exclude_model* are left out, for a caller that already
+        holds that model's ``EmbeddingIndex``.
+        """
         with self._lock:
             rows = self._conn.execute(
                 # No DISTINCT: the set comprehension below already dedups,
                 # and DISTINCT forces a temp b-tree that stops SQLite from
                 # using the covering index (48ms -> 9ms at 20k rows).
-                "SELECT path FROM embeddings"
+                "SELECT path FROM embeddings WHERE model IS NOT ?",
+                (exclude_model,),
             ).fetchall()
         return {path for (path,) in rows}
 
