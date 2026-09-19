@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Models with a Hugging Face tokenizer (SigLIP, SigLIP 2) now load offline once cached, and no longer contact the Hub on every run.
+- No more empty `Encoding: 0it` progress bar when every image is already cached.
 
 ## [0.3.0] - 2026-08-03
 
