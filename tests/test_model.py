@@ -214,7 +214,82 @@ def test_multi_frame_mean_matches_manual_computation(
     np.testing.assert_allclose(multi_emb, expected, atol=1e-5)
 
 
+def _save_gif(path, frames):
+    """Write frames (PIL images) as one animated GIF."""
+    frames[0].save(
+        path, format="GIF", save_all=True, append_images=frames[1:],
+        duration=100, loop=0,
+    )
+
+
+def _panning_frames(src, n, size=96):
+    """N frames of a single scene: a slow pan + brightness jitter so the
+    frames differ (real animation) while still showing the same subject.
+    Stands in for a short clip whose frames should match the clip."""
+    from PIL import ImageEnhance
+    base = src.convert("RGB").resize((size + 4 * n, size + 4 * n))
+    frames = []
+    for i in range(n):
+        crop = base.crop((4 * i, 4 * i, 4 * i + size, 4 * i + size))
+        frames.append(ImageEnhance.Brightness(crop).enhance(0.92 + 0.04 * (i % 3)))
+    return frames
+
+
+def test_identical_frames_do_not_change_embedding(clip_model, tmp_path):
+    """A GIF whose frames are all identical must encode to the same vector
+    as a single-frame encode of that frame. Mean-pooling K copies of one
+    embedding is a no-op up to float rounding; if this drifts, the
+    animation path is corrupting otherwise-static content."""
+    src = Image.new("RGB", (96, 96))
+    # A non-trivial image (gradient) so the embedding isn't degenerate.
+    px = src.load()
+    for y in range(96):
+        for x in range(96):
+            px[x, y] = (x * 2 % 256, y * 2 % 256, (x + y) % 256)
+    many = tmp_path / "identical.gif"
+    _save_gif(many, [src] * 8)
+    multi_emb = clip_model.encode_image(str(many))
+
+    # Reference: encode exactly frame 0 of the same GIF as a lone image,
+    # so the only difference is the averaging arithmetic (pixels match).
+    with Image.open(many) as g:
+        g.seek(0)
+        frame0 = g.convert("RGB")
+    frame0_path = tmp_path / "frame0.png"
+    frame0.save(frame0_path, format="PNG")
+    single_emb = clip_model.encode_image(str(frame0_path))
+
+    np.testing.assert_allclose(multi_emb, single_emb, atol=1e-5)
+
+
+def test_gif_frames_match_their_own_gif(clip_model, fixtures_dir, tmp_path):
+    """The 'frames of GIFs match GIFs' property: a held-out frame of a
+    scene must be more similar to a GIF built from that scene than to a
+    GIF of an unrelated scene. Guards against animation mean-pooling
+    washing content out so far that GIFs mostly just match each other."""
+    cat = Image.open(fixtures_dir / "cat.jpg")
+    beach = Image.open(fixtures_dir / "beach.jpg")
+    cat_gif = tmp_path / "cat.gif"
+    beach_gif = tmp_path / "beach.gif"
+    _save_gif(cat_gif, _panning_frames(cat, 8))
+    _save_gif(beach_gif, _panning_frames(beach, 8))
+
+    query_path = tmp_path / "cat_query.png"
+    cat.convert("RGB").resize((96, 96)).save(query_path, format="PNG")
+    q = clip_model.encode_image(str(query_path))
+    cat_emb = clip_model.encode_image(str(cat_gif))
+    beach_emb = clip_model.encode_image(str(beach_gif))
+
+    sim_own = float((q @ cat_emb.T)[0, 0])
+    sim_other = float((q @ beach_emb.T)[0, 0])
+    assert sim_own > sim_other, (
+        f"a cat frame matched the beach GIF ({sim_other:.3f}) over its own "
+        f"cat GIF ({sim_own:.3f}); animation pooling is washing out content"
+    )
+
+
 # --- model metadata ---
+
 
 def test_model_id_format(clip_model):
     """model_id should be '{repo}@{40-char-hex}'."""
@@ -224,3 +299,46 @@ def test_model_id_format(clip_model):
 
 def test_embed_dim(clip_model):
     assert clip_model.embed_dim() == 512
+
+
+def test_hf_tokenizer_loads_from_local_snapshot(monkeypatch, tmp_path):
+    """Regression: HFTokenizer given a repo id probes the Hub for config.json
+    on every load, and fails hard offline because a 404 is never cached.
+    We must hand it the cached snapshot directory instead."""
+    import grape.model as m
+
+    snapshot = tmp_path / "snap"
+    snapshot.mkdir()
+    (snapshot / "tokenizer_config.json").write_text("{}")
+    seen = {}
+
+    class FakeHFTokenizer:
+        def __init__(self, source, **kwargs):
+            seen["source"] = source
+            seen["kwargs"] = kwargs
+
+    class FakeOpenClip:
+        class tokenizer:
+            HFTokenizer = FakeHFTokenizer
+            DEFAULT_CONTEXT_LENGTH = 77
+
+        @staticmethod
+        def get_model_config(name):
+            return {"text_cfg": {
+                "hf_tokenizer_name": "org/repo",
+                "context_length": 64,
+                "tokenizer_kwargs": {"clean": "canonicalize"},
+            }}
+
+        @staticmethod
+        def get_tokenizer(name):
+            raise AssertionError("must not fall back to Hub-probing path")
+
+    monkeypatch.setattr(
+        m, "_cached_file_from_repo",
+        lambda repo, fn: str(snapshot / fn) if fn == "tokenizer_config.json" else None,
+    )
+    m._load_tokenizer(FakeOpenClip, "some-model")
+    assert seen["source"] == str(snapshot)
+    assert seen["kwargs"]["context_length"] == 64
+    assert seen["kwargs"]["clean"] == "canonicalize"

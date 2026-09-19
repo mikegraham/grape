@@ -1,7 +1,10 @@
 """Fast unit tests for model-loading helpers."""
 
 import os
+import time
 from types import SimpleNamespace
+
+import pytest
 
 from grape.model import (
     _has_cached_weights,
@@ -87,3 +90,134 @@ def test_suppress_filter_removed_after_context_exits():
     with _suppress_open_clip_no_weights_warning():
         assert len(root.filters) == len(before) + 1
     assert root.filters == before
+
+
+def test_no_parameter_init_stubs_nn_init_but_not_tensor_methods():
+    """nn.init is stubbed; Tensor methods that build real buffers are not.
+
+    Module code builds the causal attention mask with
+    ``empty(77, 77).fill_(-inf).triu_(1)``.  Stubbing ``fill_`` would
+    silently yield a garbage mask, so the context manager must leave
+    Tensor methods alone.
+    """
+    import torch
+    import torch.nn.init as init
+
+    from grape.model import _no_parameter_init
+
+    with _no_parameter_init():
+        param = torch.zeros(4)
+        assert init.normal_(param).equal(torch.zeros(4))
+        assert torch.empty(3).fill_(2.5).equal(torch.full((3,), 2.5))
+        assert torch.empty(3).zero_().equal(torch.zeros(3))
+
+
+def test_no_parameter_init_restores_on_exception():
+    import torch
+    import torch.nn.init as init
+
+    from grape.model import _no_parameter_init
+
+    before = init.normal_
+    with pytest.raises(RuntimeError):
+        with _no_parameter_init():
+            raise RuntimeError("boom")
+    assert init.normal_ is before
+    assert not init.normal_(torch.zeros(64)).equal(torch.zeros(64))
+
+
+def test_no_parameter_init_serializes_overlapping_builds():
+    """Overlapping builds must never be inside the patch at the same time.
+
+    It mutates a global module: if a second thread entered while the
+    first held the patch, it would save the *stub* as its original and
+    restore that, leaving torch.nn.init no-oped process-wide.
+    """
+    import threading
+
+    import torch
+    import torch.nn.init as init
+
+    from grape.model import _no_parameter_init
+
+    real = init.normal_
+    state = {"inside": 0, "peak": 0}
+    guard = threading.Lock()
+
+    def worker():
+        with _no_parameter_init():
+            with guard:
+                state["inside"] += 1
+                state["peak"] = max(state["peak"], state["inside"])
+            time.sleep(0.05)
+            with guard:
+                state["inside"] -= 1
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+    assert not any(t.is_alive() for t in threads), "deadlock"
+
+    assert state["peak"] == 1, "two builds were inside the patch at once"
+    assert init.normal_ is real
+    assert not init.normal_(torch.zeros(32)).equal(torch.zeros(32))
+
+
+def test_no_parameter_init_nests():
+    import torch.nn.init as init
+
+    from grape.model import _no_parameter_init
+
+    real = init.normal_
+    with _no_parameter_init():
+        with _no_parameter_init():
+            pass
+    assert init.normal_ is real
+
+
+def test_preloaded_tokenizer_not_reused_across_models(monkeypatch):
+    """A preload that overran its timeout must not be handed to another model.
+
+    The thread stays tracked after a timeout, so without keying on the
+    model name the next (different) model receives this tokenizer and
+    embeds with the wrong vocab -- silently, since tokenizers are
+    duck-typed and nothing validates the pairing.
+    """
+    import threading
+
+    import grape.model as gm
+
+    slow = threading.Event()
+
+    def fake_load(_open_clip, model_name):
+        if model_name == "ModelA":
+            slow.wait(timeout=5)
+        return f"tokenizer-for-{model_name}"
+
+    monkeypatch.setattr(gm, "_load_tokenizer", fake_load)
+    monkeypatch.setattr(gm, "_tokenizer_thread", None)
+    monkeypatch.setattr(gm, "_preloaded_tokenizer", None)
+
+    gm._preload_tokenizer(None, "ModelA")
+    gm._tokenizer_thread.join(timeout=0.05)
+    assert gm._tokenizer_thread.is_alive(), "expected the A load to overrun"
+    slow.set()
+    gm._tokenizer_thread.join(timeout=5)
+
+    gm._preload_tokenizer(None, "ModelB")
+    assert gm._take_preloaded_tokenizer("ModelB") is None
+
+    monkeypatch.setattr(gm, "_tokenizer_thread", None)
+    monkeypatch.setattr(gm, "_preloaded_tokenizer", None)
+
+
+def test_preloaded_tokenizer_returned_for_matching_model(monkeypatch):
+    import grape.model as gm
+
+    monkeypatch.setattr(gm, "_load_tokenizer", lambda _oc, name: f"tok-{name}")
+    monkeypatch.setattr(gm, "_tokenizer_thread", None)
+    monkeypatch.setattr(gm, "_preloaded_tokenizer", None)
+    gm._preload_tokenizer(None, "ModelA")
+    assert gm._take_preloaded_tokenizer("ModelA") == "tok-ModelA"

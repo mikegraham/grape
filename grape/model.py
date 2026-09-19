@@ -58,7 +58,8 @@ class CLIPModel:
         self._model_id: str | None = None
         self.device = "cpu"
         open_clip = _import_open_clip(
-            use_transformers=False, model_name=model_name,
+            use_transformers=_model_needs_transformers(model_name),
+            model_name=model_name,
         )
         if not quiet:
             print("Loading model...", end=" ", flush=True, file=sys.stderr)
@@ -108,7 +109,10 @@ class CLIPModel:
                     device=self.device,
                 )
             )
-        self.tokenizer = open_clip.get_tokenizer(model_name)
+        self.tokenizer = (
+            _take_preloaded_tokenizer(model_name)
+            or _load_tokenizer(open_clip, model_name)
+        )
 
     def _init_model_fast(
         self,
@@ -163,10 +167,17 @@ class CLIPModel:
         """Encode an image to an L2-normalized embedding. Shape: (1, dim).
 
         Animated GIF/WEBP/APNG: sample K = min(n_frames,
-        MAX_ANIMATION_FRAMES) frames uniformly, encode each, L2-normalize,
-        mean, re-normalize. Matches CLIP4Clip's meanP recipe
-        (arXiv:2104.08860). Static images go through the same path with
-        K=1 and produce byte-identical embeddings to the prior impl.
+        MAX_ANIMATION_FRAMES) frames uniformly, L2-normalize each frame's
+        embedding, average, re-normalize (CLIP4Clip's meanP,
+        arXiv:2104.08860). Static images are the K=1 case.
+
+        Known bias, left on purpose: averaging keeps what frames share but
+        partly cancels what differs, so varied clips drift toward the
+        embedding centroid and cluster together (within-gif cosine ~0.5 vs
+        ~0.28 static, ViT-B-32). Mean-centering can't restore the lost
+        detail and would shift static and text embeddings, invalidating
+        the cache. Guarded by test_identical_frames_do_not_change_embedding
+        and test_gif_frames_match_their_own_gif.
         """
         image = Image.open(image_path)
         n_frames = getattr(image, "n_frames", 1)
@@ -251,6 +262,8 @@ _open_clip_module = None
 _open_clip_fast_path = False
 _preloaded_state_dict: dict | None = None
 _preload_thread: "threading.Thread | None" = None
+_tokenizer_thread: "threading.Thread | None" = None
+_preloaded_tokenizer: Any | None = None
 
 
 # -- Hack 1: Import stubs -------------------------------------------------
@@ -275,13 +288,8 @@ def _make_stub(name: str, doc: str, **attrs: Any) -> types.ModuleType:
     return stub
 
 
-def _model_needs_timm(model_name: str) -> bool:
-    """Check whether a model architecture requires timm.
-
-    Reads the JSON config from open_clip's installed model_configs directory
-    without importing open_clip itself. Returns True (safe default) if the
-    config can't be found.
-    """
+def _builtin_model_config(model_name: str) -> dict | None:
+    """Read open_clip's built-in JSON config without importing open_clip."""
     oc_init = sys.modules.get("open_clip", None)
     if oc_init is not None and getattr(oc_init, "__file__", None) is not None:
         cfg_dir = Path(oc_init.__file__).parent / "model_configs"  # type: ignore[arg-type]
@@ -289,15 +297,31 @@ def _model_needs_timm(model_name: str) -> bool:
         import importlib.util
         spec = importlib.util.find_spec("open_clip")
         if spec is None or spec.origin is None:
-            return True  # can't tell, assume yes (safe)
+            return None
         cfg_dir = Path(spec.origin).parent / "model_configs"
     cfg_file = cfg_dir / f"{model_name}.json"
     if not cfg_file.is_file():
-        return True  # unknown model, assume yes (safe)
+        return None
     import json
-    cfg = json.loads(cfg_file.read_text())
+    cfg: dict = json.loads(cfg_file.read_text())
+    return cfg
+
+
+def _model_needs_timm(model_name: str) -> bool:
+    """Check whether a model architecture requires timm."""
+    cfg = _builtin_model_config(model_name)
+    if cfg is None:
+        return True  # can't tell, assume yes (safe)
     vcfg = cfg.get("vision_cfg", {})
     return isinstance(vcfg, dict) and "timm_model_name" in vcfg
+
+
+def _model_needs_transformers(model_name: str) -> bool:
+    """True when the model's tokenizer comes from transformers (SigLIP, SigLIP 2)."""
+    cfg = _builtin_model_config(model_name)
+    if cfg is None:
+        return True  # unknown model, assume yes (safe)
+    return bool(cfg.get("text_cfg", {}).get("hf_tokenizer_name"))
 
 
 def _install_import_stubs(*, stub_timm: bool = True) -> None:
@@ -326,6 +350,9 @@ def _install_import_stubs(*, stub_timm: bool = True) -> None:
     # by torch.compiler.disable and torch._compile.inner) and `utils` with
     # `is_compile_supported`. Since we never call torch.compile, `disable`
     # just returns the decorated function unchanged.
+    #
+    # The stub is tagged with _grape_stub=True so remove_dynamo_stubs() can
+    # find and purge it when the caller actually wants torch.compile.
     if "torch._dynamo" not in sys.modules:
 
         def _dynamo_disable_noop(fn=None, recursive=True, **kwargs):
@@ -338,15 +365,32 @@ def _install_import_stubs(*, stub_timm: bool = True) -> None:
             "torch._dynamo",
             "grape startup stub: torch.compile not used",
             disable=_dynamo_disable_noop,
+            _grape_stub=True,
         )
         dynamo_utils_stub = _make_stub(
             "torch._dynamo.utils",
             "grape startup stub: deferred",
             is_compile_supported=lambda: False,
+            _grape_stub=True,
         )
         dynamo_stub.utils = dynamo_utils_stub  # type: ignore[attr-defined]
         sys.modules["torch._dynamo"] = dynamo_stub
         sys.modules["torch._dynamo.utils"] = dynamo_utils_stub
+
+
+def remove_dynamo_stubs() -> None:
+    """Remove grape's torch._dynamo stubs from sys.modules.
+
+    Call this before torch.compile to let the real torch._dynamo load.
+    The stubs are only installed to skip the ~620ms torchvision.ops import
+    cost on startup; once open_clip is loaded they are no longer needed.
+    Does nothing if the real module is already loaded.
+    """
+    for key in list(sys.modules):
+        if (key == "torch._dynamo" or key.startswith("torch._dynamo.")) and (
+            getattr(sys.modules[key], "_grape_stub", False)
+        ):
+            del sys.modules[key]
 
 
 def _import_open_clip(
@@ -376,6 +420,7 @@ def _import_open_clip(
                     getattr(mod, "__file__", None) is None
                 ):
                     del sys.modules[key]
+        remove_dynamo_stubs()  # transformers' lazy imports trip on it
         _open_clip_module = importlib.import_module("open_clip")
         _open_clip_fast_path = False
         return _open_clip_module
@@ -391,7 +436,13 @@ def _import_open_clip(
 def _requires_transformers(exc: Exception) -> bool:
     """Return True when open_clip failed due to missing transformers."""
     text = str(exc).lower()
-    return "transformers" in text and "install" in text
+    if "transformers" not in text:
+        return False
+    if "install" in text:
+        return True
+    # Against our stub, HF tokenizers fail with "cannot import name", not "install".
+    stub = sys.modules.get("transformers")
+    return stub is not None and getattr(stub, "__file__", None) is None
 
 
 # -- Hack 2: HF cache probing ---------------------------------------------
@@ -439,6 +490,24 @@ def _temporary_env(name: str, value: str):
             os.environ[name] = previous
         else:
             os.environ.pop(name, None)
+
+
+def _load_tokenizer(open_clip: Any, model_name: str) -> Any:
+    """HF tokenizers probe the Hub even when cached; load from the snapshot dir."""
+    cfg = open_clip.get_model_config(model_name) or {}
+    text_cfg = cfg.get("text_cfg", {})
+    repo = text_cfg.get("hf_tokenizer_name")
+    local = _cached_file_from_repo(repo, "tokenizer_config.json") if repo else None
+    if local is None:
+        return open_clip.get_tokenizer(model_name)  # built-in tokenizer, or first run
+    return open_clip.tokenizer.HFTokenizer(
+        str(Path(local).parent),
+        context_length=text_cfg.get(
+            "context_length", open_clip.tokenizer.DEFAULT_CONTEXT_LENGTH,
+        ),
+        tokenizer_mode=text_cfg.get("tokenizer_mode"),
+        **text_cfg.get("tokenizer_kwargs", {}),
+    )
 
 
 def _temporary_hf_hub_offline():
@@ -506,8 +575,12 @@ def preload_weights(model_name: str, pretrained: str) -> None:
     global _preload_thread, _preloaded_state_dict
     if _preload_thread is not None:
         return  # already started
-    # Side effect: installs import stubs for open_clip.
-    _import_open_clip(use_transformers=False, model_name=model_name)
+    # Side effect: installs import stubs for open_clip (unless the model
+    # needs the real transformers).
+    needs_tf = _model_needs_transformers(model_name)
+    open_clip = _import_open_clip(use_transformers=needs_tf, model_name=model_name)
+    if needs_tf:
+        _preload_tokenizer(open_clip, model_name)
     path = _cached_weight_path(model_name, pretrained)
     if path is None:
         return
@@ -524,6 +597,40 @@ def preload_weights(model_name: str, pretrained: str) -> None:
 
     _preload_thread = threading.Thread(target=_load, daemon=True)
     _preload_thread.start()
+
+
+def _preload_tokenizer(open_clip: Any, model_name: str) -> None:
+    """Import transformers and build the tokenizer while weights are read."""
+    global _tokenizer_thread, _preloaded_tokenizer
+    if _tokenizer_thread is not None:
+        return
+
+    def _load():
+        global _preloaded_tokenizer
+        # Tagged with the model it belongs to. A load that overran the
+        # take() timeout stays tracked, so without the tag a later,
+        # different model would be handed this tokenizer and would
+        # silently embed with the wrong vocab.
+        _preloaded_tokenizer = (model_name, _load_tokenizer(open_clip, model_name))
+
+    _tokenizer_thread = threading.Thread(target=_load, daemon=True)
+    _tokenizer_thread.start()
+
+
+def _take_preloaded_tokenizer(model_name: str) -> Any | None:
+    """Consume the preloaded tokenizer, but only if it is for *model_name*."""
+    global _tokenizer_thread, _preloaded_tokenizer
+    if _tokenizer_thread is None:
+        return None
+    _tokenizer_thread.join(timeout=30)
+    if _tokenizer_thread.is_alive():
+        return None
+    loaded = _preloaded_tokenizer
+    _tokenizer_thread = None
+    _preloaded_tokenizer = None
+    if loaded is None or loaded[0] != model_name:
+        return None
+    return loaded[1]
 
 
 def _take_preloaded_state_dict() -> dict | None:
@@ -544,6 +651,48 @@ def _take_preloaded_state_dict() -> dict | None:
     _preload_thread = None
     _preloaded_state_dict = None
     return sd
+
+
+_INIT_PATCH_LOCK = threading.RLock()
+
+
+@contextmanager
+def _no_parameter_init():
+    """Make ``torch.nn.init.*`` a no-op for the duration of a model build.
+
+    Every parameter is overwritten by the ``strict=True`` load_state_dict
+    that follows, so the random values open_clip generates are dead on
+    arrival -- and generating them for an L-size model costs ~1.7s.
+
+    Only ``nn.init`` is patched, never Tensor methods like ``fill_`` or
+    ``zero_``: module code uses those to construct real buffers (the
+    causal attention mask is ``empty(77,77).fill_(-inf).triu_(1)``), and
+    stubbing them would silently produce a garbage mask.  Guarded by
+    test_no_parameter_init_stubs_nn_init_but_not_tensor_methods.
+
+    Serialized on a lock because it mutates a global module: two
+    overlapping builds would otherwise have the second save the *stub* as
+    its original and restore that, leaving torch.nn.init permanently
+    no-oped for the whole process. Reentrant so a nested build still
+    works.
+    """
+    import torch.nn.init as init
+    with _INIT_PATCH_LOCK:
+        names = [
+            n for n in dir(init) if n.endswith("_") and not n.startswith("_")
+        ]
+        saved = {n: getattr(init, n) for n in names}
+
+        def _noop(tensor, *args, **kwargs):
+            return tensor
+
+        try:
+            for n in names:
+                setattr(init, n, _noop)
+            yield
+        finally:
+            for n, fn in saved.items():
+                setattr(init, n, fn)
 
 
 def _init_from_state_dict(
@@ -571,13 +720,21 @@ def _init_from_state_dict(
         interpolation=pt_cfg.get("interpolation"),
         resize_mode=pt_cfg.get("resize_mode"),
     )
-    with _suppress_open_clip_no_weights_warning():
-        model = open_clip.create_model(
-            model_name,
-            load_weights=False,
-            device="cpu",
-            force_preprocess_cfg=force_pp,
-        )
+    def _build(device: str) -> Any:
+        with _suppress_open_clip_no_weights_warning():
+            return open_clip.create_model(
+                model_name,
+                load_weights=False,
+                device=device,
+                force_preprocess_cfg=force_pp,
+            )
+
+    # Build under meta: every parameter is overwritten by the state dict
+    # below, so the uniform_/normal_ init open_clip runs is wasted work
+    # (~6s on an L-size model). device="meta" also makes open_clip's
+    # closing .to(device) a no-op; without it that call raises.
+    with torch.device("meta"):
+        model = _build("meta")
     # Some checkpoints store weights in float16 (e.g. EVA02-L-14).
     # Convert to float32 before loading so all parameters match the
     # float32 input tensors produced by the image preprocessor.
@@ -586,8 +743,21 @@ def _init_from_state_dict(
         for k, v in state_dict.items()
     }
     model.load_state_dict(state_dict, assign=True, strict=True)
+    # A tensor the checkpoint doesn't supply (e.g. a non-persistent buffer)
+    # would still be meta here, and would fail at forward time. Rebuild.
+    if any(t.is_meta for t in [*model.parameters(), *model.buffers()]):
+        # Rebuild on CPU, skipping parameter init. EVA02-L-14 leaves just
+        # two non-persistent buffers on meta (rope.pos_embed, attn_mask,
+        # 38k elements total), and regenerating 428M random parameters to
+        # recover them cost ~1.7s of a ~6s run.
+        with _no_parameter_init():
+            model = _build("cpu")
+        model.load_state_dict(state_dict, assign=True, strict=True)
     clip.model = model
     from open_clip.transform import PreprocessCfg, image_transform_v2
     pp_cfg = PreprocessCfg(**model.visual.preprocess_cfg)
     clip.preprocess = image_transform_v2(pp_cfg, is_train=False)
-    clip.tokenizer = open_clip.get_tokenizer(model_name)
+    clip.tokenizer = (
+        _take_preloaded_tokenizer(model_name)
+        or _load_tokenizer(open_clip, model_name)
+    )
