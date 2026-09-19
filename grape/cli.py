@@ -271,7 +271,9 @@ def _encode_keywords(
         else:
             merged = embs.mean(axis=0, keepdims=True)
             norm = np.linalg.norm(merged)
-            merged = merged / max(norm, 1e-12)
+            if norm == 0:
+                raise ValueError(f"prompt embeddings for {kw!r} average to zero")
+            merged = merged / norm
             keyword_embs.append(merged.astype(np.float32))
 
     return np.vstack(keyword_embs)

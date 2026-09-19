@@ -692,6 +692,19 @@ def test_ensemble_prompts_custom_templates_override_default(tmp_path, monkeypatc
     assert captured["prompt_templates"] == ["one {}", "two {}"]
 
 
+def test_encode_keywords_rejects_prompts_averaging_to_zero():
+    from grape.cli import _encode_keywords
+
+    emb = np.array([[1.0, 0.0]], dtype=np.float32)
+
+    class _Cache:
+        def get_text_embeddings(self, model_id, texts):
+            return {"a x": emb, "b x": -emb}
+
+    with pytest.raises(ValueError, match="average to zero"):
+        _encode_keywords(object(), ["x"], ["a {}", "b {}"], ("m", None), _Cache())
+
+
 def test_ensemble_prompts_template_without_placeholder_errors(monkeypatch):
     _, err, code = run_main(
         ["--ensemble-prompts", "bad template", "-k", "dog", "x.jpg"],
