@@ -16,9 +16,18 @@ from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from PIL import Image, UnidentifiedImageError
+# OpenBLAS starts a busy thread per core on load: 35-100ms and ~1.5s of CPU
+# for a ~4ms matmul. It reads this only at load, so set it just for numpy.
+_blas_threads = os.environ.get("OPENBLAS_NUM_THREADS")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+import numpy  # noqa: E402, F401, ICN001
 
-from grape.search import (
+if _blas_threads is None:
+    del os.environ["OPENBLAS_NUM_THREADS"]
+
+from PIL import Image, UnidentifiedImageError  # noqa: E402
+
+from grape.search import (  # noqa: E402
     ImageRecord,
     ScoredImage,
     is_image,
