@@ -342,6 +342,35 @@ def test_view_rejects_print0(monkeypatch):
     assert "-print0" in err
 
 
+def test_module_entry_point_flushes_before_fast_exit(tmp_path):
+    """run() ends with os._exit, which drops buffered stdout: piped output
+    must still arrive."""
+    import subprocess
+    import sys
+
+    from grape.cache import EmbeddingCache
+    from grape.cli import DEFAULT_MODEL
+
+    image = tmp_path / "a.jpg"
+    Image.new("RGB", (2, 2)).save(image)
+    emb = np.ones((1, 4), dtype=np.float32)
+    db = tmp_path / "c.db"
+    cache = EmbeddingCache(db)
+    cache.put_model_id(*DEFAULT_MODEL.split("/", 1), "model-a")
+    cache.put(image, "model-a", emb)
+    cache.put_text_embeddings(
+        "model-a", [(t.format("dog"), emb) for t in DEFAULT_PROMPT_ENSEMBLE],
+    )
+    cache.close()
+
+    out = subprocess.run(
+        [sys.executable, "-m", "grape", "-q", "--cache", str(db),
+         "-k", "dog", str(image)],
+        capture_output=True, text=True, check=True,
+    )
+    assert out.stdout == f"{shlex.quote(str(image))}\n"
+
+
 # --- error paths ---
 
 def test_nonexistent_path_errors(monkeypatch):

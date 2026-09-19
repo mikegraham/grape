@@ -1191,3 +1191,16 @@ def main() -> None:
         )
 
 
+def run() -> None:
+    """Console entry point: main(), then exit without interpreter teardown.
+
+    Tearing down torch and open_clip takes ~1s after a run that loaded the
+    model (~20ms on a cached run), and nothing left needs it. os._exit
+    skips buffered-output flushing too, so flush first.
+    """
+    main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
+
+
