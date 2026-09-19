@@ -167,29 +167,17 @@ class CLIPModel:
         """Encode an image to an L2-normalized embedding. Shape: (1, dim).
 
         Animated GIF/WEBP/APNG: sample K = min(n_frames,
-        MAX_ANIMATION_FRAMES) frames uniformly, encode each, L2-normalize,
-        mean, re-normalize. Matches CLIP4Clip's meanP recipe
-        (arXiv:2104.08860). Static images go through the same path with
-        K=1 and produce byte-identical embeddings to the prior impl.
-        Known bias of meanP: CLIP space is anisotropic, so each frame is
-        (shared mean component) + (per-frame content residual). Across
-        frames the shared component points the same way and adds
-        coherently, while the residuals point different ways and partially
-        cancel. The mean therefore keeps the shared component at full
-        strength but a *shrunken* residual, so its direction tilts toward
-        the embedding centroid -- heterogeneous-frame clips land near that
-        centroid and cluster with each other (measured within-gif cosine
-        ~0.5 vs ~0.28 for static images on ViT-B-32). Re-normalization
-        does not cause this and cannot undo it: it scales both parts
-        equally. The tilt scales with frame diversity; near-duplicate
-        frames barely cancel and identical frames are an exact no-op.
-        Left uncorrected on purpose: global mean-centering subtracts the
-        shared component but cannot regrow the lost residual, and it would
-        perturb the working static/text paths and invalidate cached
-        embeddings to patch a multi-frame-only effect. Guarded by
-        test_identical_frames_do_not_change_embedding and
-        test_gif_frames_match_their_own_gif.
+        MAX_ANIMATION_FRAMES) frames uniformly, L2-normalize each frame's
+        embedding, average, re-normalize (CLIP4Clip's meanP,
+        arXiv:2104.08860). Static images are the K=1 case.
 
+        Known bias, left on purpose: averaging keeps what frames share but
+        partly cancels what differs, so varied clips drift toward the
+        embedding centroid and cluster together (within-gif cosine ~0.5 vs
+        ~0.28 static, ViT-B-32). Mean-centering can't restore the lost
+        detail and would shift static and text embeddings, invalidating
+        the cache. Guarded by test_identical_frames_do_not_change_embedding
+        and test_gif_frames_match_their_own_gif.
         """
         image = Image.open(image_path)
         n_frames = getattr(image, "n_frames", 1)
