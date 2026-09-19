@@ -334,6 +334,30 @@ def test_count_long_flag_is_rejected(monkeypatch):
     assert "unrecognized arguments: --count" in err
 
 
+def test_cached_run_draws_no_progress_bar(tmp_path, monkeypatch):
+    """Nothing to encode must not draw an empty "Encoding: 0it" bar."""
+    from grape.cache import EmbeddingCache
+    from grape.cli import DEFAULT_MODEL
+
+    image = tmp_path / "a.jpg"
+    Image.new("RGB", (2, 2)).save(image)
+    emb = np.ones((1, 4), dtype=np.float32)
+    db = tmp_path / "c.db"
+    cache = EmbeddingCache(db)
+    cache.put_model_id(*DEFAULT_MODEL.split("/", 1), "model-a")
+    cache.put(image, "model-a", emb)
+    cache.put_text_embeddings(
+        "model-a", [(t.format("dog"), emb) for t in DEFAULT_PROMPT_ENSEMBLE],
+    )
+    cache.close()
+
+    _, err, code = run_main(
+        ["--cache", str(db), "-k", "dog", str(image)], monkeypatch,
+    )
+    assert code == 0
+    assert "Encoding" not in err
+
+
 def test_view_rejects_print0(monkeypatch):
     _, err, code = run_main(["--view", "-print0", "-k", "dog", "x.jpg"], monkeypatch)
     assert code != 0

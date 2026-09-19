@@ -513,7 +513,8 @@ def _score_all(
     if uncached_items:
         log.debug("score_all: encoding %d uncached images", len(uncached_items))
     for item in tqdm(
-        uncached_items, desc="Encoding", file=sys.stderr, disable=quiet,
+        uncached_items, desc="Encoding", file=sys.stderr,
+        disable=quiet or not uncached_items,
     ):
         if verbose:
             # tqdm.write avoids breaking the progress bar.
