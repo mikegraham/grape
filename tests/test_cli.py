@@ -12,7 +12,8 @@ from PIL import Image
 from grape.cache import EmbeddingIndex
 from grape.cli import (
     DEFAULT_PROMPT_ENSEMBLE,
-    _apply_excluded_keywords,
+    ScoreTable,
+    _combined_scores,
     _expand_stdin_paths,
     _format_html,
     _format_results,
@@ -135,23 +136,47 @@ def test_format_results_verbose_shows_breakdown():
     assert "cat: 0.400" in output
 
 
-def test_apply_excluded_keywords_adjusts_score_and_labels():
-    results = [
-        ScoredImage(path="/a/img.jpg", scores={"dog": 0.9, "cat": 0.2}),
-    ]
-    _apply_excluded_keywords(results, ["dog"], ["cat"])
+def _table(paths, sims):
+    return ScoreTable(paths=paths, sims=np.array(sims, dtype=np.float32))
+
+
+def test_filter_and_sort_adjusts_score_and_labels_excludes():
+    from grape.cli import ScanReport, _filter_and_sort
+
+    table = _table(["/a/img.jpg"], [[0.9, 0.2]])
+    results = _filter_and_sort(
+        (table, ScanReport(image_count=1)), ["dog"], ["cat"], [],
+        None, None, True,
+    )
     assert results[0].score == pytest.approx(0.7)
     assert results[0].scores["dog"] == pytest.approx(0.9)
     assert results[0].scores["not:cat"] == pytest.approx(0.2)
 
 
-def test_apply_excluded_keywords_with_empty_include():
-    results = [
-        ScoredImage(path="/a/img.jpg", scores={"cat": 0.2}),
+def test_combined_scores_with_empty_include():
+    sims = np.array([[0.2]], dtype=np.float32)
+    assert _combined_scores(sims, 0, 1) == pytest.approx([-0.2])
+
+
+def test_combined_scores_counts_like_as_include():
+    """Columns are include, exclude, like: like joins the include mean."""
+    sims = np.array([[0.8, 0.1, 0.4]], dtype=np.float32)
+    assert _combined_scores(sims, 1, 1) == pytest.approx([0.6 - 0.1])
+
+
+def test_filter_and_sort_ranks_best_first_ties_in_scan_order():
+    from grape.cli import ScanReport, _filter_and_sort
+
+    table = _table(
+        ["/low.jpg", "/tie1.jpg", "/high.jpg", "/tie2.jpg"],
+        [[0.1], [0.5], [0.9], [0.5]],
+    )
+    ranked = _filter_and_sort(
+        (table, ScanReport(image_count=4)), ["dog"], [], [], None, None, True,
+    )
+    assert [r.path for r in ranked] == [
+        "/high.jpg", "/tie1.jpg", "/tie2.jpg", "/low.jpg",
     ]
-    _apply_excluded_keywords(results, [], ["cat"])
-    assert results[0].score == pytest.approx(-0.2)
-    assert results[0].scores["not:cat"] == pytest.approx(0.2)
 
 
 def test_format_html_embeds_images(tmp_path):
@@ -384,6 +409,16 @@ def test_cache_bare_filename_is_accepted(tmp_path, monkeypatch):
     assert (tmp_path / "grape.db").exists()
 
 
+def _fake_score_table(prepared, sims_row):
+    """Score every (uncached) scanned item with the same similarities."""
+    *_, uncached_items, scan_done = prepared
+    table = ScoreTable(
+        paths=[item.path for item in uncached_items],
+        sims=np.array([sims_row] * len(uncached_items), dtype=np.float32),
+    )
+    return table, scan_done
+
+
 def _stub_pipeline(monkeypatch, score=0.75):
     """Stub the delayed pipeline tasks so tests don't load the real model.
 
@@ -408,17 +443,8 @@ def _stub_pipeline(monkeypatch, score=0.75):
         items, scan_done = scan_result
         return (None, [], [], items, scan_done)
 
-    def _fake_score_all(
-        prepared, model, score_keywords, like_paths, text_emb,
-        cache, quiet, verbose,
-    ):
-        *_, uncached_items, scan_done = prepared
-        results = [
-            ScoredImage(path=item.path, score=score,
-                        scores={kw: score for kw in score_keywords})
-            for item in uncached_items
-        ]
-        return results, scan_done
+    def _fake_score_all(prepared, model, text_emb, cache, quiet, verbose):
+        return _fake_score_table(prepared, [score])
 
     def _fake_encode_like_images(model, like_paths, cache_context, cache):
         return np.ones((len(like_paths), 2), dtype=np.float32)
@@ -572,17 +598,8 @@ def test_exclude_keywords_adjusts_output_score(tmp_path, monkeypatch):
     # Custom stub that returns different scores per keyword
     import grape.cli as cli_mod
 
-    def _fake_score_all(
-        prepared, model, score_keywords, like_paths, text_emb,
-        cache, quiet, verbose,
-    ):
-        *_, uncached_items, scan_done = prepared
-        results = [
-            ScoredImage(path=item.path,
-                        scores={"dog": 0.9, "cat": 0.2})
-            for item in uncached_items
-        ]
-        return results, scan_done
+    def _fake_score_all(prepared, model, text_emb, cache, quiet, verbose):
+        return _fake_score_table(prepared, [0.9, 0.2])
 
     _stub_pipeline(monkeypatch)
     monkeypatch.setattr(cli_mod, "_score_all", _fake_score_all)
@@ -613,17 +630,8 @@ def test_exclude_verbose_shows_not_keyword(tmp_path, monkeypatch):
 
     import grape.cli as cli_mod
 
-    def _fake_score_all(
-        prepared, model, score_keywords, like_paths, text_emb,
-        cache, quiet, verbose,
-    ):
-        *_, uncached_items, scan_done = prepared
-        results = [
-            ScoredImage(path=item.path,
-                        scores={"dog": 0.9, "cat": 0.2})
-            for item in uncached_items
-        ]
-        return results, scan_done
+    def _fake_score_all(prepared, model, text_emb, cache, quiet, verbose):
+        return _fake_score_table(prepared, [0.9, 0.2])
 
     _stub_pipeline(monkeypatch)
     monkeypatch.setattr(cli_mod, "_score_all", _fake_score_all)
@@ -749,15 +757,13 @@ def test_score_all_uses_in_memory_cache_index():
         scan_result, cache_context,
     )
 
-    results, _done = _score_all(
-        prepared, object(), ["dog"], [], text_emb,
+    table, _done = _score_all(
+        prepared, object(), text_emb,
         _NoDbCache(), True, False,
     )
 
-    assert len(results) == 1
-    assert results[0].path == "/tmp/a.jpg"
-    assert results[0].scores["dog"] == pytest.approx(1.0)
-    assert results[0].score == pytest.approx(1.0)
+    assert table.paths == ["/tmp/a.jpg"]
+    assert table.sims == pytest.approx(np.array([[1.0]]))
 
 
 def test_reboot_does_not_reencode_cached_images(tmp_path):
@@ -825,6 +831,7 @@ def test_score_all_duplicate_like_paths_keep_separate_scores():
     """
     from grape.cli import (
         ScanReport,
+        _filter_and_sort,
         _prepare_cached_embeddings,
         _score_all,
     )
@@ -862,9 +869,12 @@ def test_score_all_duplicate_like_paths_keep_separate_scores():
         scan_result, cache_context,
     )
 
-    results, _done = _score_all(
-        prepared, object(), text_keywords, like_paths, query_emb,
+    score_result = _score_all(
+        prepared, object(), query_emb,
         _NoDbCache(), True, False,
+    )
+    results = _filter_and_sort(
+        score_result, text_keywords, [], like_paths, None, None, True,
     )
 
     assert len(results) == 1
@@ -1022,12 +1032,13 @@ def test_score_all_skips_syntax_error():
         scan_result, cache_context,
     )
 
-    results, _done = _score_all(
-        prepared, _RaisingModel(), ["dog"], [], text_emb,
+    table, _done = _score_all(
+        prepared, _RaisingModel(), text_emb,
         tracking, True, False,
     )
 
-    assert len(results) == 0
+    assert table.paths == []
+    assert table.sims.shape == (0, 1)
     assert "/tmp/bad.png" in tracking.not_images
 
 
@@ -1060,12 +1071,13 @@ def test_score_all_skips_oserror_no_errno():
         scan_result, cache_context,
     )
 
-    results, _done = _score_all(
-        prepared, _RaisingModel(), ["dog"], [], text_emb,
+    table, _done = _score_all(
+        prepared, _RaisingModel(), text_emb,
         None, True, False,
     )
 
-    assert len(results) == 0
+    assert table.paths == []
+    assert table.sims.shape == (0, 1)
 
 
 def test_score_all_propagates_real_oserror():
@@ -1103,7 +1115,7 @@ def test_score_all_propagates_real_oserror():
 
     with pytest.raises(FileNotFoundError):
         _score_all(
-            prepared, _RaisingModel(), ["dog"], [], text_emb,
+            prepared, _RaisingModel(), text_emb,
             None, True, False,
         )
 
@@ -1143,7 +1155,7 @@ def test_score_all_verbose_prints_uncached_paths(capsys):
     )
 
     _score_all(
-        prepared, _StubModel(), ["dog"], [], text_emb,
+        prepared, _StubModel(), text_emb,
         None, True, True,
     )
 
@@ -1182,7 +1194,7 @@ def test_score_all_non_verbose_omits_uncached_paths(capsys):
     )
 
     _score_all(
-        prepared, _StubModel(), ["dog"], [], text_emb,
+        prepared, _StubModel(), text_emb,
         None, True, False,
     )
 
@@ -1237,42 +1249,32 @@ def test_corrupt_cache_prints_message(tmp_path, monkeypatch):
 def test_filter_and_sort_threshold(capsys):
     """--threshold filters results below the cutoff."""
     from grape.cli import ScanReport, _filter_and_sort
-    results = [
-        ScoredImage(path="/a.jpg", scores={"dog": 0.8}, score=0.8),
-        ScoredImage(path="/b.jpg", scores={"dog": 0.3}, score=0.3),
-        ScoredImage(path="/c.jpg", scores={"dog": 0.5}, score=0.5),
-    ]
+    table = _table(["/a.jpg", "/b.jpg", "/c.jpg"], [[0.8], [0.3], [0.5]])
     out = _filter_and_sort(
-        (results, ScanReport(image_count=3)),
+        (table, ScanReport(image_count=3)),
         ["dog"], [], [], threshold=0.4, top=None, quiet=True,
     )
-    assert [r.score for r in out] == [0.8, 0.5]
+    assert [r.score for r in out] == pytest.approx([0.8, 0.5])
 
 
 def test_filter_and_sort_top_n(capsys):
     """--top limits to N highest-scoring results."""
     from grape.cli import ScanReport, _filter_and_sort
-    results = [
-        ScoredImage(path=f"/{i}.jpg", scores={"dog": s}, score=s)
-        for i, s in enumerate([0.3, 0.8, 0.5, 0.7])
-    ]
+    table = _table(
+        [f"/{i}.jpg" for i in range(4)], [[0.3], [0.8], [0.5], [0.7]],
+    )
     out = _filter_and_sort(
-        (results, ScanReport(image_count=4)),
+        (table, ScanReport(image_count=4)),
         ["dog"], [], [], threshold=None, top=2, quiet=True,
     )
-    assert len(out) == 2
-    assert out[0].score == 0.8
-    assert out[1].score == 0.7
+    assert [r.score for r in out] == pytest.approx([0.8, 0.7])
 
 
 def test_filter_and_sort_status_message(capsys):
     """Without quiet, prints image count and query to stderr."""
     from grape.cli import ScanReport, _filter_and_sort
-    results = [
-        ScoredImage(path="/a.jpg", scores={"sunset": 0.5}, score=0.5),
-    ]
     _filter_and_sort(
-        (results, ScanReport(image_count=1)),
+        (_table(["/a.jpg"], [[0.5]]), ScanReport(image_count=1)),
         ["sunset"], [], [], threshold=None, top=None, quiet=False,
     )
     err = capsys.readouterr().err
