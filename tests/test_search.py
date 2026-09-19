@@ -116,7 +116,7 @@ def test_find_images_uses_embedding_cache_for_known_images(tmp_path, monkeypatch
     def _fail_open(*_args, **_kwargs):
         pytest.fail("Image.open should not be called for cached image hits")
 
-    monkeypatch.setattr("grape.search.Image.open", _fail_open)
+    monkeypatch.setattr("PIL.Image.open", _fail_open)
     images = find_images(str(scan_dir), cache=cache)
     assert [os.path.basename(p) for p in images] == ["real.jpg"]
     cache.close()
@@ -267,7 +267,7 @@ def test_is_image_catches_syntax_error(tmp_path):
     cache = EmbeddingCache(tmp_path / "test.db")
 
     # Patch Image.open to raise SyntaxError (some corrupt formats do this)
-    with patch("grape.search.Image.open", side_effect=SyntaxError("bad format")):
+    with patch("PIL.Image.open", side_effect=SyntaxError("bad format")):
         result = is_image(bad, cache)
 
     assert result is False

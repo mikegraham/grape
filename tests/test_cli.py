@@ -43,6 +43,44 @@ def run_main(args, monkeypatch):
     return out.getvalue(), err.getvalue(), code
 
 
+def test_cached_run_imports_stay_light():
+    """A fully cached run needs none of PIL, tqdm or torch."""
+    import subprocess
+    import sys
+
+    code = (
+        "import sys, grape.cli;"
+        "print([m for m in ('PIL', 'tqdm', 'torch') if m in sys.modules])"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True, text=True, check=True,
+    )
+    assert out.stdout.strip() == "[]"
+
+
+@pytest.mark.skipif(
+    not os.path.isdir("/proc/self/task"), reason="needs /proc/self/task",
+)
+def test_import_starts_no_blas_threads_and_leaves_env_alone():
+    """numpy's BLAS is capped at one thread, but only for numpy: the env
+    var must be gone again so torch keeps its own threading."""
+    import subprocess
+    import sys
+
+    code = (
+        "import os; os.environ.pop('OPENBLAS_NUM_THREADS', None);"
+        "import grape.cli;"
+        "print(len(os.listdir('/proc/self/task')),"
+        " os.environ.get('OPENBLAS_NUM_THREADS'))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True, text=True, check=True,
+    )
+    assert out.stdout.split() == ["1", "None"]
+
+
 # --- parse_keywords ---
 
 def test_parse_keywords_splits_on_comma():

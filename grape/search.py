@@ -12,13 +12,12 @@ from typing import TYPE_CHECKING, NamedTuple, cast
 
 import numpy as np
 from numpy.typing import NDArray
-from PIL import Image
-from tqdm import tqdm
 
 from grape.cache import stat_key_from_stat
 
 # CLIPModel is under TYPE_CHECKING so that importing search.py does
 # not pull in torch/open_clip (~2 s).  The cache-hit path never needs them.
+# PIL and tqdm (~17ms) are imported where used for the same reason.
 if TYPE_CHECKING:
     from grape.cache import EmbeddingCache
     from grape.cli import _LazyModel
@@ -79,6 +78,8 @@ def is_image(
         path, path_key=path_key, file_stat=file_stat
     ):
         return False
+    from PIL import Image
+
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
@@ -367,6 +368,8 @@ def score_images(
     cache: EmbeddingCache | None = None,
 ) -> list[ScoredImage]:
     """Score each image against all keywords."""
+    from tqdm import tqdm
+
     text_emb = encode_keywords(
         model,
         keywords,

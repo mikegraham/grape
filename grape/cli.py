@@ -16,9 +16,16 @@ from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from PIL import Image, UnidentifiedImageError
+# OpenBLAS starts a busy thread per core on load: 35-100ms and ~1.5s of CPU
+# for a ~4ms matmul. It reads this only at load, so set it just for numpy.
+_blas_threads = os.environ.get("OPENBLAS_NUM_THREADS")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+import numpy  # noqa: E402, F401, ICN001
 
-from grape.search import (
+if _blas_threads is None:
+    del os.environ["OPENBLAS_NUM_THREADS"]
+
+from grape.search import (  # noqa: E402
     ImageRecord,
     ScoredImage,
     is_image,
@@ -754,6 +761,8 @@ _html_template_cache: jinja2.Template | None = None
 
 def _read_resolution(path: str) -> str | None:
     """Return ``"WIDTHxHEIGHT"`` or ``None`` if the image can't be read."""
+    from PIL import Image, UnidentifiedImageError
+
     try:
         # Suppress DecompressionBombWarning: we're reading the header only,
         # not decompressing pixels, so the DOS-attack guard is a false positive.
