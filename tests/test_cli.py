@@ -1,6 +1,7 @@
 """Tests for CLI argument parsing, formatting, and error handling."""
 
 import os
+import re
 import shlex
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -12,11 +13,14 @@ from PIL import Image
 from grape.cache import EmbeddingIndex
 from grape.cli import (
     DEFAULT_PROMPT_ENSEMBLE,
+    GrapeError,
     ScoreTable,
     _combined_scores,
+    _encode_like_images,
     _expand_stdin_paths,
     _format_html,
     _format_results,
+    _like_records,
     _show_in_webview,
     main,
     parse_keywords,
@@ -1471,6 +1475,207 @@ def test_filter_and_sort_status_message(capsys):
     assert "sunset" in err
 
 
+# --- _like_records / _encode_like_images ---
+
+class _CountingModel:
+    """Fake model: counts encode_image calls, returns a fixed embedding."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def model_id(self):
+        return "m"
+
+    def encode_image(self, path):
+        self.calls += 1
+        return np.ones((1, 4), dtype=np.float32)
+
+
+class _RaisingLikeModel:
+    def __init__(self, exc):
+        self._exc = exc
+
+    def model_id(self):
+        return "m"
+
+    def encode_image(self, path):
+        raise self._exc
+
+
+def _like(*paths):
+    return _like_records([str(p) for p in paths])
+
+
+def test_like_records_missing_file_is_clean_error(tmp_path):
+    missing = tmp_path / "missing.jpg"
+    with pytest.raises(
+        GrapeError,
+        match=rf"^{re.escape(str(missing))}: No such file or directory$",
+    ):
+        _like(missing)
+
+
+def test_like_records_directory_is_clean_error(tmp_path):
+    with pytest.raises(
+        GrapeError, match=rf"^{re.escape(str(tmp_path))}: Is a directory$",
+    ):
+        _like(tmp_path)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs mkfifo")
+def test_like_records_fifo_is_clean_error(tmp_path):
+    """A FIFO would block forever in Image.open; reject it up front."""
+    fifo = tmp_path / "pipe.jpg"
+    os.mkfifo(fifo)
+    with pytest.raises(
+        GrapeError, match=rf"^{re.escape(str(fifo))}: Not a regular file$",
+    ):
+        _like(fifo)
+
+
+def test_like_records_keeps_display_path_and_keys(tmp_path):
+    img = tmp_path / "ref.jpg"
+    Image.new("RGB", (2, 2)).save(img, format="JPEG")
+    link = tmp_path / "link.jpg"
+    link.symlink_to(img)
+    (record,) = _like(link)
+    assert record.path == str(link)
+    assert record.path_key == os.path.realpath(img)
+    assert record.file_stat
+
+
+def test_encode_like_images_caches_miss(tmp_path):
+    """A --like miss is written back, so the next run is a hit."""
+    from grape.cache import EmbeddingCache
+
+    img = tmp_path / "ref.jpg"
+    Image.new("RGB", (2, 2)).save(img, format="JPEG")
+    cache = EmbeddingCache(tmp_path / "c.db")
+    model = _CountingModel()
+
+    first = _encode_like_images(model, _like(img), ("m", None), cache)
+    assert model.calls == 1
+    np.testing.assert_array_equal(cache.get(str(img), "m"), first)
+
+    again = _encode_like_images(model, _like(img), ("m", None), cache)
+    assert model.calls == 1, "second call must be served from the cache"
+    np.testing.assert_array_equal(again, first)
+    cache.close()
+
+
+def test_encode_like_images_cache_lookup_uses_scan_key(tmp_path):
+    """The lookup passes the reference's own realpath + stat, so the cache
+    doesn't realpath/stat the file a second time."""
+    img = tmp_path / "ref.jpg"
+    Image.new("RGB", (2, 2)).save(img, format="JPEG")
+    emb = np.array([[0.5, 0.5, 0.0, 0.0]], dtype=np.float32)
+
+    class _KeyedCache:
+        def get(self, path, model_id, *, path_key=None, file_stat=None):
+            assert path == str(img)
+            assert model_id == "m"
+            assert path_key == os.path.realpath(img)
+            assert file_stat is not None
+            return emb
+
+        def put(self, *_a, **_kw):
+            raise AssertionError("hit must not be re-put")
+
+    out = _encode_like_images(
+        _RaisingLikeModel(AssertionError("should not encode")),
+        _like(img), ("m", None), _KeyedCache(),
+    )
+    np.testing.assert_array_equal(out, emb)
+
+
+@pytest.mark.parametrize("exc, reason", [
+    (OSError("cannot identify image file 'x.jpg'"),
+     "cannot identify image file 'x.jpg'"),
+    (SyntaxError("not a JPEG"), "not a JPEG"),
+    (Image.DecompressionBombError("Image size (1 pixels) exceeds limit"),
+     "Image size (1 pixels) exceeds limit"),
+    (PermissionError(13, "Permission denied", "x.jpg"), "Permission denied"),
+])
+def test_encode_like_images_unreadable_file_is_clean_error(
+    tmp_path, exc, reason,
+):
+    """PIL and filesystem failures become GrapeError with a plain reason."""
+    bad = tmp_path / "bad.jpg"
+    bad.write_bytes(b"not a jpeg")
+    with pytest.raises(
+        GrapeError, match=rf"^{re.escape(str(bad))}: {re.escape(reason)}$",
+    ):
+        _encode_like_images(
+            _RaisingLikeModel(exc), _like(bad), (None, None), None,
+        )
+
+
+def test_encode_like_images_unexpected_error_propagates(tmp_path):
+    """Only PIL/filesystem failures are translated; bugs still surface."""
+    img = tmp_path / "ref.jpg"
+    Image.new("RGB", (2, 2)).save(img, format="JPEG")
+    with pytest.raises(ValueError):
+        _encode_like_images(
+            _RaisingLikeModel(ValueError("boom")),
+            _like(img), (None, None), None,
+        )
+
+
+def _stub_pipeline_with_real_like(monkeypatch, model):
+    """_stub_pipeline, but with the real _encode_like_images and *model*."""
+    import grape.cli as cli_mod
+
+    real_encode_like = cli_mod._encode_like_images
+    _stub_pipeline(monkeypatch)
+    monkeypatch.setattr(cli_mod, "_encode_like_images", real_encode_like)
+    monkeypatch.setattr(cli_mod, "_load_model", lambda *_a: model)
+
+
+@pytest.mark.parametrize("quiet", [True, False])
+def test_like_unreadable_file_exits_cleanly(tmp_path, monkeypatch, quiet):
+    """A corrupt --like image gives `grape: <path>: <reason>`, exit 1,
+    with nothing else on stderr (no half-printed "Loading model...")."""
+    good = tmp_path / "good.jpg"
+    Image.new("RGB", (2, 2)).save(good, format="JPEG")
+    bad = tmp_path / "bad.jpg"
+    bad.write_bytes(b"not a jpeg")
+    _stub_pipeline_with_real_like(
+        monkeypatch,
+        _RaisingLikeModel(OSError(f"cannot identify image file '{bad}'")),
+    )
+
+    args = ["--no-cache", "--like", str(bad), str(good)]
+    if quiet:
+        args.insert(0, "-q")
+    out, err, code = run_main(args, monkeypatch)
+    assert code == 1
+    assert out == ""
+    assert err == f"grape: {bad}: cannot identify image file '{bad}'\n"
+
+
+def test_like_missing_file_exits_before_any_work(tmp_path, monkeypatch):
+    """A missing --like path fails on the main thread, before the model
+    is touched or the scan starts."""
+    import grape.cli as cli_mod
+
+    good = tmp_path / "good.jpg"
+    Image.new("RGB", (2, 2)).save(good, format="JPEG")
+    missing = tmp_path / "missing.jpg"
+    _stub_pipeline_with_real_like(monkeypatch, _CountingModel())
+
+    def _no_scan(*_a, **_kw):
+        raise AssertionError("scan must not start for a bad --like path")
+
+    monkeypatch.setattr(cli_mod, "_scan_files", _no_scan)
+    out, err, code = run_main(
+        ["-q", "--no-cache", "-k", "dog", "--like", str(missing), str(good)],
+        monkeypatch,
+    )
+    assert code == 1
+    assert out == ""
+    assert err == f"grape: {missing}: No such file or directory\n"
+
+
 # --- end-to-end with real model (slow) ---
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -1578,3 +1783,40 @@ def test_score_all_encode_reuses_scan_stat():
         ("get", "link.png", "/real/a.png", "stat-a"),
         ("put", "link.png", "/real/a.png", "stat-a"),
     ]
+
+
+@pytest.mark.slow
+def test_e2e_like_caches_reference(tmp_path, monkeypatch):
+    """A --like reference outside the searched set is cached after the
+    first run, so the second run never loads the model."""
+    import sqlite3
+
+    import grape.cli as cli_mod
+
+    db = tmp_path / "test.db"
+    args = [
+        "-q",
+        "--model", E2E_MODEL,
+        "--cache", str(db),
+        "--like", str(FIXTURES / "dog.jpg"),
+        str(FIXTURES / "cat.jpg"),
+    ]
+    out, _, code = run_main(args, monkeypatch)
+    assert code == 0
+    assert "cat.jpg" in out
+
+    with sqlite3.connect(db) as conn:
+        paths = {
+            row[0]
+            for row in conn.execute("SELECT path FROM embeddings")
+        }
+    assert os.path.realpath(FIXTURES / "dog.jpg") in paths
+    assert os.path.realpath(FIXTURES / "cat.jpg") in paths
+
+    def _no_load(self):
+        raise AssertionError("fully cached run must not load the model")
+
+    monkeypatch.setattr(cli_mod._LazyModel, "_ensure_loaded", _no_load)
+    out2, _, code = run_main(args, monkeypatch)
+    assert code == 0
+    assert out2 == out

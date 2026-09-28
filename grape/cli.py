@@ -110,6 +110,22 @@ def _get_webview() -> Any:
     return webview
 
 
+class GrapeError(Exception):
+    """User-facing failure: printed as ``grape: <message>`` with exit 1."""
+
+
+def _os_reason(e: OSError) -> str:
+    """The part of an OSError worth showing after ``grape: <path>:``.
+
+    A real filesystem error carries an errno and a strerror ("No such
+    file or directory"). PIL raises OSError with errno unset and puts
+    the explanation in the message ("cannot identify image file ...").
+    """
+    if e.errno is not None and e.strerror:
+        return e.strerror
+    return str(e)
+
+
 # ---------------------------------------------------------------------------
 # Pipeline building blocks
 #
@@ -288,9 +304,35 @@ def _encode_keywords(
 
 
 
+def _like_records(like_paths: list[str]) -> list[ImageRecord]:
+    """Stat each --like reference and reject what can't be an image.
+
+    Runs on the main thread before the executor starts, so a typo'd
+    path fails immediately instead of after a wasted model load. A
+    missing, unreadable or non-regular reference is a hard error
+    (``GrapeError``), not a skip: the user named the file explicitly,
+    unlike scanned files, which _score_all skips with a warning. A
+    FIFO would otherwise block forever inside ``Image.open``.
+    """
+    records: list[ImageRecord] = []
+    for p in like_paths:
+        try:
+            record = ImageRecord.from_display_path(p)
+        except OSError as e:
+            raise GrapeError(f"{p}: {_os_reason(e)}") from e
+        if not os.path.isfile(record.path_key):
+            kind = (
+                "Is a directory" if os.path.isdir(record.path_key)
+                else "Not a regular file"
+            )
+            raise GrapeError(f"{p}: {kind}")
+        records.append(record)
+    return records
+
+
 def _encode_like_images(
     model: _LazyModel,
-    like_paths: list[str],
+    like_records: list[ImageRecord],
     cache_context: tuple[str | None, EmbeddingIndex | None],
     cache: EmbeddingCache | None,
 ) -> NDArray[np.float32]:
@@ -298,19 +340,45 @@ def _encode_like_images(
 
     Uses cached embeddings when available so that --like self-matches
     produce identical bytes (and therefore exactly 1.0 similarity).
-    Falls back to model.encode_image() on cache miss.
+    Falls back to model.encode_image() on cache miss, and writes the
+    result back, so a reference outside the searched library doesn't
+    force a model load on every later run.
+
+    A reference PIL can't decode is a hard error (``GrapeError``), for
+    the same reason _like_records rejects a missing one.
     """
     import numpy as np
-    model_id = cache_context[0] if cache_context else None
+    model_id = cache_context[0]
     embeddings = []
-    for p in like_paths:
+    for record in like_records:
+        p = record.path
         cached = None
         if cache is not None and model_id is not None:
-            cached = cache.get(p, model_id)
+            cached = cache.get(
+                p, model_id,
+                path_key=record.path_key, file_stat=record.file_stat,
+            )
         if cached is not None:
             embeddings.append(cached)
-        else:
-            embeddings.append(model.encode_image(p))
+            continue
+        # Cache miss: the model loads now, and PIL with it.
+        from PIL import Image
+        try:
+            emb = model.encode_image(p)
+        except (SyntaxError, Image.DecompressionBombError) as e:
+            # PIL raises SyntaxError for some corrupt/unrecognized
+            # formats; DecompressionBombError is not an OSError.
+            raise GrapeError(f"{p}: {e}") from e
+        except OSError as e:
+            raise GrapeError(f"{p}: {_os_reason(e)}") from e
+        if cache is not None:
+            # The model is loaded now, so use its real id like
+            # _get_embedding does, not the cheap cached one.
+            cache.put(
+                p, model.model_id(), emb,
+                path_key=record.path_key, file_stat=record.file_stat,
+            )
+        embeddings.append(emb)
     return np.vstack(embeddings)
 
 
@@ -1093,6 +1161,8 @@ def _run_pipeline(
     view: bool,
 ) -> None:
     """Run the full CLI pipeline on a small ThreadPoolExecutor."""
+    # Cheap usage errors first, before any thread or model starts.
+    like_records = _like_records(like_paths)
     # Each dependent task is wrapped in a closure that calls .result()
     # on its inputs -- the executor schedules Futures, workers blocked
     # on .result() don't consume CPU. max_workers=4 covers the model,
@@ -1122,9 +1192,9 @@ def _run_pipeline(
         # cache_context so cached --like embeddings match exactly.
         f_like_emb = ex.submit(
             lambda: _encode_like_images(
-                f_model.result(), like_paths, f_cache_ctx.result(), cache,
+                f_model.result(), like_records, f_cache_ctx.result(), cache,
             ),
-        ) if like_paths else None
+        ) if like_records else None
         # Combined query matrix: [text keywords..., like embeddings...].
         f_query = ex.submit(
             lambda: _combine_query_embeddings(
@@ -1232,25 +1302,30 @@ def main() -> None:
         cache_cm = nullcontext()
 
     with cache_cm as cache:
-        _run_pipeline(
-            score_keywords=score_keywords,
-            keywords=keywords,
-            exclude_keywords=exclude_keywords,
-            like_paths=like_paths,
-            model_name=model_name,
-            pretrained=pretrained,
-            prompt_templates=prompt_templates,
-            cache=cache,
-            quiet=args.quiet,
-            path_args=_expand_stdin_paths(args.path),
-            recursive=args.recursive,
-            threshold=args.threshold,
-            top=args.top,
-            scores=args.scores,
-            verbose=args.verbose,
-            print0=args.print0,
-            view=getattr(args, "view", False),
-        )
+        try:
+            _run_pipeline(
+                score_keywords=score_keywords,
+                keywords=keywords,
+                exclude_keywords=exclude_keywords,
+                like_paths=like_paths,
+                model_name=model_name,
+                pretrained=pretrained,
+                prompt_templates=prompt_templates,
+                cache=cache,
+                quiet=args.quiet,
+                path_args=_expand_stdin_paths(args.path),
+                recursive=args.recursive,
+                threshold=args.threshold,
+                top=args.top,
+                scores=args.scores,
+                verbose=args.verbose,
+                print0=args.print0,
+                view=getattr(args, "view", False),
+            )
+        except GrapeError as e:
+            # From the main thread, or an executor worker via .result().
+            print(f"grape: {e}", file=sys.stderr)
+            sys.exit(1)
 
 
 def run() -> None:

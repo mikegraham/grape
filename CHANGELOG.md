@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - A truncated animated GIF/WEBP/APNG that passes the scan no longer crashes the run with Pillow's `IndexError`/`struct.error`; it is skipped and recorded as not an image like other unreadable files.
 - `-print0` now composes with `-s`/`-v` like grep's `-Z`: the path is unquoted and NUL-terminated; the score before it and the `-v` breakdown line after it are unchanged. Previously the flag was silently ignored with `-s`/`-v`.
+- A missing or unreadable `--like` image now exits with `grape: <path>: <reason>` instead of a traceback.
+- `--like` reference embeddings are written to the cache, so a reference outside the searched library no longer reloads the model on every run.
 
 ## [0.4.0] - 2026-09-19
 
