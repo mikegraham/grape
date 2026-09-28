@@ -154,12 +154,21 @@ def test_format_results_shows_score_and_path():
         ScoredImage(path="/a/dog.jpg", scores={"dog": 0.85}, score=0.85),
         ScoredImage(path="/a/cat.jpg", scores={"dog": 0.42}, score=0.42),
     ]
-    output = _format_results(results, verbose=False)
+    output = _format_results(results, verbose=False, print0=False)
     lines = output.strip().split("\n")
     assert len(lines) == 2
     assert "0.850" in lines[0]
     assert "dog.jpg" in lines[0]
     assert "0.420" in lines[1]
+
+
+def test_format_results_print0_nul_terminates_unquoted_paths():
+    results = [
+        ScoredImage(path="/a/my dog.jpg", scores={"dog": 0.85}, score=0.85),
+        ScoredImage(path="/a/cat.jpg", scores={"dog": 0.42}, score=0.42),
+    ]
+    output = _format_results(results, verbose=False, print0=True)
+    assert output == "0.850  /a/my dog.jpg\x000.420  /a/cat.jpg\x00"
 
 
 def test_format_results_verbose_shows_breakdown():
@@ -169,7 +178,7 @@ def test_format_results_verbose_shows_breakdown():
             scores={"dog": 0.8, "cat": 0.4}, score=0.6,
         ),
     ]
-    output = _format_results(results, verbose=True)
+    output = _format_results(results, verbose=True, print0=False)
     assert "dog: 0.800" in output
     assert "cat: 0.400" in output
 
@@ -703,6 +712,35 @@ def test_scores_output_shell_quotes_paths(tmp_path, monkeypatch):
     assert shlex.quote(str(image_path)) in out
 
 
+def test_print0_with_scores_nul_terminates_raw_path(tmp_path, monkeypatch):
+    """-print0 composes with -s like grep -Z: unquoted path, NUL, no newline."""
+    image_path = tmp_path / "my photo.jpg"
+    Image.new("RGB", (1, 1)).save(image_path)
+    _stub_pipeline(monkeypatch)
+    out, _, code = run_main(
+        ["-q", "-print0", "-s", "-k", "dog", str(image_path)], monkeypatch,
+    )
+    assert code == 0
+    assert out == f"0.750  {image_path}\0"
+
+
+def test_print0_with_verbose_keeps_breakdown_line(tmp_path, monkeypatch):
+    """-print0 -v: NUL after the path, breakdown line still newline-terminated."""
+    image_path = tmp_path / "my photo.jpg"
+    Image.new("RGB", (1, 1)).save(image_path)
+    _stub_pipeline(monkeypatch)
+    out, _, code = run_main(
+        ["-q", "-print0", "-v", "-k", "dog", str(image_path)], monkeypatch,
+    )
+    assert code == 0
+    head = f"0.750  {image_path}\0"
+    assert out.startswith(head)
+    breakdown = out[len(head):]
+    assert breakdown.endswith("\n")
+    assert "\0" not in breakdown
+    assert "dog: 0.750" in breakdown
+
+
 def test_exclude_keywords_adjusts_output_score(tmp_path, monkeypatch):
     image_path = tmp_path / "my photo.jpg"
     Image.new("RGB", (1, 1)).save(image_path)
@@ -1136,7 +1174,7 @@ def test_format_results_verbose_shows_like_scores():
             score=0.875,
         ),
     ]
-    output = _format_results(results, verbose=True)
+    output = _format_results(results, verbose=True, print0=False)
     assert "dog: 0.800" in output
     assert "like:ref.jpg: 0.950" in output
 

@@ -661,17 +661,15 @@ def _emit(
         results = _scored_images(
             ranking, keywords, exclude_keywords, like_paths,
         )
-        print(_format_results(results, verbose=verbose))
+        sys.stdout.write(
+            _format_results(results, verbose=verbose, print0=print0),
+        )
+        sys.stdout.flush()
         return len(results)
     # Path-only output skips the breakdowns: ~30ms at 20k results.
     paths = [ranking.table.paths[i] for i in ranking.order]
-    if print0:
-        for p in paths:
-            sys.stdout.write(f"{p}\0")
-        sys.stdout.flush()
-        return len(paths)
-    for p in paths:
-        print(shlex.quote(p))
+    sys.stdout.write("".join(_path_record(p, print0) for p in paths))
+    sys.stdout.flush()
     return len(paths)
 
 
@@ -726,17 +724,31 @@ def parse_prompt_templates(raw: str) -> list[str]:
     return [t.strip() for t in raw.split(",") if t.strip()]
 
 
-def _format_results(results: list[ScoredImage], verbose: bool) -> str:
-    """Format scored results for display."""
-    lines = []
+def _path_record(path: str, print0: bool) -> str:
+    """A path plus the byte that ends it, for every stdout format.
+
+    Default: shell-quoted, newline-terminated, so the output pastes back
+    into a shell. ``-print0``: raw and NUL-terminated, so ``xargs -0``
+    and friends get the exact bytes. Like grep's ``-Z``, only what
+    follows the path changes; a score before it or a breakdown line
+    after it is formatted the same either way.
+    """
+    return f"{path}\0" if print0 else f"{shlex.quote(path)}\n"
+
+
+def _format_results(
+    results: list[ScoredImage], *, verbose: bool, print0: bool,
+) -> str:
+    """Format scored results for display, terminators included."""
+    chunks = []
     for r in results:
-        lines.append(f"{r.score:.3f}  {shlex.quote(r.path)}")
+        chunks.append(f"{r.score:.3f}  {_path_record(r.path, print0)}")
         if verbose:
             parts = [f"  {kw}: {s:.3f}" for kw, s in r.scores.items()]
             for lp, s in r.like_scores:
                 parts.append(f"  like:{Path(lp).name}: {s:.3f}")
-            lines.append("".join(parts))
-    return "\n".join(lines)
+            chunks.append("".join(parts) + "\n")
+    return "".join(chunks)
 
 
 def _combined_scores(
@@ -965,7 +977,8 @@ def _build_parser() -> argparse.ArgumentParser:
     output_group.add_argument(
         "-print0",
         action="store_true",
-        help="NUL-separated, unquoted paths",
+        help="NUL after each path instead of newline; paths unquoted"
+             " (works with -s/-v like grep -Z)",
     )
     _has_view_deps = (
         importlib.util.find_spec("webview") is not None

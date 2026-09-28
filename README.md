@@ -57,6 +57,11 @@ find ~/Pictures -mtime -7 -type f | grape --keywords selfie -
 # copy the top 10 cat photos to a folder
 grape -R -print0 -n 10 --keywords cat ~/Pictures | xargs -0 cp -t ~/cats/
 
+# scores with NUL-terminated paths, like grep -Z (safe for any filename)
+grape -R -s -print0 --keywords cat ~/Pictures | while IFS= read -r -d '' rec; do
+  score=${rec%%  *}; path=${rec#*  }; echo "$score $(basename "$path")"
+done
+
 # open the best match directly
 grape -R --keywords 'golden gate bridge' -n 1 ~/Pictures | xargs open
 
