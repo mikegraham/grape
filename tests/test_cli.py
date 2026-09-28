@@ -1520,10 +1520,10 @@ def test_score_all_encode_reuses_scan_stat():
         def __init__(self):
             self.calls = []
         def get(self, path, model_id, *, path_key=None, file_stat=None):
-            self.calls.append(("get", path_key, file_stat))
+            self.calls.append(("get", path, path_key, file_stat))
             return None
         def put(self, path, model_id, emb, *, path_key=None, file_stat=None):
-            self.calls.append(("put", path_key, file_stat))
+            self.calls.append(("put", path, path_key, file_stat))
 
     items = [
         ImageRecord(path="link.png", path_key="/real/a.png", file_stat="stat-a"),
@@ -1537,6 +1537,6 @@ def test_score_all_encode_reuses_scan_stat():
 
     assert table.paths == ["link.png"]
     assert cache.calls == [
-        ("get", "/real/a.png", "stat-a"),
-        ("put", "/real/a.png", "stat-a"),
+        ("get", "link.png", "/real/a.png", "stat-a"),
+        ("put", "link.png", "/real/a.png", "stat-a"),
     ]
