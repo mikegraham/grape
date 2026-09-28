@@ -7,6 +7,7 @@ Avoids redundant CLIP encoding by caching embeddings keyed on
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -18,6 +19,8 @@ from typing import TYPE_CHECKING, NamedTuple
 if TYPE_CHECKING:
     import numpy as np
     from numpy.typing import NDArray
+
+log = logging.getLogger("grape")
 
 _CREATE_EMBEDDINGS = """\
 CREATE TABLE IF NOT EXISTS embeddings (
@@ -154,6 +157,10 @@ class EmbeddingCache:
 
     def __init__(self, db_path: str | Path) -> None:
         self._lock = threading.RLock()
+        if os.path.exists(db_path):
+            log.debug("using cache file %s", db_path)
+        else:
+            log.info("cache file not found, creating %s", db_path)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         try:
             with self._lock:
