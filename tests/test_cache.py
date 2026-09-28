@@ -81,33 +81,6 @@ def test_cache_per_model(cache, img):
     np.testing.assert_array_equal(got_b, emb_b)
 
 
-def test_get_many_for_paths_returns_matching_embeddings(cache, img):
-    emb = _rand_embedding(21)
-    cache.put(img, "model-a", emb)
-    row = cache._conn.execute(
-        "SELECT path, file_stat FROM embeddings WHERE model = ?",
-        ("model-a",),
-    ).fetchone()
-    assert row is not None
-    path, file_stat = row
-    got = cache.get_many_for_paths("model-a", {path: file_stat})
-    assert path in got
-    np.testing.assert_array_equal(got[path].reshape(1, -1), emb)
-
-
-def test_get_many_for_paths_filters_stale_stats(cache, img):
-    emb = _rand_embedding(22)
-    cache.put(img, "model-a", emb)
-    row = cache._conn.execute(
-        "SELECT path FROM embeddings WHERE model = ?",
-        ("model-a",),
-    ).fetchone()
-    assert row is not None
-    path = row[0]
-    got = cache.get_many_for_paths("model-a", {path: "bad-stat"})
-    assert got == {}
-
-
 def test_embedding_index_for_unknown_model_is_empty(cache):
     index = cache.embedding_index_for_model("no-such-model")
     assert index.rows == {}
@@ -231,7 +204,6 @@ def test_legacy_dev_embedding_still_hits(cache, img):
     np.testing.assert_array_equal(got, emb)
     assert cache.has_any_embedding(img)
     assert (path, live_stat) in cache.embedding_index_for_model("model-a").rows
-    assert path in cache.get_many_for_paths("model-a", {path: live_stat})
 
 
 def test_legacy_dev_does_not_mask_real_change(cache, img):
@@ -334,10 +306,6 @@ def test_text_embedding_same_keyword_different_templates(cache):
 
 
 # --- empty-input guards ---
-
-def test_get_many_for_paths_empty_input(cache):
-    assert cache.get_many_for_paths("model-a", {}) == {}
-
 
 def test_get_text_embeddings_empty_input(cache):
     assert cache.get_text_embeddings("model-a", []) == {}

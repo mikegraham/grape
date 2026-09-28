@@ -860,8 +860,7 @@ def test_score_all_uses_in_memory_cache_index():
     )
 
     class _NoDbCache:
-        def get_many_for_paths(self, *_args, **_kwargs):
-            raise AssertionError("DB batch lookup should not be called")
+        """No methods: any DB lookup raises AttributeError."""
 
     items = [
         ImageRecord(
@@ -963,8 +962,7 @@ def test_score_all_duplicate_like_paths_keep_separate_scores():
     )
 
     class _NoDbCache:
-        def get_many_for_paths(self, *_args, **_kwargs):
-            raise AssertionError("DB batch lookup should not be called")
+        """No methods: any DB lookup raises AttributeError."""
 
     items = [
         ImageRecord(
@@ -1168,8 +1166,6 @@ def test_score_all_skips_syntax_error():
             pass
         def put_not_image(self, path, *, path_key=None, file_stat=None):
             self.not_images.append(str(path))
-        def get_many_for_paths(self, *a, **kw):
-            raise AssertionError("should not be called")
 
     items = [
         ImageRecord(

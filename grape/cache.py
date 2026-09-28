@@ -10,7 +10,7 @@ import json
 import os
 import sqlite3
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from itertools import chain
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
@@ -209,45 +209,6 @@ class EmbeddingCache:
             .copy()
         )
         return arr
-
-    def get_many_for_paths(
-        self,
-        model_id: str,
-        path_stats: Mapping[str, str],
-        *,
-        chunk_size: int = 1024,
-    ) -> dict[str, NDArray[np.float32]]:
-        """Return cached embeddings for many paths in batched queries.
-
-        ``path_stats`` maps absolute path keys to expected stat keys.
-        Only rows whose ``file_stat`` matches the provided value are
-        returned.
-        """
-        import numpy as np
-
-        if not path_stats:
-            return {}
-
-        paths = list(path_stats.keys())
-        out: dict[str, NDArray[np.float32]] = {}
-        for start in range(0, len(paths), chunk_size):
-            chunk = paths[start:start + chunk_size]
-            placeholders = ",".join("?" for _ in chunk)
-            sql = (
-                "SELECT path, file_stat, embedding FROM embeddings"
-                " WHERE model = ? AND path IN ({})"
-            ).format(placeholders)
-            params = [model_id, *chunk]
-            with self._lock:
-                rows = self._conn.execute(sql, params).fetchall()
-            for row_path, row_stat, blob in rows:
-                expected_stat = path_stats.get(row_path)
-                if expected_stat is None or (
-                    _canonical_stat(row_stat) != _canonical_stat(expected_stat)
-                ):
-                    continue
-                out[row_path] = np.frombuffer(blob, dtype=np.float32).copy()
-        return out
 
     def embedding_index_for_model(self, model_id: str) -> EmbeddingIndex:
         """Load every cached embedding for *model_id* into one matrix."""
