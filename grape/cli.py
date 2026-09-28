@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import importlib.util
 import logging
 import os
 import shlex
+import signal
 import sys
 import tempfile
 import threading
@@ -1297,14 +1299,23 @@ def _run_pipeline(
     )
 
 
-def main() -> None:
-    # Hard-exit on Ctrl-C: torch threads otherwise wedge the shutdown.
-    import signal
-    signal.signal(signal.SIGINT, lambda *_: os._exit(128 + signal.SIGINT))
+def _sigint_handler(verbose: bool):
+    """Hard-exit on Ctrl-C: torch threads otherwise wedge the shutdown.
 
+    With -v, dump every thread's stack first so a hang shows where it is.
+    """
+    def handler(*_):
+        if verbose:
+            faulthandler.dump_traceback(all_threads=True)
+        os._exit(128 + signal.SIGINT)
+    return handler
+
+
+def main() -> None:
     parser = _build_parser()
 
     args = parser.parse_args()
+    signal.signal(signal.SIGINT, _sigint_handler(args.verbose))
 
     if args.verbose:
         logging.basicConfig(

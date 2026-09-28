@@ -86,6 +86,9 @@ $ grape -R -v -n 3 --keywords 'playful puppy,golden retriever' ~/Pictures
   playful puppy: 0.198  golden retriever: 0.350
 ```
 
+`-v` also dumps every thread's stack on Ctrl-C, which shows where a run
+is stuck.
+
 **Calibrate, then threshold.** Run with `-s` first to see what scores real
 matches land at, then set `-t` just below the noise floor.
 

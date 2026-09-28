@@ -2023,3 +2023,18 @@ def test_e2e_like_caches_reference(tmp_path, monkeypatch):
     out2, _, code = run_main(args, monkeypatch)
     assert code == 0
     assert out2 == out
+
+
+def test_sigint_handler_dumps_threads_only_when_verbose(monkeypatch, capfd):
+    import grape.cli as cli_mod
+
+    exits: list[int] = []
+    monkeypatch.setattr(cli_mod.os, "_exit", exits.append)
+
+    cli_mod._sigint_handler(verbose=False)()
+    assert exits == [130]
+    assert "Current thread" not in capfd.readouterr().err
+
+    cli_mod._sigint_handler(verbose=True)()
+    assert exits == [130, 130]
+    assert "Current thread" in capfd.readouterr().err
