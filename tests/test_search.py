@@ -305,3 +305,23 @@ def test_score_image_prompt_ensemble_averages_templates(tmp_path):
         prompt_templates=["a photo of a {}", "a close-up photo of a {}"],
     )
     assert result.score == pytest.approx(2 ** -0.5, rel=1e-5)
+
+
+def test_score_images_skips_syntaxerror(tmp_path):
+    """PIL raises SyntaxError for some corrupt files; skip them like OSError."""
+    from grape.search import score_images
+
+    class DummyModel:
+        def encode_texts(self, texts):
+            return np.array([[1.0, 0.0]] * len(texts), dtype=np.float32)
+
+        def encode_image(self, path):
+            if path.endswith("bad.png"):
+                raise SyntaxError("Not a PNG file")
+            return np.array([[1.0, 0.0]], dtype=np.float32)
+
+    good, bad = tmp_path / "good.jpg", tmp_path / "bad.png"
+    good.write_bytes(b"unused")
+    bad.write_bytes(b"unused")
+    results = score_images(DummyModel(), [good, bad], ["dog"], quiet=True)
+    assert [r.path for r in results] == [str(good)]

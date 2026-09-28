@@ -390,10 +390,12 @@ def score_images(
                     cache=cache,
                 )
             )
+        except SyntaxError as e:
+            # PIL raises SyntaxError for some corrupt/unrecognized formats.
+            tqdm.write(f"  skipping {path}: {e}", file=sys.stderr)
         except OSError as e:
             if e.errno is not None:
                 raise
             tqdm.write(f"  skipping {path}: {e}", file=sys.stderr)
-            continue
 
     return results
