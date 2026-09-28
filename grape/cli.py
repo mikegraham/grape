@@ -515,7 +515,12 @@ def _score_all(
             # tqdm.write avoids breaking the progress bar.
             tqdm.write(item.path, file=sys.stderr)
         try:
-            img_emb = _get_embedding(model, item.path, cache)
+            # Key by the scan's stat: if the file changes mid-encode, the
+            # next run re-encodes instead of trusting a stale embedding.
+            img_emb = _get_embedding(
+                model, item.path, cache,
+                path_key=item.path_key, file_stat=item.file_stat,
+            )
             sims.append(img_emb @ text_emb.T)
             paths.append(item.path)
         except SyntaxError as e:
