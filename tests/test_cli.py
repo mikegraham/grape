@@ -1504,3 +1504,43 @@ def test_e2e_like(monkeypatch):
     assert len(lines) == 2
     # Self-match (dog vs dog) should score highest and appear first.
     assert "dog.jpg" in lines[0]
+
+
+def test_score_all_encode_reuses_scan_stat():
+    """Cache-miss encode keys the cache by the scan's realpath and stat."""
+    from grape.cli import (
+        ScanReport,
+        _prepare_cached_embeddings,
+        _score_all,
+    )
+
+    class _Model:
+        def model_id(self):
+            return "test-model"
+        def encode_image(self, path):
+            return np.array([[1.0, 0.0]], dtype=np.float32)
+
+    class _RecordingCache:
+        def __init__(self):
+            self.calls = []
+        def get(self, path, model_id, *, path_key=None, file_stat=None):
+            self.calls.append(("get", path_key, file_stat))
+            return None
+        def put(self, path, model_id, emb, *, path_key=None, file_stat=None):
+            self.calls.append(("put", path_key, file_stat))
+
+    items = [
+        ImageRecord(path="link.png", path_key="/real/a.png", file_stat="stat-a"),
+    ]
+    text_emb = np.array([[1.0, 0.0]], dtype=np.float32)
+    prepared = _prepare_cached_embeddings(
+        (items, ScanReport(image_count=1)), ("test-model", None),
+    )
+    cache = _RecordingCache()
+    table, _done = _score_all(prepared, _Model(), text_emb, cache, True, False)
+
+    assert table.paths == ["link.png"]
+    assert cache.calls == [
+        ("get", "/real/a.png", "stat-a"),
+        ("put", "/real/a.png", "stat-a"),
+    ]
