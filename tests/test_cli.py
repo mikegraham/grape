@@ -868,6 +868,209 @@ def test_encode_keywords_rejects_prompts_averaging_to_zero():
         _encode_keywords(object(), ["x"], ["a {}", "b {}"], ("m", None), _Cache())
 
 
+# --- cached model_id vs. the HF cache on disk (issue #14) ---
+
+_WEIGHT = "open_clip_model.safetensors"
+
+
+@pytest.fixture
+def hub(tmp_path, monkeypatch):
+    """An empty HF hub cache under tmp_path, with torch resolution banned."""
+    import grape.model
+
+    root = tmp_path / "hub"
+    root.mkdir()
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(root))
+    monkeypatch.delenv("HF_HOME", raising=False)
+    monkeypatch.setattr(
+        grape.model, "resolve_model_id",
+        lambda *a: pytest.fail("cached run must not resolve via torch"),
+    )
+    return root
+
+
+def _hub_snapshot(root, repo_id, commit, blob, *, ref=False):
+    """Create ``snapshots/<commit>/<weight>`` as an HF-style symlink into
+    ``blobs/<blob>``, writing the blob if it doesn't exist yet."""
+    repo_dir = root / f"models--{repo_id.replace('/', '--')}"
+    blob_path = repo_dir / "blobs" / blob
+    blob_path.parent.mkdir(parents=True, exist_ok=True)
+    if not blob_path.exists():
+        blob_path.write_bytes(b"weights:" + blob.encode())
+    snapshot = repo_dir / "snapshots" / commit
+    snapshot.mkdir(parents=True, exist_ok=True)
+    os.symlink(os.path.join("..", "..", "blobs", blob), snapshot / _WEIGHT)
+    if ref:
+        (repo_dir / "refs").mkdir(exist_ok=True)
+        (repo_dir / "refs" / "main").write_text(commit, encoding="utf-8")
+
+
+def _seeded_cache(tmp_path, stored_id, image):
+    from grape.cache import EmbeddingCache
+
+    cache = EmbeddingCache(tmp_path / "c.db")
+    cache.put_model_id("ViT-B-32", "laion2b_s34b_b79k", stored_id)
+    cache.put(image, stored_id, np.ones((1, 4), dtype=np.float32))
+    return cache
+
+
+def _resolve(cache):
+    from grape.cli import _resolve_and_index_cache
+
+    return _resolve_and_index_cache("ViT-B-32", "laion2b_s34b_b79k", cache)
+
+
+def test_refresh_renames_rows_when_new_snapshot_has_same_blob(hub, tmp_path):
+    _hub_snapshot(hub, "org/repo", "old", "abc")
+    _hub_snapshot(hub, "org/repo", "new", "abc", ref=True)
+    image = tmp_path / "a.jpg"
+    image.write_bytes(b"x")
+    cache = _seeded_cache(tmp_path, "org/repo@old", image)
+
+    model_id, index = _resolve(cache)
+
+    assert model_id == "org/repo@new"
+    assert cache.get_model_id("ViT-B-32", "laion2b_s34b_b79k") == "org/repo@new"
+    assert cache.get(image, "org/repo@new") is not None
+    assert cache.get(image, "org/repo@old") is None
+    assert len(index.rows) == 1
+    assert {p for p, _ in index.rows} == {os.path.realpath(image)}
+    cache.close()
+
+
+def test_refresh_starts_fresh_when_new_snapshot_has_other_blob(hub, tmp_path):
+    _hub_snapshot(hub, "org/repo", "old", "abc")
+    _hub_snapshot(hub, "org/repo", "new", "def", ref=True)
+    image = tmp_path / "a.jpg"
+    image.write_bytes(b"x")
+    cache = _seeded_cache(tmp_path, "org/repo@old", image)
+
+    model_id, index = _resolve(cache)
+
+    assert model_id == "org/repo@new"
+    assert cache.get_model_id("ViT-B-32", "laion2b_s34b_b79k") == "org/repo@new"
+    assert cache.get(image, "org/repo@new") is None
+    assert cache.get(image, "org/repo@old") is not None
+    assert index.rows == {}
+    cache.close()
+
+
+def test_refresh_starts_fresh_when_old_snapshot_is_gone(hub, tmp_path):
+    _hub_snapshot(hub, "org/repo", "new", "abc", ref=True)
+    image = tmp_path / "a.jpg"
+    image.write_bytes(b"x")
+    cache = _seeded_cache(tmp_path, "org/repo@old", image)
+
+    model_id, index = _resolve(cache)
+
+    assert model_id == "org/repo@new"
+    assert cache.get_model_id("ViT-B-32", "laion2b_s34b_b79k") == "org/repo@new"
+    assert cache.get(image, "org/repo@new") is None
+    assert index.rows == {}
+    cache.close()
+
+
+def test_refresh_migrates_bare_hf_hub_id_once_weights_are_cached(
+    hub, tmp_path,
+):
+    _hub_snapshot(hub, "org/repo", "new", "abc", ref=True)
+    image = tmp_path / "a.jpg"
+    image.write_bytes(b"x")
+    cache = _seeded_cache(tmp_path, "org/repo", image)
+
+    model_id, index = _resolve(cache)
+
+    assert model_id == "org/repo@new"
+    assert cache.get_model_id("ViT-B-32", "laion2b_s34b_b79k") == "org/repo@new"
+    assert cache.get(image, "org/repo@new") is not None
+    assert len(index.rows) == 1
+    cache.close()
+
+
+def test_refresh_leaves_non_hf_hub_id_alone(hub, tmp_path, monkeypatch):
+    from grape import hf_cache
+
+    monkeypatch.setattr(
+        hf_cache, "resolve_model_id",
+        lambda *a: pytest.fail("no hf_hub: nothing to probe"),
+    )
+    image = tmp_path / "a.jpg"
+    image.write_bytes(b"x")
+    cache = _seeded_cache(tmp_path, "ViT-B-32/laion2b_s34b_b79k", image)
+
+    model_id, index = _resolve(cache)
+
+    assert model_id == "ViT-B-32/laion2b_s34b_b79k"
+    assert len(index.rows) == 1
+    cache.close()
+
+
+def test_refresh_leaves_id_alone_when_no_weights_are_cached(hub, tmp_path):
+    image = tmp_path / "a.jpg"
+    image.write_bytes(b"x")
+    cache = _seeded_cache(tmp_path, "org/repo@old", image)
+
+    model_id, index = _resolve(cache)
+
+    assert model_id == "org/repo@old"
+    assert cache.get_model_id("ViT-B-32", "laion2b_s34b_b79k") == "org/repo@old"
+    assert len(index.rows) == 1
+    cache.close()
+
+
+def test_refresh_leaves_opaque_id_alone(hub, tmp_path):
+    image = tmp_path / "a.jpg"
+    image.write_bytes(b"x")
+    cache = _seeded_cache(tmp_path, "model-a", image)
+
+    model_id, index = _resolve(cache)
+
+    assert model_id == "model-a"
+    assert cache.get_model_id("ViT-B-32", "laion2b_s34b_b79k") == "model-a"
+    assert len(index.rows) == 1
+    cache.close()
+
+
+def test_encode_keywords_post_load_mismatch_warns_and_uses_loaded_id(caplog):
+    from grape.cli import _encode_keywords
+
+    emb = np.array([[1.0, 0.0]], dtype=np.float32)
+
+    class _Model:
+        def encode_texts(self, texts):
+            return np.vstack([emb] * len(texts))
+
+        def model_id(self):
+            return "org/repo@other"
+
+    class _Cache:
+        def __init__(self):
+            self.stored = []
+
+        def get_text_embeddings(self, model_id, texts):
+            return {}
+
+        def put_text_embeddings(self, model_id, pairs):
+            self.stored.append((model_id, [t for t, _ in pairs]))
+
+        def rename_model_id(self, old, new):
+            pytest.fail("unrelated ids must not be renamed")
+
+    cache = _Cache()
+    with caplog.at_level("WARNING", logger="grape"):
+        out = _encode_keywords(
+            _Model(), ["dog"], ["a {}"], ("org/repo@old", None), cache,
+        )
+
+    assert out.shape == (1, 2)
+    assert cache.stored == [("org/repo@other", ["a dog"])]
+    assert any(
+        "model_id changed after load" in r.message
+        and "'org/repo@old'" in r.message and "'org/repo@other'" in r.message
+        for r in caplog.records
+    )
+
+
 def test_ensemble_prompts_template_without_placeholder_errors(monkeypatch):
     _, err, code = run_main(
         ["--ensemble-prompts", "bad template", "-k", "dog", "x.jpg"],

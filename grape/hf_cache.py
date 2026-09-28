@@ -73,6 +73,23 @@ def resolve_model_id(hf_hub: str) -> str:
     return hf_hub
 
 
+def cached_weight_blob(hf_hub: str, commit: str) -> str | None:
+    """Realpath of the weight file in snapshot *commit*, or None.
+
+    HF hub snapshots are symlinks into ``blobs/<sha256>``, so two
+    snapshots that resolve to the same realpath hold identical weights.
+    """
+    snapshot = (
+        hf_cache_root() / f"models--{hf_hub.replace('/', '--')}"
+        / "snapshots" / commit
+    )
+    for filename in WEIGHT_FILENAMES:
+        candidate = snapshot / filename
+        if candidate.is_file():
+            return os.path.realpath(candidate)
+    return None
+
+
 def find_cached_weight(hf_hub: str) -> str | None:
     """Return the local path to cached model weights, or None."""
     for filename in WEIGHT_FILENAMES:
