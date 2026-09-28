@@ -1,6 +1,8 @@
 """Fast unit tests for model-loading helpers."""
 
+import errno
 import os
+import struct
 import time
 from types import SimpleNamespace
 
@@ -282,3 +284,133 @@ def test_model_needs_transformers_only_without_fast_tokenizer(monkeypatch):
     assert needs({**siglip, "tokenizer_kwargs": {"strip_sep_token": True}}) is True
     cached.discard("tokenizer.json")
     assert needs(siglip) is True
+
+
+# --- _load_frames: decode failures become errno-less OSError (issue #15) ---
+
+class _FakeImage:
+    """Context-manager stand-in for a Pillow image whose decode fails."""
+
+    def __init__(self, exc):
+        self._exc = exc
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    @property
+    def n_frames(self):
+        raise self._exc
+
+
+@pytest.mark.parametrize("exc", [
+    IndexError("index out of range"),
+    struct.error("unpack requires a buffer of 2 bytes"),
+    ValueError("tile cannot extend outside image"),
+    EOFError("no more images in GIF file"),
+])
+def test_load_frames_wraps_pillow_decode_errors_as_oserror(monkeypatch, exc):
+    from grape.model import _load_frames
+
+    monkeypatch.setattr("grape.model.Image.open", lambda _p: _FakeImage(exc))
+    with pytest.raises(OSError) as info:
+        list(_load_frames("x.gif"))
+    assert not isinstance(info.value, (IndexError, ValueError, EOFError, struct.error))
+    assert info.value.errno is None
+    assert "x.gif" in str(info.value)
+    assert str(exc) in str(info.value)
+    assert info.value.__cause__ is exc
+
+
+def test_load_frames_wraps_struct_error_from_seek(monkeypatch):
+    from grape.model import _load_frames
+
+    class _SeekFails(_FakeImage):
+        n_frames = 6
+
+        def seek(self, idx):
+            raise struct.error("unpack_from requires a buffer of at least 2 bytes")
+
+    monkeypatch.setattr("grape.model.Image.open", lambda _p: _SeekFails(None))
+    with pytest.raises(OSError) as info:
+        list(_load_frames("x.gif"))
+    assert info.value.errno is None
+    assert "x.gif" in str(info.value)
+
+
+def test_load_frames_propagates_filesystem_errors_unchanged(tmp_path):
+    from grape.model import _load_frames
+
+    missing = tmp_path / "missing.gif"
+    with pytest.raises(FileNotFoundError) as info:
+        list(_load_frames(str(missing)))
+    assert info.value.errno == errno.ENOENT
+    assert "cannot decode" not in str(info.value)
+
+
+def test_load_frames_samples_static_and_animated(tmp_path):
+    from PIL import Image
+
+    from grape.model import MAX_ANIMATION_FRAMES, _load_frames
+
+    static = tmp_path / "static.png"
+    Image.new("RGB", (8, 8), (10, 20, 30)).save(static, format="PNG")
+    frames = list(_load_frames(str(static)))
+    assert len(frames) == 1 and frames[0].mode == "RGB"
+
+    n = MAX_ANIMATION_FRAMES + 4
+    colors = [(int(255 * i / (n - 1)), 0, 0) for i in range(n)]
+    gif = tmp_path / "anim.gif"
+    imgs = [Image.new("RGB", (8, 8), c) for c in colors]
+    imgs[0].save(gif, format="GIF", save_all=True, append_images=imgs[1:])
+    frames = list(_load_frames(str(gif)))
+    assert len(frames) == MAX_ANIMATION_FRAMES
+    assert all(f.mode == "RGB" for f in frames)
+    # First and last sampled frames are the first and last real frames.
+    assert frames[0].getpixel((0, 0))[0] < 16
+    assert frames[-1].getpixel((0, 0))[0] > 240
+
+
+def test_load_frames_never_leaks_pillow_errors_for_truncated_gif(tmp_path):
+    """Every truncation of an animated GIF that passes the scan either
+    decodes or fails as an errno-less OSError -- never as Pillow's raw
+    IndexError / struct.error / ValueError / EOFError (issue #15)."""
+    from PIL import Image
+
+    from grape.model import _load_frames
+    from grape.search import is_image
+
+    colors = [
+        (255, 0, 0), (0, 255, 0), (0, 0, 255),
+        (255, 255, 0), (0, 255, 255), (255, 0, 255),
+    ]
+    imgs = [Image.new("RGB", (64, 64), c) for c in colors]
+    full = tmp_path / "full.gif"
+    imgs[0].save(
+        full, format="GIF", save_all=True, append_images=imgs[1:],
+        duration=100, loop=0,
+    )
+    data = full.read_bytes()
+
+    trunc = tmp_path / "trunc.gif"
+    passed = raised = 0
+    for n in range(int(len(data) * 0.6), len(data) + 1):
+        trunc.write_bytes(data[:n])
+        if not is_image(str(trunc)):
+            continue
+        passed += 1
+        try:
+            frames = list(_load_frames(str(trunc)))
+        except OSError as e:
+            assert e.errno is None, (n, e)
+            assert not isinstance(
+                e, (IndexError, ValueError, EOFError, struct.error)
+            ), (n, e)
+            raised += 1
+        else:
+            assert frames, n
+    assert passed > 0, "no truncation passed is_image()"
+    if raised == 0:
+        pytest.skip("no truncation reproduced a decode error on this Pillow")

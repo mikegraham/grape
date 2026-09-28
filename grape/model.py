@@ -19,9 +19,11 @@ from __future__ import annotations
 
 import importlib
 import os
+import struct
 import sys
 import threading
 import types
+from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
@@ -177,18 +179,14 @@ class CLIPModel:
         ~0.28 static, ViT-B-32). Mean-centering can't restore the lost
         detail and would shift static and text embeddings, invalidating
         the cache. Guarded by test_identical_frames_do_not_change_embedding
-        and test_gif_frames_match_their_own_gif.
+        and test_gif_frames_match_their_own_gif. Frame sampling lives in
+        ``_load_frames``.
+
+        Decode failures (e.g. a truncated animated file whose later frames
+        Pillow cannot read) surface as an errno-less ``OSError`` so callers
+        can skip the file like any other unreadable image.
         """
-        image = Image.open(image_path)
-        n_frames = getattr(image, "n_frames", 1)
-        k = min(n_frames, MAX_ANIMATION_FRAMES)
-        # max(k-1, 1) keeps the formula well-defined when k == 1.
-        divisor = max(k - 1, 1)
-        indices = [round(i * (n_frames - 1) / divisor) for i in range(k)]
-        tensors = []
-        for idx in indices:
-            image.seek(idx)
-            tensors.append(self.preprocess(image.convert("RGB")))
+        tensors = [self.preprocess(f) for f in _load_frames(image_path)]
         batch = torch.stack(tensors).to(self.device)
         emb = self.model.encode_image(batch)
         emb = emb / emb.norm(dim=-1, keepdim=True)
@@ -196,6 +194,36 @@ class CLIPModel:
         mean = mean / mean.norm(dim=-1, keepdim=True)
         result: NDArray[np.float32] = mean.cpu().numpy().astype(np.float32)
         return result
+
+
+def _load_frames(image_path: str) -> Iterator[Image.Image]:
+    """Open an image and yield its uniformly-sampled frames as RGB.
+
+    Samples K = min(n_frames, MAX_ANIMATION_FRAMES) frame indices; a
+    static image is the K=1 case. A generator so the caller preprocesses
+    each frame before the next is decoded; collecting all K first would
+    hold up to 8 full-size RGB copies of a large animation.
+
+    The scan (``is_image``) only decodes frame 0, so a truncated animated
+    GIF/WEBP/APNG can pass it and then make Pillow raise ``IndexError``,
+    ``struct.error``, ``ValueError`` or ``EOFError`` from
+    ``n_frames``/``seek``/``convert`` here. Those are re-raised as an
+    ``OSError`` with ``errno`` unset, the same shape PIL uses for an
+    unrecognized file, so ``_score_all`` skips the file like any other
+    unreadable image. Real filesystem errors (errno set) pass through.
+    """
+    try:
+        with Image.open(image_path) as image:
+            n_frames = getattr(image, "n_frames", 1)
+            k = min(n_frames, MAX_ANIMATION_FRAMES)
+            # max(k-1, 1) keeps the formula well-defined when k == 1.
+            divisor = max(k - 1, 1)
+            indices = [round(i * (n_frames - 1) / divisor) for i in range(k)]
+            for idx in indices:
+                image.seek(idx)
+                yield image.convert("RGB")
+    except (IndexError, ValueError, EOFError, struct.error) as e:
+        raise OSError(f"cannot decode image file {image_path!r}: {e}") from e
 
 
 def get_hf_hub(model_name: str, pretrained: str) -> str:
