@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Default `--ensemble-prompts` is now open_clip's seven simple ImageNet templates plus the bare keyword (was three "a photo of ..." variants). About +1.6 ImageNet zero-shot accuracy on SigLIP 2. Keyword embeddings are re-encoded on first use; image embeddings are unaffected.
+
 ### Fixed
 - A truncated animated GIF/WEBP/APNG that passes the scan no longer crashes the run with Pillow's `IndexError`/`struct.error`; it is skipped and recorded as not an image like other unreadable files.
 - `-print0` now composes with `-s`/`-v` like grep's `-Z`: the path is unquoted and NUL-terminated; the score before it and the `-v` breakdown line after it are unchanged. Previously the flag was silently ignored with `-s`/`-v`.

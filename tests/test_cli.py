@@ -821,7 +821,7 @@ def test_ensemble_prompts_uses_default_template_set(tmp_path, monkeypatch):
     assert code == 0
     assert out == f"{shlex.quote(str(image_path))}\n"
     assert captured["prompt_templates"] == DEFAULT_PROMPT_ENSEMBLE
-    assert len(DEFAULT_PROMPT_ENSEMBLE) == 3
+    assert len(DEFAULT_PROMPT_ENSEMBLE) == 8
 
 
 def test_ensemble_prompts_custom_templates_override_default(tmp_path, monkeypatch):

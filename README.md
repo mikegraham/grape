@@ -169,6 +169,8 @@ Embeddings are scoped per model; switching re-encodes everything.
 Keywords are matched with
 [prompt ensembling](https://arxiv.org/abs/2103.00020) (Radford et al., 2021,
 Section 3.1.4 and Appendix A): each keyword expands into several templates
-("a photo of a {}", "a photo of the {}", ...), each is embedded, then the
-embeddings are averaged and renormalized. Improves zero-shot accuracy over
-a single prompt. Override with `--ensemble-prompts`.
+("itap of a {}.", "a bad photo of the {}.", ...) plus the bare keyword, each
+is embedded, then the embeddings are averaged and renormalized. The default
+set is open_clip's seven simple ImageNet templates plus "{}", which
+[Volkov et al. (2025)](https://arxiv.org/abs/2509.09311) found best for
+SigLIP 2. Override with `--ensemble-prompts`.
