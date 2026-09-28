@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `-print0` now composes with `-s`/`-v` like grep's `-Z`: the path is unquoted and NUL-terminated; the score before it and the `-v` breakdown line after it are unchanged. Previously the flag was silently ignored with `-s`/`-v`.
 - A missing or unreadable `--like` image now exits with `grape: <path>: <reason>` instead of a traceback.
 - `--like` reference embeddings are written to the cache, so a reference outside the searched library no longer reloads the model on every run.
+- A refreshed Hugging Face cache (new snapshot commit for the same model) no longer crashes every run with `model_id mismatch`. The cached id is re-checked against the disk on every run; when the new snapshot holds the same weight file the cache rows are renamed, otherwise the library is re-encoded under the new id.
 
 ## [0.4.0] - 2026-09-19
 

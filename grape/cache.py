@@ -450,18 +450,25 @@ class EmbeddingCache:
 
         Used when the model_id format changes (e.g. bare hf_hub path gains
         a @commit suffix) so existing embeddings don't need to be recomputed.
+
+        A row may already exist under *new_id* (a previous run stored it
+        there after finding the mismatch post-load), which would violate
+        the (path, model) primary key: OR REPLACE lets the renamed row
+        win instead of aborting the whole rename.
         """
         with self._lock:
             self._conn.execute(
-                "UPDATE embeddings SET model = ? WHERE model = ?",
+                "UPDATE OR REPLACE embeddings SET model = ? WHERE model = ?",
                 (new_id, old_id),
             )
             self._conn.execute(
-                "UPDATE text_embeddings SET model = ? WHERE model = ?",
+                "UPDATE OR REPLACE text_embeddings SET model = ?"
+                " WHERE model = ?",
                 (new_id, old_id),
             )
             self._conn.execute(
-                "UPDATE model_ids SET model_id = ? WHERE model_id = ?",
+                "UPDATE OR REPLACE model_ids SET model_id = ?"
+                " WHERE model_id = ?",
                 (new_id, old_id),
             )
             self._conn.commit()

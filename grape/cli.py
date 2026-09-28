@@ -156,8 +156,12 @@ def _os_reason(e: OSError) -> str:
 #   accesses the model (i.e. cache miss).  When everything is cached,
 #   no import happens and _scan_files runs uncontested by the GIL.
 # - _resolve_and_index_cache caches model_id in SQLite so it can skip
-#   the open_clip import on warm-cache runs.  An assert in
-#   _encode_keywords verifies the cached model_id when the model loads.
+#   the open_clip import on warm-cache runs.  Every run re-checks the
+#   cached id against the HF cache on disk (_refresh_model_id, filesystem
+#   only): a new snapshot with the same weight blob renames the rows, a
+#   real weight change starts fresh under the new id.  If the loaded
+#   model still disagrees, _encode_keywords logs a warning and stores
+#   new embeddings under the loaded id.
 # ---------------------------------------------------------------------------
 
 
@@ -257,8 +261,10 @@ def _encode_keywords(
         # Encode only uncached prompts through the model.
         fresh = model.encode_texts(uncached_prompts)
 
-        # Now that the model is loaded, verify our cached model_id
-        # is still correct (could be stale if HF cache was updated).
+        # Now that the model is loaded, verify our cached model_id is
+        # still correct. _refresh_model_id already reconciled it with the
+        # disk, so a mismatch here means the weights were downloaded just
+        # now (bare id -> @commit) or the HF cache moved under us.
         real_model_id = model.model_id()
         if model_id is not None and real_model_id != model_id:
             if real_model_id.startswith(model_id + "@"):
@@ -269,9 +275,10 @@ def _encode_keywords(
                 if cache is not None:
                     cache.rename_model_id(model_id, real_model_id)
             else:
-                raise AssertionError(
-                    f"model_id mismatch: cached {model_id!r},"
-                    f" resolved {real_model_id!r}"
+                log.warning(
+                    "model_id changed after load: cached %r, loaded %r;"
+                    " new embeddings are stored under the loaded id",
+                    model_id, real_model_id,
                 )
         model_id = real_model_id
 
@@ -392,6 +399,65 @@ def _combine_query_embeddings(
     return np.vstack(parts)
 
 
+def _refresh_model_id(
+    cache: EmbeddingCache,
+    model_name: str,
+    pretrained: str,
+    stored: str,
+) -> str:
+    """Re-check a cached model_id against the HF cache on disk.
+
+    Filesystem only, no torch: this runs on every warm-cache run.
+
+    An hf_hub id is ``org/repo@<snapshot commit>``. The commit moves
+    whenever something refreshes the HF cache (another tool, a new
+    ``HF_HOME``...), usually for a README-only snapshot whose weight
+    file is the very same blob. Then the rows are renamed to the new id
+    and nothing is re-encoded. When the weights really changed, or the
+    old snapshot is gone so that can't be proven, the new id is stored
+    and the library is re-encoded under it; the old rows stay behind as
+    harmless orphans.
+
+    Ids without an hf_hub (``model_name/pretrained``), bare hf_hub ids
+    whose weights are still not on disk, and opaque ids are returned
+    unchanged.
+    """
+    from grape import hf_cache
+
+    if stored == f"{model_name}/{pretrained}":
+        # Pretrained tag with no hf_hub: nothing on disk to compare.
+        return stored
+
+    hf_hub, _, old_commit = stored.partition("@")
+    current = hf_cache.resolve_model_id(hf_hub)
+    if current == stored or current == hf_hub:
+        # Unchanged, or no weights cached right now (the post-load path
+        # in _encode_keywords handles the download case).
+        return stored
+
+    new_commit = current.partition("@")[2]
+    old_blob = None if not old_commit else (
+        hf_cache.cached_weight_blob(hf_hub, old_commit)
+    )
+    if not old_commit or (
+        old_blob is not None
+        and old_blob == hf_cache.cached_weight_blob(hf_hub, new_commit)
+    ):
+        # Bare id gained its @commit, or the new snapshot holds the
+        # same weight file: the cached embeddings are still valid.
+        log.debug("renaming model_id %r -> %r", stored, current)
+        cache.rename_model_id(stored, current)
+        return current
+
+    cache.put_model_id(model_name, pretrained, current)
+    log.info(
+        "model %s/%s: cached weights changed (%s -> %s);"
+        " the library will be re-encoded",
+        model_name, pretrained, stored, current,
+    )
+    return current
+
+
 def _resolve_and_index_cache(
     model_name: str,
     pretrained: str,
@@ -400,7 +466,8 @@ def _resolve_and_index_cache(
     """Resolve model_id and materialize the cache index.
 
     Caches model_id in SQLite so subsequent runs skip the torch import.
-    On first use, imports grape.model to resolve the id.
+    On first use, imports grape.model to resolve the id; later runs
+    only re-check the cached id against the HF cache on disk.
     """
     if cache is None:
         return None, None
@@ -416,6 +483,7 @@ def _resolve_and_index_cache(
         log.debug("model_id resolved fresh: %s", model_id)
     else:
         log.debug("model_id from cache: %s", model_id)
+        model_id = _refresh_model_id(cache, model_name, pretrained, model_id)
 
     cached_index = cache.embedding_index_for_model(model_id)
     log.debug("cache index: %d image embeddings", len(cached_index.rows))

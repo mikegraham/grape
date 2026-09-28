@@ -254,6 +254,22 @@ def test_rename_model_id_moves_all_tables(cache, img):
     assert cache.get_model_id("ViT-B-32", "laion") == "new-model"
 
 
+def test_rename_model_id_tolerates_rows_already_under_new_id(cache, img):
+    """A path stored under both ids must not abort the rename on the
+    (path, model) primary key."""
+    cache.put(img, "old", _rand_embedding(1))
+    cache.put(img, "new", _rand_embedding(2))
+    cache.put_text_embeddings("old", [("a cat", _rand_embedding(3))])
+    cache.put_text_embeddings("new", [("a cat", _rand_embedding(4))])
+
+    cache.rename_model_id("old", "new")
+
+    assert cache.get(img, "new") is not None
+    assert cache.get(img, "old") is None
+    assert "a cat" in cache.get_text_embeddings("new", ["a cat"])
+    assert cache.get_text_embeddings("old", ["a cat"]) == {}
+
+
 # --- text embedding cache ---
 
 def test_text_embedding_roundtrip(cache):
