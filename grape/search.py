@@ -26,6 +26,12 @@ if TYPE_CHECKING:
 log = logging.getLogger("grape")
 
 
+# Images per forward pass. GPUs are launch-overhead-bound at batch 1
+# (~10 ms/img on an Xe3 iGPU whatever the model); by 32 the fp16 XMX
+# path is ~1 ms/img for ViT-B-32.
+ENCODE_BATCH_SIZE = 32
+
+
 class ImageRecord(NamedTuple):
     # ``path`` is the display string -- preserves the caller's input style,
     # including a leading ``./`` the way ``find``/``rg``/``du`` do.  Wrapping
@@ -275,6 +281,40 @@ def _get_embedding(
             path_key=path_key, file_stat=file_stat,
         )
     return emb
+
+
+def _get_embeddings(
+    model: CLIPModel | _LazyModel,
+    items: list[ImageRecord],
+    cache: EmbeddingCache | None,
+) -> list[NDArray[np.float32] | OSError | SyntaxError]:
+    """Batched ``_get_embedding``: one model call for all cache misses.
+
+    An unreadable file's slot holds its exception (see
+    ``CLIPModel.encode_images``) and is not cached.
+    """
+    results: list[NDArray[np.float32] | OSError | SyntaxError | None] = []
+    missing = []
+    for item in items:
+        cached = None
+        if cache is not None:
+            cached = cache.get(
+                item.path, model.model_id(),
+                path_key=item.path_key, file_stat=item.file_stat,
+            )
+        if cached is None:
+            missing.append(len(results))
+        results.append(cached)
+    if missing:
+        fresh = model.encode_images([items[i].path for i in missing])
+        for i, emb in zip(missing, fresh):
+            results[i] = emb
+            if cache is not None and not isinstance(emb, BaseException):
+                cache.put(
+                    items[i].path, model.model_id(), emb,
+                    path_key=items[i].path_key, file_stat=items[i].file_stat,
+                )
+    return results  # type: ignore[return-value]
 
 
 def _encode_keyword_embeddings(

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- GPU acceleration: grape runs on an Intel GPU (XPU) or NVIDIA/AMD GPU (CUDA/ROCm) when the installed PyTorch supports it, with fp16 matmuls and batched encoding. About 16x faster indexing than CPU for the default model on an Intel Xe3 iGPU. `GRAPE_DEVICE=cpu` (or any torch device name) overrides the choice; `-v` logs it. Needs a PyTorch build for your GPU: plain `pip install` gets the CUDA build.
+
 ### Fixed
 - A truncated animated GIF/WEBP/APNG that passes the scan no longer crashes the run with Pillow's `IndexError`/`struct.error`; it is skipped and recorded as not an image like other unreadable files.
 - `-print0` now composes with `-s`/`-v` like grep's `-Z`: the path is unquoted and NUL-terminated; the score before it and the `-v` breakdown line after it are unchanged. Previously the flag was silently ignored with `-s`/`-v`.

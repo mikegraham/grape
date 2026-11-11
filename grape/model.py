@@ -18,12 +18,14 @@ This module contains some crazy hacks to reduce latency.
 from __future__ import annotations
 
 import importlib
+import logging
 import os
 import struct
 import sys
 import threading
 import types
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
@@ -35,11 +37,30 @@ from PIL import Image
 
 from grape.hf_cache import WEIGHT_FILENAMES as _WEIGHT_FILENAMES
 from grape.hf_cache import cached_file_from_repo as _cached_file_from_repo
+from grape.search import ENCODE_BATCH_SIZE
 
 # Cap on uniformly-sampled frames per animated GIF/WEBP/APNG. K=8 is
 # the ViCLIP evaluation default (arXiv:2307.06942) and falls in the
 # K=4..16 range used across CLIP-on-video work.
 MAX_ANIMATION_FRAMES = 8
+
+log = logging.getLogger("grape")
+
+def pick_device() -> str:
+    """Torch device to run on: $GRAPE_DEVICE, else Intel XPU, CUDA, CPU."""
+    requested = os.environ.get("GRAPE_DEVICE")
+    if requested:
+        log.debug("device: %s (from $GRAPE_DEVICE)", requested)
+        return requested
+    if hasattr(torch, "xpu") and torch.xpu.is_available():
+        log.debug("device: xpu (%s)", torch.xpu.get_device_name(0))
+        return "xpu"
+    if torch.cuda.is_available():
+        # ROCm builds report AMD GPUs here too.
+        log.debug("device: cuda (%s)", torch.cuda.get_device_name(0))
+        return "cuda"
+    log.debug("device: cpu (torch %s sees no xpu or cuda)", torch.__version__)
+    return "cpu"
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +79,10 @@ class CLIPModel:
         self._model_name = model_name
         self._pretrained = pretrained
         self._model_id: str | None = None
+        # Weights load on CPU (the fast path assigns a CPU state dict);
+        # the model moves to self.device once built.
         self.device = "cpu"
+        self._decode_pool: ThreadPoolExecutor | None = None
         open_clip = _import_open_clip(
             use_transformers=_model_needs_transformers(model_name),
             model_name=model_name,
@@ -72,9 +96,22 @@ class CLIPModel:
                 raise
             open_clip = _import_open_clip(use_transformers=True)
             self._init_model(open_clip, model_name, pretrained)
-        self.model.eval()
+        self.device = pick_device()
+        self.model.to(self.device).eval()
+        log.debug(
+            "model: %s/%s on %s, %s", model_name, pretrained, self.device,
+            "fp32" if self.device == "cpu" else "fp16",
+        )
         if not quiet:
             print("done.", file=sys.stderr)
+
+    def _autocast(self) -> Any:
+        """fp16 autocast off-CPU: matmuls run on tensor cores (Intel XMX,
+        NVIDIA) at ~4x fp32 speed. Scores move by <0.001, well inside the
+        noise between models; bf16 drifts ~10x more, so fp16 it is."""
+        if self.device == "cpu":
+            return nullcontext()
+        return torch.autocast(self.device, dtype=torch.float16)
 
     def _init_model(
         self,
@@ -159,12 +196,12 @@ class CLIPModel:
     def encode_texts(self, texts: list[str]) -> NDArray[np.float32]:
         """Encode text strings to L2-normalized embeddings. Shape: (n, dim)."""
         tokens = self.tokenizer(texts).to(self.device)
-        emb = self.model.encode_text(tokens)
+        with self._autocast():
+            emb = self.model.encode_text(tokens).float()
         emb = emb / emb.norm(dim=-1, keepdim=True)
         result: NDArray[np.float32] = emb.cpu().numpy().astype(np.float32)
         return result
 
-    @torch.no_grad()
     def encode_image(self, image_path: str) -> NDArray[np.float32]:
         """Encode an image to an L2-normalized embedding. Shape: (1, dim).
 
@@ -186,14 +223,57 @@ class CLIPModel:
         Pillow cannot read) surface as an errno-less ``OSError`` so callers
         can skip the file like any other unreadable image.
         """
-        tensors = [self.preprocess(f) for f in _load_frames(image_path)]
-        batch = torch.stack(tensors).to(self.device)
-        emb = self.model.encode_image(batch)
-        emb = emb / emb.norm(dim=-1, keepdim=True)
-        mean = emb.mean(dim=0, keepdim=True)
-        mean = mean / mean.norm(dim=-1, keepdim=True)
-        result: NDArray[np.float32] = mean.cpu().numpy().astype(np.float32)
+        result = self.encode_images([image_path])[0]
+        if isinstance(result, BaseException):
+            raise result
         return result
+
+    @torch.no_grad()
+    def encode_images(
+        self, image_paths: Sequence[str],
+    ) -> list[NDArray[np.float32] | OSError | SyntaxError]:
+        """Encode many images, batched. Shape of each result: (1, dim).
+
+        Same embeddings as ``encode_image``, but files decode in parallel
+        threads and frames run through the model ENCODE_BATCH_SIZE at a
+        time. An unreadable file comes back as its ``OSError`` /
+        ``SyntaxError`` in place of an embedding, so one bad file doesn't
+        sink the batch; anything else raises.
+        """
+        if self._decode_pool is None:
+            self._decode_pool = ThreadPoolExecutor(
+                max_workers=os.cpu_count() or 4,
+                thread_name_prefix="grape-decode",
+            )
+        loaded = list(self._decode_pool.map(self._load_tensor, image_paths))
+        ok = [t for t in loaded if isinstance(t, torch.Tensor)]
+        if not ok:
+            return loaded  # type: ignore[return-value]
+        frames = torch.cat(ok)
+        chunks = []
+        with self._autocast():
+            for i in range(0, len(frames), ENCODE_BATCH_SIZE):
+                batch = frames[i:i + ENCODE_BATCH_SIZE].to(self.device)
+                chunks.append(self.model.encode_image(batch).float())
+        emb = torch.cat(chunks)
+        emb = emb / emb.norm(dim=-1, keepdim=True)
+        means = torch.stack([
+            seg.mean(dim=0) for seg in emb.split([len(t) for t in ok])
+        ])
+        means = means / means.norm(dim=-1, keepdim=True)
+        rows = iter(means.cpu().numpy().astype(np.float32))
+        return [
+            next(rows)[None, :] if isinstance(t, torch.Tensor) else t
+            for t in loaded
+        ]
+
+    def _load_tensor(self, image_path: str) -> torch.Tensor | OSError | SyntaxError:
+        """Decode and preprocess one file's frames: (k, 3, H, W)."""
+        try:
+            return torch.stack([self.preprocess(f) for f in _load_frames(image_path)])
+        except (OSError, SyntaxError) as e:
+            # PIL raises SyntaxError for some corrupt/unrecognized formats.
+            return e
 
 
 def _load_frames(image_path: str) -> Iterator[Image.Image]:

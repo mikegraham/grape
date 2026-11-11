@@ -211,7 +211,10 @@ def test_multi_frame_mean_matches_manual_computation(
     stacked = np.vstack(frame_embs)
     expected = stacked.mean(axis=0, keepdims=True)
     expected = expected / np.linalg.norm(expected, axis=-1, keepdims=True)
-    np.testing.assert_allclose(multi_emb, expected, atol=1e-5)
+    # fp16 on a GPU batches frames differently than one-at-a-time; the
+    # rounding moves elements by ~3e-4, while a wrong frame moves them ~1e-2.
+    atol = 1e-5 if clip_model.device == "cpu" else 1e-3
+    np.testing.assert_allclose(multi_emb, expected, atol=atol)
 
 
 def _save_gif(path, frames):
