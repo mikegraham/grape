@@ -1,6 +1,7 @@
 """Unit tests for the embedding cache (no model needed)."""
 
 import json
+import logging
 import os
 import time
 
@@ -406,3 +407,15 @@ def test_canonical_stat_never_merges_distinct_stats():
     assert _canonical_stat(foreign) != _canonical_stat(
         json.dumps([1.5e-9, 2, 3, 0, 4])
     )
+
+
+def test_logs_cache_file_creation(tmp_path, caplog):
+    db = tmp_path / "new.db"
+    with caplog.at_level(logging.DEBUG, logger="grape"):
+        EmbeddingCache(db).close()
+        EmbeddingCache(db).close()
+    msgs = [(r.levelno, r.getMessage()) for r in caplog.records]
+    assert msgs == [
+        (logging.INFO, f"cache file not found, creating {db}"),
+        (logging.DEBUG, f"using cache file {db}"),
+    ]
