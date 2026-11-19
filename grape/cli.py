@@ -572,6 +572,7 @@ def _scan_files(
 def _prepare_cached_embeddings(
     scan_result: tuple[list[ImageRecord], ScanReport],
     cache_context: tuple[str | None, EmbeddingIndex | None],
+    cached_only: bool = False,
 ) -> tuple[
     NDArray[np.float32] | None, list[int],
     list[ImageRecord], list[ImageRecord], ScanReport,
@@ -604,6 +605,9 @@ def _prepare_cached_embeddings(
         "prepare: %d cached, %d uncached images",
         len(cached_items), len(uncached_items),
     )
+    if cached_only and uncached_items:
+        log.info("--cached-only: skipping %d uncached images", len(uncached_items))
+        uncached_items = []
     image_emb = (
         cached_index.matrix
         if cached_index is not None and cached_rows else None
@@ -1144,6 +1148,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="disable caching",
     )
     parser.add_argument(
+        "--cached-only",
+        action="store_true",
+        default=False,
+        help="skip images with no cached embedding (never loads the model"
+             " to encode images)",
+    )
+    parser.add_argument(
         "--model",
         default=DEFAULT_MODEL,
         metavar="NAME/PRETRAINED",
@@ -1218,6 +1229,7 @@ def _run_pipeline(
     pretrained: str,
     prompt_templates: list[str],
     cache: "EmbeddingCache | None",
+    cached_only: bool,
     quiet: bool,
     path_args: list[str],
     recursive: bool,
@@ -1273,7 +1285,7 @@ def _run_pipeline(
         # vstack of cached embeddings; overlaps with model load + encoding.
         f_prepared = ex.submit(
             lambda: _prepare_cached_embeddings(
-                f_scan.result(), f_cache_ctx.result(),
+                f_scan.result(), f_cache_ctx.result(), cached_only,
             ),
         )
         # Convergence: scoring needs prepared + query + model.
@@ -1329,6 +1341,8 @@ def main() -> None:
 
     if not keywords and not like_paths:
         parser.error("at least one of -k/--keywords or --like is required")
+    if args.cached_only and args.no_cache:
+        parser.error("--cached-only and --no-cache are mutually exclusive")
 
     # Open cache before scanning so find_images can skip files
     # already known not to be images.
@@ -1380,6 +1394,7 @@ def main() -> None:
                 pretrained=pretrained,
                 prompt_templates=prompt_templates,
                 cache=cache,
+                cached_only=args.cached_only,
                 quiet=args.quiet,
                 path_args=_expand_stdin_paths(args.path),
                 recursive=args.recursive,
