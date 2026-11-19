@@ -414,3 +414,39 @@ def test_load_frames_never_leaks_pillow_errors_for_truncated_gif(tmp_path):
     assert passed > 0, "no truncation passed is_image()"
     if raised == 0:
         pytest.skip("no truncation reproduced a decode error on this Pillow")
+
+
+def test_import_open_clip_falls_back_when_stubs_break_import(monkeypatch):
+    """open_clip 4.x imports names the coca_model stub lacks; the stubbed
+    import must fall back to a plain one instead of raising ImportError."""
+    import sys
+
+    import grape.model as gm
+
+    real = SimpleNamespace(__name__="open_clip")
+    calls = []
+
+    def fake_import(name):
+        assert name == "open_clip"
+        coca = sys.modules.get("open_clip.coca_model")
+        stubbed = coca is not None and getattr(coca, "__file__", None) is None
+        calls.append("stubbed" if stubbed else "plain")
+        if stubbed:
+            sys.modules["open_clip.mammut_model"] = SimpleNamespace()  # half-import
+            raise ImportError("cannot import name 'MultimodalCfg'")
+        return real
+
+    # Isolate sys.modules and the module-level import state.
+    monkeypatch.setattr(sys, "modules", dict(sys.modules))
+    for name in list(sys.modules):
+        if name == "open_clip" or name.startswith("open_clip."):
+            del sys.modules[name]
+    monkeypatch.setattr(gm, "_open_clip_module", None)
+    monkeypatch.setattr(gm, "_open_clip_fast_path", False)
+    monkeypatch.setattr(gm.importlib, "import_module", fake_import)
+    monkeypatch.setattr(gm, "_model_needs_timm", lambda _name: False)
+
+    assert gm._import_open_clip(use_transformers=False, model_name="X") is real
+    assert calls == ["stubbed", "plain"]
+    assert "open_clip.mammut_model" not in sys.modules
+    assert gm._open_clip_fast_path is False

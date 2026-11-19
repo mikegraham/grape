@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Works with open_clip 4.x. Its new `mammut_model` imports names from `coca_model` that grape's startup stub doesn't provide, so every run that loaded open_clip failed with `ImportError: cannot import name 'MultimodalCfg'`. grape now falls back to a normal open_clip import when the stubbed one fails (startup is a few seconds slower on those runs).
 - A truncated animated GIF/WEBP/APNG that passes the scan no longer crashes the run with Pillow's `IndexError`/`struct.error`; it is skipped and recorded as not an image like other unreadable files.
 - `-print0` now composes with `-s`/`-v` like grep's `-Z`: the path is unquoted and NUL-terminated; the score before it and the `-v` breakdown line after it are unchanged. Previously the flag was silently ignored with `-s`/`-v`.
 - A missing or unreadable `--like` image now exits with `grape: <path>: <reason>` instead of a traceback.

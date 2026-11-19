@@ -18,6 +18,7 @@ This module contains some crazy hacks to reduce latency.
 from __future__ import annotations
 
 import importlib
+import logging
 import os
 import struct
 import sys
@@ -40,6 +41,8 @@ from grape.hf_cache import cached_file_from_repo as _cached_file_from_repo
 # the ViCLIP evaluation default (arXiv:2307.06942) and falls in the
 # K=4..16 range used across CLIP-on-video work.
 MAX_ANIMATION_FRAMES = 8
+
+log = logging.getLogger("grape")
 
 
 # ---------------------------------------------------------------------------
@@ -503,7 +506,17 @@ def _import_open_clip(
     # Only stub timm when we know the model doesn't need it.
     stub_timm = model_name is not None and not _model_needs_timm(model_name)
     _install_import_stubs(stub_timm=stub_timm)
-    _open_clip_module = importlib.import_module("open_clip")
+    try:
+        _open_clip_module = importlib.import_module("open_clip")
+    except ImportError as exc:
+        # open_clip's own imports outgrew the stubs (4.x's mammut_model
+        # pulls names from coca_model at import time). Drop the
+        # half-imported package and take the slow, stub-free path.
+        log.debug("open_clip import failed with stubs (%s); retrying without", exc)
+        for name in list(sys.modules):
+            if name == "open_clip" or name.startswith("open_clip."):
+                del sys.modules[name]
+        return _import_open_clip(use_transformers=True)
     _open_clip_fast_path = True
     return _open_clip_module
 
