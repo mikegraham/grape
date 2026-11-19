@@ -47,13 +47,24 @@ log = logging.getLogger("grape")
 DEFAULT_MODEL = "ViT-L-16-SigLIP2-256/webli"
 
 # Prompt ensembling: average embeddings across multiple prompt templates
-# per keyword, then L2-normalize. Improves zero-shot accuracy over a
-# single template. See CLIP (Radford et al., 2021) Section 3.1.4 and
-# Appendix A. https://arxiv.org/abs/2103.00020
+# per keyword, then L2-normalize. See CLIP (Radford et al., 2021) Section
+# 3.1.4 and Appendix A. https://arxiv.org/abs/2103.00020
+#
+# These are open_clip's SIMPLE_IMAGENET_TEMPLATES (the 7 templates CLIP's
+# forward selection kept out of its 80) plus the bare keyword. On SigLIP 2
+# this "Avg'" set scores +1.6 ImageNet over the bare keyword and +0.6 over
+# the best single template; three near-synonym templates gain ~nothing
+# because the ensemble's value comes from template diversity, not count.
+# Volkov et al., BMVC 2025, Table 2. https://arxiv.org/abs/2509.09311
 DEFAULT_PROMPT_ENSEMBLE = [
-    "a photo of a {}",
-    "a photo of the {}",
-    "a photo of including {}",
+    "{}",
+    "itap of a {}.",
+    "a bad photo of the {}.",
+    "a origami {}.",
+    "a photo of the large {}.",
+    "a {} in a video game.",
+    "art of the {}.",
+    "a photo of the small {}.",
 ]
 
 _HTML_TEMPLATE_TEXT = """

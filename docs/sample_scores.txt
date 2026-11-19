@@ -1,5 +1,5 @@
-0.278  tests/fixtures/subdir/sunset.jpg
-0.157  tests/fixtures/beach.jpg
-0.133  tests/fixtures/omelette.jpg
-0.126  tests/fixtures/toms_diner.jpg
-0.122  tests/fixtures/lenna.png
+0.283  tests/fixtures/subdir/sunset.jpg
+0.163  tests/fixtures/beach.jpg
+0.145  tests/fixtures/omelette.jpg
+0.144  tests/fixtures/lenna.png
+0.128  tests/fixtures/toms_diner.jpg

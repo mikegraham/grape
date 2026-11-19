@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Default `--ensemble-prompts` is now open_clip's seven simple ImageNet templates plus the bare keyword (was three "a photo of ..." variants). About +1.6 ImageNet zero-shot accuracy on SigLIP 2. Keyword embeddings are re-encoded on first use; image embeddings are unaffected.
+
 ### Added
 - `-v` prints every thread's stack trace on Ctrl-C, so a hung run shows where it is stuck.
 
