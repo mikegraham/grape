@@ -43,7 +43,7 @@ model. `-v` logs the device it picked; `GRAPE_DEVICE=cpu` forces the CPU.
   pip install grape-image-search
   ```
 
-- **AMD (ROCm)**: install PyTorch's ROCm build first
+- **AMD (ROCm, untested)**: install PyTorch's ROCm build first
   ([pytorch.org](https://pytorch.org/get-started/locally/)).
 
 ## Usage
