@@ -77,6 +77,20 @@ def test_suppress_filter_drops_target_message(caplog):
     )
 
 
+def test_suppress_filter_drops_open_clip_4_factory_logger_message(caplog):
+    """open_clip 4.x logs the warning on its own module logger."""
+    import logging
+    with caplog.at_level(logging.WARNING, logger=""):
+        with _suppress_open_clip_no_weights_warning():
+            logging.getLogger("open_clip.factory").warning(
+                "No pretrained weights loaded for model 'X'."
+                " Model initialized randomly.",
+            )
+    assert not any(
+        "No pretrained weights loaded" in r.getMessage() for r in caplog.records
+    )
+
+
 def test_suppress_filter_keeps_other_root_warnings(caplog):
     import logging
     with caplog.at_level(logging.WARNING, logger=""):
@@ -87,11 +101,12 @@ def test_suppress_filter_keeps_other_root_warnings(caplog):
 
 def test_suppress_filter_removed_after_context_exits():
     import logging
-    root = logging.getLogger()
-    before = list(root.filters)
+    loggers = [logging.getLogger(), logging.getLogger("open_clip.factory")]
+    before = [list(lg.filters) for lg in loggers]
     with _suppress_open_clip_no_weights_warning():
-        assert len(root.filters) == len(before) + 1
-    assert root.filters == before
+        for lg, b in zip(loggers, before):
+            assert len(lg.filters) == len(b) + 1
+    assert [lg.filters for lg in loggers] == before
 
 
 def test_no_parameter_init_stubs_nn_init_but_not_tensor_methods():
