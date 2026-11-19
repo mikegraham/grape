@@ -1388,6 +1388,20 @@ def test_format_results_verbose_shows_like_scores():
 
 # --- _score_all error handling ---
 
+class _PerImageModel:
+    """Fake-model base: batched encode_images over a fake's encode_image,
+    returning unreadable files' errors in place like CLIPModel does."""
+
+    def encode_images(self, paths):
+        results = []
+        for path in paths:
+            try:
+                results.append(self.encode_image(path))
+            except (OSError, SyntaxError) as e:
+                results.append(e)
+        return results
+
+
 def test_score_all_skips_syntax_error():
     """SyntaxError during image encoding is caught and recorded as not-image."""
     from grape.cli import (
@@ -1396,7 +1410,7 @@ def test_score_all_skips_syntax_error():
         _score_all,
     )
 
-    class _RaisingModel:
+    class _RaisingModel(_PerImageModel):
         def model_id(self):
             return "test-model"
         def encode_image(self, path):
@@ -1446,7 +1460,7 @@ def test_score_all_skips_oserror_no_errno():
         _score_all,
     )
 
-    class _RaisingModel:
+    class _RaisingModel(_PerImageModel):
         def model_id(self):
             return "test-model"
         def encode_image(self, path):
@@ -1486,7 +1500,7 @@ def test_score_all_propagates_real_oserror():
         _score_all,
     )
 
-    class _RaisingModel:
+    class _RaisingModel(_PerImageModel):
         def model_id(self):
             return "test-model"
         def encode_image(self, path):
@@ -1524,7 +1538,7 @@ def test_score_all_verbose_prints_uncached_paths(capsys):
         _score_all,
     )
 
-    class _StubModel:
+    class _StubModel(_PerImageModel):
         def model_id(self):
             return "test-model"
         def encode_image(self, path):
@@ -1568,7 +1582,7 @@ def test_score_all_non_verbose_omits_uncached_paths(capsys):
         _score_all,
     )
 
-    class _StubModel:
+    class _StubModel(_PerImageModel):
         def model_id(self):
             return "test-model"
         def encode_image(self, path):
@@ -1956,7 +1970,7 @@ def test_score_all_encode_reuses_scan_stat():
         _score_all,
     )
 
-    class _Model:
+    class _Model(_PerImageModel):
         def model_id(self):
             return "test-model"
         def encode_image(self, path):

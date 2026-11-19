@@ -200,6 +200,11 @@ class _LazyModel:
     def encode_image(self, image_path: str) -> NDArray[np.float32]:
         return self._ensure_loaded().encode_image(image_path)
 
+    def encode_images(
+        self, image_paths: list[str],
+    ) -> list[NDArray[np.float32] | OSError | SyntaxError]:
+        return self._ensure_loaded().encode_images(image_paths)
+
     def encode_texts(self, texts: list[str]) -> NDArray[np.float32]:
         return self._ensure_loaded().encode_texts(texts)
 
@@ -626,7 +631,7 @@ def _score_all(
     import numpy as np
     from tqdm import tqdm
 
-    from grape.search import _get_embedding
+    from grape.search import ENCODE_BATCH_SIZE, _get_embeddings
 
     image_emb, cached_rows, cached_items, uncached_items, scan_done = prepared
 
@@ -640,46 +645,39 @@ def _score_all(
         sims.append((image_emb @ text_emb.T)[cached_rows])
         paths.extend(item.path for item in cached_items)
 
-    # Slow path: encode uncached images through the model one at a time.
+    # Slow path: encode uncached images through the model in batches.
     if uncached_items:
         log.debug("score_all: encoding %d uncached images", len(uncached_items))
-    for item in tqdm(
-        uncached_items, desc="Encoding", file=sys.stderr,
+    progress = tqdm(
+        total=len(uncached_items), desc="Encoding", file=sys.stderr,
         disable=quiet or not uncached_items,
-    ):
+    )
+    for start in range(0, len(uncached_items), ENCODE_BATCH_SIZE):
+        chunk = uncached_items[start:start + ENCODE_BATCH_SIZE]
         if verbose:
-            # tqdm.write avoids breaking the progress bar.
-            tqdm.write(item.path, file=sys.stderr)
-        try:
-            # Key by the scan's stat: if the file changes mid-encode, the
-            # next run re-encodes instead of trusting a stale embedding.
-            img_emb = _get_embedding(
-                model, item.path, cache,
-                path_key=item.path_key, file_stat=item.file_stat,
-            )
+            for item in chunk:
+                # tqdm.write avoids breaking the progress bar.
+                tqdm.write(item.path, file=sys.stderr)
+        # Key by the scan's stat: if the file changes mid-encode, the
+        # next run re-encodes instead of trusting a stale embedding.
+        for item, img_emb in zip(chunk, _get_embeddings(model, chunk, cache)):
+            if isinstance(img_emb, OSError) and img_emb.errno is not None:
+                raise img_emb
+            if isinstance(img_emb, (OSError, SyntaxError)):
+                if not quiet:
+                    print(f"  skipping {item.path}: {img_emb}", file=sys.stderr)
+                # Record as not-image so future scans skip this file.
+                if cache is not None:
+                    cache.put_not_image(
+                        item.path,
+                        path_key=item.path_key,
+                        file_stat=item.file_stat,
+                    )
+                continue
             sims.append(img_emb @ text_emb.T)
             paths.append(item.path)
-        except SyntaxError as e:
-            if not quiet:
-                print(f"  skipping {item.path}: {e}", file=sys.stderr)
-            if cache is not None:
-                cache.put_not_image(
-                    item.path,
-                    path_key=item.path_key,
-                    file_stat=item.file_stat,
-                )
-        except OSError as e:
-            if e.errno is not None:
-                raise
-            if not quiet:
-                print(f"  skipping {item.path}: {e}", file=sys.stderr)
-            # Record as not-image so future scans skip this file.
-            if cache is not None:
-                cache.put_not_image(
-                    item.path,
-                    path_key=item.path_key,
-                    file_stat=item.file_stat,
-                )
+        progress.update(len(chunk))
+    progress.close()
 
     if not sims:
         sims.append(np.empty((0, len(text_emb)), dtype=np.float32))

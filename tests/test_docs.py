@@ -13,6 +13,7 @@ the regenerated samples (plus the .inputs.sha256 sidecar).
 """
 
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -57,6 +58,8 @@ def test_text_snapshot_matches_grape_output(snapshot: str, args_attr: str) -> No
     result = subprocess.run(
         [sys.executable, "-m", "grape", "--no-cache", "--model", mod.MODEL, *args],
         capture_output=True, text=True, check=True,
+        # Snapshots are CPU fp32 output; GPU fp16 can flip a third decimal.
+        env={**os.environ, "GRAPE_DEVICE": "cpu"},
     )
     actual = result.stdout.replace(str(mod.FIXTURES), "tests/fixtures")
     expected = (DOCS / snapshot).read_text()
