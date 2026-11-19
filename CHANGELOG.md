@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - GPU acceleration: grape runs on an Intel GPU (XPU) or NVIDIA/AMD GPU (CUDA/ROCm) when the installed PyTorch supports it, with fp16 matmuls and batched encoding. About 16x faster indexing than CPU for the default model on an Intel Xe3 iGPU. `GRAPE_DEVICE=cpu` (or any torch device name) overrides the choice; `-v` logs it. Needs a PyTorch build for your GPU: plain `pip install` gets the CUDA build.
+- `scripts/install_xpu.sh`: sets up a venv with PyTorch's Intel XPU build and an editable grape, pinned so pip can't swap in the CUDA build (several GB of NVIDIA wheels). Can install torch offline from a folder of wheels.
 
 ### Fixed
 - A truncated animated GIF/WEBP/APNG that passes the scan no longer crashes the run with Pillow's `IndexError`/`struct.error`; it is skipped and recorded as not an image like other unreadable files.
