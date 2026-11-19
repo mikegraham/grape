@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `-v` log lines start with the date and time, to the millisecond (`2026-11-19 14:03:27.512 grape: ...`), to make slow phases easy to spot.
+
+### Fixed
+- Normal (non-`-v`) runs no longer print other libraries' INFO messages, such as open_clip 4.x's "Parsing model identifier ..." and Hugging Face's HTTP request lines. grape's own messages and all warnings still show.
+
 ### Added
 - GPU acceleration: grape runs on an Intel GPU (XPU) or NVIDIA/AMD GPU (CUDA/ROCm) when the installed PyTorch supports it, with fp16 matmuls and batched encoding. About 16x faster indexing than CPU for the default model on an Intel Xe3 iGPU. `GRAPE_DEVICE=cpu` (or any torch device name) overrides the choice; `-v` logs it. Needs a PyTorch build for your GPU: plain `pip install` gets the CUDA build.
 - `scripts/install_xpu.sh`: sets up a venv with PyTorch's Intel XPU build and an editable grape, pinned so pip can't swap in the CUDA build (several GB of NVIDIA wheels). Can install torch offline from a folder of wheels.

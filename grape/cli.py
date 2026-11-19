@@ -1295,6 +1295,26 @@ def _run_pipeline(
     )
 
 
+def _configure_logging(*, verbose: bool, quiet: bool) -> None:
+    """grape's messages at INFO (DEBUG with -v); other libraries only at WARNING.
+
+    Libraries such as open_clip and httpx log routine INFO chatter
+    ("Parsing model identifier ...", HTTP requests) that would otherwise
+    show on every run.
+    """
+    if quiet and not verbose:
+        return
+    # -v is for diagnosing slow or stuck runs: stamp each line.
+    fmt = "%(name)s: %(message)s"
+    if verbose:
+        fmt = "%(asctime)s.%(msecs)03d " + fmt
+    logging.basicConfig(
+        level=logging.WARNING, format=fmt, datefmt="%Y-%m-%d %H:%M:%S",
+        stream=sys.stderr,
+    )
+    logging.getLogger("grape").setLevel(logging.DEBUG if verbose else logging.INFO)
+
+
 def main() -> None:
     # Hard-exit on Ctrl-C: torch threads otherwise wedge the shutdown.
     import signal
@@ -1304,17 +1324,7 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.verbose:
-        logging.basicConfig(
-            level=logging.WARNING, format="%(name)s: %(message)s",
-            stream=sys.stderr,
-        )
-        logging.getLogger("grape").setLevel(logging.DEBUG)
-    elif not args.quiet:
-        logging.basicConfig(
-            level=logging.INFO, format="%(name)s: %(message)s",
-            stream=sys.stderr,
-        )
+    _configure_logging(verbose=args.verbose, quiet=args.quiet)
     sep = args.keyword_separator
     keywords = parse_keywords(args.keywords, sep) if args.keywords else []
     exclude_keywords: list[str] = []
