@@ -2044,3 +2044,25 @@ def test_configure_logging_hides_library_info(monkeypatch, verbose):
     assert logging.getLogger("open_clip.factory").isEnabledFor(logging.WARNING)
     assert grape_log.isEnabledFor(logging.INFO)
     assert grape_log.isEnabledFor(logging.DEBUG) is verbose
+
+
+@pytest.mark.parametrize("verbose", [False, True])
+def test_configure_logging_timestamps_only_with_verbose(monkeypatch, verbose):
+    import logging
+    import re
+
+    from grape.cli import _configure_logging
+
+    root = logging.getLogger()
+    monkeypatch.setattr(root, "handlers", [])
+    monkeypatch.setattr(root, "level", root.level)
+    grape_log = logging.getLogger("grape")
+    monkeypatch.setattr(grape_log, "level", grape_log.level)
+
+    _configure_logging(verbose=verbose, quiet=False)
+    record = logging.LogRecord("grape", logging.INFO, __file__, 1, "hi", None, None)
+    line = root.handlers[0].format(record)
+
+    stamped = re.fullmatch(r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3} grape: hi", line)
+    assert bool(stamped) is verbose
+    assert line == "grape: hi" or verbose

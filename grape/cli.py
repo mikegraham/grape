@@ -1306,8 +1306,12 @@ def _configure_logging(*, verbose: bool, quiet: bool) -> None:
     """
     if quiet and not verbose:
         return
+    # -v is for diagnosing slow or stuck runs: stamp each line.
+    fmt = "%(name)s: %(message)s"
+    if verbose:
+        fmt = "%(asctime)s.%(msecs)03d " + fmt
     logging.basicConfig(
-        level=logging.WARNING, format="%(name)s: %(message)s",
+        level=logging.WARNING, format=fmt, datefmt="%Y-%m-%d %H:%M:%S",
         stream=sys.stderr,
     )
     logging.getLogger("grape").setLevel(logging.DEBUG if verbose else logging.INFO)
