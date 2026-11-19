@@ -813,7 +813,7 @@ def _emit(
             ranking, keywords, exclude_keywords, like_paths,
         )
         html_doc = _format_html(results, display_keywords)
-        selected = _show_in_webview(html_doc)
+        selected = _show_in_webview(html_doc, verbose=verbose)
         if print0:
             sys.stdout.write("".join(f"{path}\0" for path in selected))
         elif selected:
@@ -999,13 +999,16 @@ class _SelectionApi:
         self._paths = list(paths)
 
 
-def _show_in_webview(html_doc: str) -> list[str]:
+def _show_in_webview(html_doc: str, verbose: bool = False) -> list[str]:
     """Display HTML in a native webview window; return the selected paths.
 
     Blocks until the window is closed. The page reports its selection
     (clicked images) to a _SelectionApi as it changes.
     """
     api = _SelectionApi()
+    # start(debug=True) below would print pywebview's internal debug log;
+    # show it only with -v.
+    os.environ.setdefault("PYWEBVIEW_LOG", "DEBUG" if verbose else "WARNING")
     webview = _get_webview()
     with tempfile.TemporaryDirectory(prefix="grape-view-") as tmpdir:
         html_path = Path(tmpdir) / "index.html"
