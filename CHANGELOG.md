@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `--cached-only`: score only images that already have a cached embedding and skip the rest, so the model is never loaded to encode images. Can't be combined with `--no-cache`.
+
 ### Changed
 - Default `--ensemble-prompts` is now open_clip's seven simple ImageNet templates plus the bare keyword (was three "a photo of ..." variants). About +1.6 ImageNet zero-shot accuracy on SigLIP 2. Keyword embeddings are re-encoded on first use; image embeddings are unaffected.
 

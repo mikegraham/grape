@@ -3,6 +3,7 @@
 import os
 import re
 import shlex
+import sys
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -545,7 +546,7 @@ def _stub_pipeline(monkeypatch, score=0.75):
     def _fake_resolve_and_index_cache(model_name, pretrained, cache):
         return (None, None)
 
-    def _fake_prepare_cached_embeddings(scan_result, cache_context):
+    def _fake_prepare_cached_embeddings(scan_result, cache_context, cached_only=False):
         items, scan_done = scan_result
         return (None, [], [], items, scan_done)
 
@@ -2056,3 +2057,42 @@ def test_sigint_handler_dumps_threads_only_when_verbose(monkeypatch, capfd):
     cli_mod._sigint_handler(verbose=True)()
     assert exits == [130, 130]
     assert "Current thread" in capfd.readouterr().err
+
+
+def test_prepare_cached_only_drops_uncached_items():
+    from grape.cli import ScanReport, _prepare_cached_embeddings
+
+    items = [
+        ImageRecord(path="/tmp/a.jpg", path_key="/tmp/a.jpg", file_stat="sa"),
+        ImageRecord(path="/tmp/b.jpg", path_key="/tmp/b.jpg", file_stat="sb"),
+    ]
+    cached_index = EmbeddingIndex(
+        rows={("/tmp/a.jpg", "sa"): 0},
+        matrix=np.array([[1.0, 0.0]], dtype=np.float32),
+    )
+    scan_result = (items, ScanReport(image_count=2))
+    cache_context = ("model-id", cached_index)
+
+    _emb, rows, cached, uncached, _done = _prepare_cached_embeddings(
+        scan_result, cache_context, cached_only=True,
+    )
+    assert [i.path for i in cached] == ["/tmp/a.jpg"]
+    assert rows == [0]
+    assert uncached == []
+
+    # Default keeps them.
+    *_, uncached, _done = _prepare_cached_embeddings(
+        scan_result, cache_context,
+    )
+    assert [i.path for i in uncached] == ["/tmp/b.jpg"]
+
+
+def test_cached_only_conflicts_with_no_cache(monkeypatch, capsys):
+    from grape.cli import main
+
+    monkeypatch.setattr(
+        sys, "argv", ["grape", "-k", "dog", "--no-cache", "--cached-only", "."],
+    )
+    with pytest.raises(SystemExit):
+        main()
+    assert "mutually exclusive" in capsys.readouterr().err
