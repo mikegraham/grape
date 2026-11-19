@@ -48,6 +48,9 @@ grape -R -s -n 5 -t 0.25 --keywords sunset ~/Pictures
 # browse results in a GUI window
 grape -R --keywords sunset --view ~/Pictures
 
+# pick images in the window (click to select); their paths print on close
+grape -R -print0 --keywords blurry --view ~/Pictures | xargs -0 rm --
+
 # aesthetic ranking (skip default templating -- prompts are already full sentences)
 grape -R -n 20 --ensemble-prompts '{}' --keywords 'beautiful photo' --exclude 'ugly photo' ~/Pictures
 

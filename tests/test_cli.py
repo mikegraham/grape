@@ -335,7 +335,7 @@ def test_show_in_webview_calls_create_window_and_start(monkeypatch):
 
     fake_webview = FakeWebview()
     monkeypatch.setattr("grape.cli._get_webview", lambda: fake_webview)
-    _show_in_webview("<html>ok</html>")
+    assert _show_in_webview("<html>ok</html>") == []
     assert calls[0][0] == "create"
     assert calls[0][1] == ("grape results",)
     assert "url" in calls[0][2]
@@ -438,12 +438,22 @@ def test_cached_run_draws_no_progress_bar(tmp_path, monkeypatch):
     assert "Encoding" not in err
 
 
-def test_view_rejects_print0(monkeypatch):
-    _, err, code = run_main(["--view", "-print0", "-k", "dog", "x.jpg"], monkeypatch)
-    assert code != 0
-    assert "not allowed with argument" in err
-    assert "--view" in err
-    assert "-print0" in err
+@pytest.mark.parametrize("print0", [False, True])
+def test_view_prints_selected_paths_on_close(tmp_path, monkeypatch, print0):
+    """--view prints the images clicked in the window, in the same format
+    as normal results: shell-quoted lines, or raw with -print0."""
+    image_path = tmp_path / "my photo.jpg"
+    Image.new("RGB", (1, 1)).save(image_path)
+    _stub_pipeline(monkeypatch)
+    selected = [str(image_path), "it's.jpg"]
+    monkeypatch.setattr("grape.cli._show_in_webview", lambda _html: selected)
+    args = ["-q", "--view", "-k", "dog", str(image_path)]
+    out, _, code = run_main(args + (["-print0"] if print0 else []), monkeypatch)
+    assert code == 0
+    if print0:
+        assert out == f"{image_path}\0it's.jpg\0"
+    else:
+        assert out == f"{shlex.quote(str(image_path))}\n'it'\"'\"'s.jpg'\n"
 
 
 def test_module_entry_point_flushes_before_fast_exit(tmp_path):
@@ -1076,7 +1086,12 @@ def test_view_calls_webview_with_html(tmp_path, monkeypatch):
     Image.new("RGB", (1, 1)).save(image_path)
     _stub_pipeline(monkeypatch)
     captured: list[str] = []
-    monkeypatch.setattr("grape.cli._show_in_webview", captured.append)
+
+    def _show(html_doc):
+        captured.append(html_doc)
+        return []  # nothing selected
+
+    monkeypatch.setattr("grape.cli._show_in_webview", _show)
     out, _, code = run_main(["-q", "--view", "-k", "dog", str(image_path)], monkeypatch)
     assert code == 0
     assert out == ""
@@ -2096,3 +2111,34 @@ def test_cached_only_conflicts_with_no_cache(monkeypatch, capsys):
     with pytest.raises(SystemExit):
         main()
     assert "mutually exclusive" in capsys.readouterr().err
+
+
+def test_show_in_webview_returns_selection_reported_by_page(monkeypatch):
+    """The page calls js_api.set_selected as clicks change the selection;
+    whatever it last reported is returned once the window closes."""
+    class FakeWebview:
+        settings: dict = {}
+
+        def create_window(self, *args, **kwargs):
+            self.api = kwargs["js_api"]
+
+        def start(self, **kwargs):  # the user clicks, then closes
+            self.api.set_selected(["a.jpg", "b.jpg"])
+            self.api.set_selected(["b.jpg"])
+
+    monkeypatch.setattr("grape.cli._get_webview", FakeWebview)
+    assert _show_in_webview("<html>ok</html>") == ["b.jpg"]
+
+
+def test_format_html_marks_each_result_selectable(tmp_path):
+    """Each result carries its path for the selection script, escaped."""
+    image_path = tmp_path / 'say "cheese".jpg'
+    Image.new("RGB", (1, 1)).save(image_path)
+    results = [ScoredImage(path=str(image_path), scores={"dog": 0.5}, score=0.5)]
+
+    html_doc = _format_html(results, ["dog"])
+
+    assert html_doc.count('class="result"') == 1
+    assert html_doc.count('class="pick"') == 1
+    assert f'data-path="{str(image_path).replace(chr(34), "&#34;")}"' in html_doc
+    assert "window.pywebview.api.set_selected" in html_doc

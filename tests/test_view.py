@@ -229,3 +229,31 @@ def test_long_path_stays_single_line(tmp_path, browser_page):
     assert info["scroll"] > info["client"], (
         "expected horizontal overflow so ellipsis activates"
     )
+
+
+def test_click_toggles_selection_and_reports_it(tmp_path, browser_page):
+    """Clicking an image or its checkbox (de)selects it, and every change
+    reports the selected paths, in page order, to window.pywebview.api."""
+    paths = []
+    for name, color in (("a.jpg", (255, 0, 0)), ("b.jpg", (0, 0, 255))):
+        _make_test_image(tmp_path / name, color)
+        paths.append(str(tmp_path / name))
+    results = [
+        ScoredImage(path=p, scores={"x": 0.5}, score=0.5) for p in paths
+    ]
+    _render(browser_page, _format_html(results, ["x"]), tmp_path)
+    browser_page.evaluate(
+        "window.reports = [];"
+        " window.pywebview = {api: {set_selected: (p) => window.reports.push(p)}};"
+    )
+
+    imgs = browser_page.locator(".result img")
+    imgs.nth(1).click()
+    browser_page.locator(".result .pick").nth(0).click()
+    imgs.nth(1).click()
+
+    assert browser_page.evaluate("window.reports") == [
+        [paths[1]], [paths[0], paths[1]], [paths[0]],
+    ]
+    assert browser_page.locator(".result.selected").count() == 1
+    assert browser_page.locator(".result .pick").nth(0).is_checked()
