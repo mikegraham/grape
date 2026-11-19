@@ -621,3 +621,21 @@ def test_load_frames_skips_copy_for_single_frame_rgb(tmp_path, monkeypatch):
     frames = list(_load_frames(str(path)))
     assert len(frames) == 1 and frames[0].mode == "RGB"
     assert calls == []
+
+
+def test_load_frames_drafts_large_jpegs_to_twice_the_size(tmp_path):
+    """With a size, a JPEG decodes scaled down but keeps >= 2x that size;
+    other formats decode at full size."""
+    from PIL import Image
+
+    from grape.model import _load_frames
+
+    jpeg = tmp_path / "big.jpg"
+    Image.new("RGB", (2000, 1500), (90, 120, 150)).save(jpeg, format="JPEG")
+    # 1/2 scale keeps both sides >= 512; 1/4 (500x375) would not.
+    assert next(_load_frames(str(jpeg), 256)).size == (1000, 750)
+    assert next(_load_frames(str(jpeg))).size == (2000, 1500)
+
+    png = tmp_path / "big.png"
+    Image.new("RGB", (2000, 1500), (90, 120, 150)).save(png, format="PNG")
+    assert next(_load_frames(str(png), 256)).size == (2000, 1500)

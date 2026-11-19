@@ -6,9 +6,9 @@ Search your photos by describing what's in them. Like grep, but for images.
 $ grape -R -s -n 5 --keywords sunset tests/fixtures
 0.283  tests/fixtures/subdir/sunset.jpg
 0.163  tests/fixtures/beach.jpg
-0.145  tests/fixtures/omelette.jpg
+0.146  tests/fixtures/omelette.jpg
 0.144  tests/fixtures/lenna.png
-0.128  tests/fixtures/toms_diner.jpg
+0.128  tests/fixtures/cat.jpg
 ```
 
 The same search with `--view`:
@@ -79,8 +79,8 @@ Results are listed best match first.
   $ grape -R -v -n 3 --keywords sunset,beach tests/fixtures
   0.205  tests/fixtures/beach.jpg
     sunset: 0.163  beach: 0.247
-  0.193  tests/fixtures/subdir/sunset.jpg
-    sunset: 0.283  beach: 0.103
+  0.192  tests/fixtures/subdir/sunset.jpg
+    sunset: 0.283  beach: 0.102
   0.144  tests/fixtures/lenna.png
     sunset: 0.144  beach: 0.143
   ```

@@ -96,6 +96,8 @@ class CLIPModel:
                 raise
             open_clip = _import_open_clip(use_transformers=True)
             self._init_model(open_clip, model_name, pretrained)
+        size = self.model.visual.preprocess_cfg["size"]
+        self._image_size = max(size) if isinstance(size, (tuple, list)) else size
         self.device = pick_device()
         # On a GPU, store the weights in fp16: autocast converts them to
         # fp16 for every matmul anyway, so this halves GPU memory, the copy
@@ -275,7 +277,10 @@ class CLIPModel:
     def _load_tensor(self, image_path: str) -> torch.Tensor | OSError | SyntaxError:
         """Decode and preprocess one file's frames: (k, 3, H, W)."""
         try:
-            return torch.stack([self.preprocess(f) for f in _load_frames(image_path)])
+            return torch.stack([
+                self.preprocess(f)
+                for f in _load_frames(image_path, self._image_size)
+            ])
         except (OSError, SyntaxError) as e:
             # PIL raises SyntaxError for some corrupt/unrecognized formats.
             return e
@@ -299,8 +304,13 @@ def start_heif_registration() -> None:
             _heif_thread.start()
 
 
-def _load_frames(image_path: str) -> Iterator[Image.Image]:
+def _load_frames(
+    image_path: str, size: int | None = None,
+) -> Iterator[Image.Image]:
     """Open an image and yield its uniformly-sampled frames as RGB.
+
+    Given *size*, large JPEGs are read at lower resolution, but never
+    below twice *size*.
 
     Samples K = min(n_frames, MAX_ANIMATION_FRAMES) frame indices; a
     static image is the K=1 case. A generator so the caller preprocesses
@@ -319,6 +329,11 @@ def _load_frames(image_path: str) -> Iterator[Image.Image]:
     _heif_thread.join()
     try:
         with Image.open(image_path) as image:
+            if size is not None:
+                # Much faster for big photos. Going all the way down to
+                # *size* blurs fine detail; twice *size* kept scores within
+                # 0.004 in tests.
+                image.draft("RGB", (2 * size, 2 * size))  # no-op for non-JPEGs
             n_frames = getattr(image, "n_frames", 1)
             k = min(n_frames, MAX_ANIMATION_FRAMES)
             # max(k-1, 1) keeps the formula well-defined when k == 1.
