@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The scan no longer opens files: it walks the directories and `stat`s each file, like `find`. Whether a file is an image is decided when it's decoded for encoding; one that fails is skipped and remembered as not an image, so later scans leave it out. Previously every file without an embedding was fully decoded during the scan, on every run, so `--cached-only` and interrupted runs reopened the same photos again and again. The scan also no longer waits for the cache index before starting.
 - `-v` log lines start with the date and time, to the millisecond (`2026-11-19 14:03:27.512 grape: ...`), to make slow phases easy to spot.
 
+### Deprecated
+- `-t`/`--threshold`. It's hidden from `--help`, still works, and prints a notice when used.
+
 ### Fixed
 - Normal (non-`-v`) runs no longer print other libraries' INFO messages, such as open_clip 4.x's "Parsing model identifier ..." and Hugging Face's HTTP request lines. grape's own messages and all warnings still show.
 - With open_clip 4.x, loading the model no longer prints a misleading "No pretrained weights loaded ... Model initialized randomly" warning. The weights are loaded right after; grape already hid this message for open_clip 3.x, but 4.x logs it under a different logger.

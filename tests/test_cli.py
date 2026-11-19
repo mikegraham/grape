@@ -87,6 +87,18 @@ def test_import_starts_no_blas_threads_and_leaves_env_alone():
     assert out.stdout.split() == ["1", "None"]
 
 
+def test_threshold_prints_deprecation_notice(tmp_path):
+    import subprocess
+    import sys
+
+    out = subprocess.run(
+        [sys.executable, "-m", "grape", "--no-cache", "-t", "0.2",
+         "-k", "dog", str(tmp_path / "missing.jpg")],
+        capture_output=True, text=True,
+    )
+    assert "-t/--threshold is deprecated" in out.stderr
+
+
 # --- parse_keywords ---
 
 def test_parse_keywords_splits_on_comma():

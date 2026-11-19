@@ -1167,7 +1167,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         metavar="SCORE",
-        help="only show results with score >= SCORE",
+        help=argparse.SUPPRESS,  # deprecated: only show scores >= SCORE
     )
     parser.add_argument(
         "-n", "--top",
@@ -1437,6 +1437,9 @@ def main() -> None:
 
     args = parser.parse_args()
     signal.signal(signal.SIGINT, _sigint_handler(args.verbose))
+    if args.threshold is not None:
+        print("grape: -t/--threshold is deprecated and will be removed",
+              file=sys.stderr)
 
     _configure_logging(verbose=args.verbose, quiet=args.quiet)
     sep = args.keyword_separator
