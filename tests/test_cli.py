@@ -2167,3 +2167,45 @@ def test_user_cache_dir_matches_platformdirs(monkeypatch, xdg):
     else:
         monkeypatch.setenv("XDG_CACHE_HOME", xdg)
     assert _user_cache_dir() == user_cache_dir("grape")
+
+
+def test_score_all_mentions_broken_images_but_not_non_images(capsys):
+    """A video or sidecar file is skipped silently; a broken image is
+    reported. Both are remembered as not images."""
+    from PIL import UnidentifiedImageError
+
+    from grape.cli import ScanReport, _prepare_cached_embeddings, _score_all
+
+    class _Model(_PerImageModel):
+        def model_id(self):
+            return "test-model"
+
+        def encode_image(self, path):
+            if path.endswith(".xmp"):
+                raise UnidentifiedImageError(f"cannot identify image file {path!r}")
+            raise OSError("image file is truncated")
+
+    class _Cache:
+        def __init__(self):
+            self.not_images = []
+
+        def get(self, *a, **k):
+            return None
+
+        def put_not_image(self, path, **k):
+            self.not_images.append(path)
+
+    items = [
+        ImageRecord(path=p, path_key=p, file_stat="s")
+        for p in ("/lib/IMG_1.xmp", "/lib/IMG_2.jpg")
+    ]
+    prepared = _prepare_cached_embeddings(
+        (items, ScanReport(image_count=2)), ("test-model", None),
+    )
+    cache = _Cache()
+    _score_all(prepared, _Model(), np.ones((1, 2), np.float32), cache, False, False)
+
+    err = capsys.readouterr().err
+    assert "IMG_2.jpg" in err and "truncated" in err
+    assert "IMG_1.xmp" not in err
+    assert cache.not_images == ["/lib/IMG_1.xmp", "/lib/IMG_2.jpg"]

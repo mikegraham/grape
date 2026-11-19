@@ -670,6 +670,7 @@ def _score_all(
     # Fully cached runs skip this, tqdm included: creating even a disabled
     # bar imports multiprocessing and starts its resource tracker (~30 ms).
     if uncached_items:
+        from PIL import UnidentifiedImageError
         from tqdm import tqdm
 
         log.debug("score_all: encoding %d uncached images", len(uncached_items))
@@ -690,7 +691,11 @@ def _score_all(
                 if isinstance(img_emb, OSError) and img_emb.errno is not None:
                     raise img_emb
                 if isinstance(img_emb, (OSError, SyntaxError)):
-                    if not quiet:
+                    # Files that aren't images at all (videos, sidecars,
+                    # documents) are normal in a photo folder: -v only.
+                    if isinstance(img_emb, UnidentifiedImageError):
+                        log.debug("not an image: %s", item.path)
+                    elif not quiet:
                         print(f"  skipping {item.path}: {img_emb}", file=sys.stderr)
                     # Record as not-image so future scans skip this file.
                     if cache is not None:
