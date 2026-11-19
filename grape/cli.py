@@ -514,8 +514,6 @@ def _resolve_and_index_cache(
     model_id = cache.get_model_id(model_name, pretrained)
     if model_id is None:
         # First run with this model -- must import to resolve.
-        # _LazyModel is already loading in a background thread, so
-        # grape.model may or may not be imported yet.
         import grape.model
         model_id = grape.model.resolve_model_id(model_name, pretrained)
         cache.put_model_id(model_name, pretrained, model_id)
@@ -647,7 +645,7 @@ def _score_all(
         list[ImageRecord], list[ImageRecord], ScanReport,
     ],
     model: _LazyModel,
-    text_emb: NDArray[np.float32],
+    query_emb: NDArray[np.float32],
     cache: EmbeddingCache | None,
     quiet: bool,
     verbose: bool,
@@ -667,7 +665,7 @@ def _score_all(
     if image_emb is not None:
         # Score every cached row, then pick ours: indexing image_emb first
         # would copy the whole matrix.
-        sims.append((image_emb @ text_emb.T)[cached_rows])
+        sims.append((image_emb @ query_emb.T)[cached_rows])
         paths.extend(item.path for item in cached_items)
 
     # Slow path: encode uncached images through the model in batches.
@@ -700,13 +698,13 @@ def _score_all(
                         file_stat=item.file_stat,
                     )
                 continue
-            sims.append(img_emb @ text_emb.T)
+            sims.append(img_emb @ query_emb.T)
             paths.append(item.path)
         progress.update(len(chunk))
     progress.close()
 
     if not sims:
-        sims.append(np.empty((0, len(text_emb)), dtype=np.float32))
+        sims.append(np.empty((0, len(query_emb)), dtype=np.float32))
     return ScoreTable(paths=paths, sims=np.vstack(sims)), scan_done
 
 
@@ -1254,13 +1252,26 @@ def _parse_prompt_templates(
     parser: argparse.ArgumentParser,
     raw_templates: str,
 ) -> list[str]:
-    """Parse and validate prompt templates."""
+    """Parse prompt templates; each must place the keyword exactly once.
+
+    Checked by formatting with a marker, which also catches what a
+    substring test misses: ``{{}}`` (a literal brace pair, no keyword),
+    ``{} {}`` or ``{0}`` mixups that would only fail later in a worker.
+    """
     templates = parse_prompt_templates(raw_templates)
-    invalid_templates = [t for t in templates if "{}" not in t]
-    if invalid_templates:
-        parser.error(
-            "--ensemble-prompts templates must include '{}' placeholder"
-        )
+    if not templates:
+        parser.error("--ensemble-prompts needs at least one template")
+    marker = "\x00keyword\x00"
+    for t in templates:
+        try:
+            ok = t.format(marker).count(marker) == 1
+        except (IndexError, KeyError, ValueError):
+            ok = False
+        if not ok:
+            parser.error(
+                f"--ensemble-prompts template {t!r} must include '{{}}'"
+                " exactly once, where the keyword goes"
+            )
     return templates
 
 
