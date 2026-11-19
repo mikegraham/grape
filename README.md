@@ -34,9 +34,9 @@ laptop iGPU, indexing with the default model is ~20x faster than on the
 CPU. `-v` logs the device it picked; `GRAPE_DEVICE=cpu` forces the CPU.
 
 - **NVIDIA**: the plain `pip install` above already gets PyTorch's CUDA build.
-- **Intel (XPU)**: install PyTorch's XPU build first, plus Intel's GPU
-  runtime (on Ubuntu, `libze-intel-gpu1` from the `kobuk-team/intel-graphics`
-  PPA). `scripts/install_xpu.sh` sets up a venv this way.
+- **Intel (XPU)**: install the GPU driver and PyTorch's XPU build first
+  ([PyTorch's Intel GPU guide](https://docs.pytorch.org/docs/stable/notes/get_start_xpu.html)).
+  `scripts/install_xpu.sh` sets up a venv this way.
 
   ```
   pip install torch torchvision --index-url https://download.pytorch.org/whl/xpu
