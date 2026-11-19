@@ -27,6 +27,25 @@ pip install grape-image-search --no-deps
 pip install open-clip-torch torch Pillow pillow-heif platformdirs tqdm transformers sentencepiece
 ```
 
+### GPU
+
+grape uses a GPU when PyTorch has one: NVIDIA, AMD or Intel. On an Intel
+laptop iGPU, indexing with the default model is ~20x faster than on the
+CPU. `-v` logs the device it picked; `GRAPE_DEVICE=cpu` forces the CPU.
+
+- **NVIDIA**: the plain `pip install` above already gets PyTorch's CUDA build.
+- **Intel (XPU)**: install PyTorch's XPU build first, plus Intel's GPU
+  runtime (on Ubuntu, `libze-intel-gpu1` from the `kobuk-team/intel-graphics`
+  PPA). `scripts/install_xpu.sh` sets up a venv this way.
+
+  ```
+  pip install torch torchvision --index-url https://download.pytorch.org/whl/xpu
+  pip install grape-image-search
+  ```
+
+- **AMD (ROCm)**: install PyTorch's ROCm build first
+  ([pytorch.org](https://pytorch.org/get-started/locally/)).
+
 ## Usage
 
 Paths can be files, directories (with `-R`), or `-` to read from stdin.
@@ -142,7 +161,7 @@ detection, use a perceptual-hashing tool like
 On by default at `~/.cache/grape/embeddings.db`
 (`$XDG_CACHE_HOME/grape/embeddings.db`). Cached:
 
-- Image embeddings (the expensive part; ~80 ms per image on CPU)
+- Image embeddings (the expensive part)
 - Text embeddings, keyed by prompt
 - Model identity, so repeat runs skip the torch/open_clip import entirely
 - Image-vs-non-image detection results, so videos and docs are skipped on rescan
@@ -180,3 +199,8 @@ is embedded, then the embeddings are averaged and renormalized. The default
 set is open_clip's seven simple ImageNet templates plus "{}", which
 [Volkov et al. (2025)](https://arxiv.org/abs/2509.09311) found best for
 SigLIP 2. Override with `--ensemble-prompts`.
+
+## Known issues
+
+- `--view` can't display HEIC photos: the window's web engine doesn't
+  decode them. Paths, scores and selection still work.
