@@ -673,6 +673,11 @@ def _score_all(
         from PIL import UnidentifiedImageError
         from tqdm import tqdm
 
+        # tqdm's default lock is a multiprocessing semaphore, which our
+        # os._exit leaves behind ("leaked semaphore" warning at exit);
+        # grape uses threads, so a thread lock is enough.
+        tqdm.set_lock(threading.RLock())
+
         log.debug("score_all: encoding %d uncached images", len(uncached_items))
         progress = tqdm(
             total=len(uncached_items), desc="Encoding", file=sys.stderr,
