@@ -71,12 +71,21 @@ NEGATIVE_MATCHES = [
 
 def test_semantic_ranking(clip_model, fixtures_dir):
     """The model should rank the right image first for most queries."""
-    images = find_images(str(fixtures_dir), recursive=False)
     checks_to_run = POSITIVE_MATCHES + NEGATIVE_MATCHES
 
     # Batch once: encode images and query texts up front so we avoid
-    # repeatedly re-encoding the same images for every keyword.
-    image_embs = np.vstack([clip_model.encode_image(str(p)) for p in images])
+    # repeatedly re-encoding the same images for every keyword. The scan
+    # lists every file, so like _score_all, skip what doesn't decode.
+    images, embs = [], []
+    for p in find_images(str(fixtures_dir), recursive=False):
+        try:
+            embs.append(clip_model.encode_image(str(p)))
+        except OSError as e:
+            if e.errno is not None:
+                raise
+            continue
+        images.append(p)
+    image_embs = np.vstack(embs)
     query_texts = [query for query, _ in checks_to_run]
     query_embs = clip_model.encode_texts(query_texts)
     similarity = image_embs @ query_embs.T

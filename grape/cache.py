@@ -58,11 +58,11 @@ CREATE TABLE IF NOT EXISTS text_embeddings (
 )
 """
 
-# Metadata-only scans (image_paths) would otherwise walk the table
+# Queries on (model, path, file_stat) would otherwise walk the table
 # itself, whose pages are ~97% embedding blob -- and at >=1024 dims every
-# row spills to an overflow page. This index covers those queries so they
-# read a small b-tree instead. Column order matters: model first so
-# ``WHERE model = ?`` can seek.
+# row spills to an overflow page. This index lets them read a small
+# b-tree instead. Column order matters: model first so ``WHERE model = ?``
+# can seek.
 _CREATE_COVER_INDEX = """\
 CREATE INDEX IF NOT EXISTS idx_embeddings_cover
     ON embeddings (model, path, file_stat)
@@ -260,22 +260,6 @@ class EmbeddingCache:
                 (resolved,),
             ).fetchall()
         return any(_canonical_stat(s) == stat_key for (s,) in rows)
-
-    def image_paths(self, exclude_model: str | None = None) -> set[str]:
-        """Return paths that have an embedding under any model.
-
-        Rows of *exclude_model* are left out, for a caller that already
-        holds that model's ``EmbeddingIndex``.
-        """
-        with self._lock:
-            rows = self._conn.execute(
-                # No DISTINCT: the set comprehension below already dedups,
-                # and DISTINCT forces a temp b-tree that stops SQLite from
-                # using the covering index (48ms -> 9ms at 20k rows).
-                "SELECT path FROM embeddings WHERE model IS NOT ?",
-                (exclude_model,),
-            ).fetchall()
-        return {path for (path,) in rows}
 
     def not_image_index(self) -> set[tuple[str, str]]:
         """Return ``(path, file_stat)`` pairs known to be non-images."""

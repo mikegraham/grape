@@ -663,8 +663,7 @@ def test_stdin_and_recursive_share_cache_key_through_symlink(tmp_path):
     files recursive mode wouldn't (because they had been silently cached
     under a different key).
     """
-    from grape.cache import EmbeddingCache
-    from grape.search import is_image, iter_image_records
+    from grape.cli import _scan_files
 
     real_dir = tmp_path / "real"
     real_dir.mkdir()
@@ -677,23 +676,14 @@ def test_stdin_and_recursive_share_cache_key_through_symlink(tmp_path):
     scan_dir.mkdir()
     (scan_dir / "link").symlink_to(real_dir)
 
-    db_path = tmp_path / "cache.db"
+    # The not_images row _score_all writes uses the scan's path_key, so
+    # both routes must produce the same key for the same file.
+    via_recursive, _ = _scan_files([str(scan_dir)], True, None)
+    via_stdin, _ = _scan_files([str(scan_dir / "link" / "data.bin")], False, None)
 
-    cache = EmbeddingCache(str(db_path))
-    list(iter_image_records(str(scan_dir), recursive=True, cache=cache))
-    keys_after_recursive = cache.not_image_index()
-    cache.close()
-
-    # Mirrors the stdin path: a Path for the same file via realpath form.
-    cache = EmbeddingCache(str(db_path))
-    is_image(bad, cache=cache)
-    keys_after_stdin = cache.not_image_index()
-    cache.close()
-
-    assert keys_after_recursive == keys_after_stdin
-    assert len(keys_after_recursive) == 1
-    cached_path = next(iter(keys_after_recursive))[0]
-    assert cached_path == os.path.realpath(bad)
+    keys = {(r.path_key, r.file_stat) for r in via_recursive + via_stdin}
+    assert len(keys) == 1
+    assert next(iter(keys))[0] == os.path.realpath(bad)
 
 
 def test_print0_outputs_raw_nul_terminated_paths(tmp_path, monkeypatch):
@@ -1269,8 +1259,7 @@ def test_scan_files_includes_cache_metadata(tmp_path):
 
     # _scan_files returns its tuple directly now (no dask)
     items, done = _scan_files(
-        [str(image_path)], False, None, (None, None),
-    )
+        [str(image_path)], False, None)
 
     assert len(items) == 1
     item = items[0]
@@ -1286,56 +1275,29 @@ def test_scan_files_includes_cache_metadata(tmp_path):
     assert done.error_message is None
 
 
-def test_scan_files_trusts_loaded_index_without_opening_files(
-    tmp_path, monkeypatch,
-):
-    """image_paths() leaves out the loaded model's rows, so the index must
-    supply them, or every cached image gets opened again."""
-    from grape.cache import EmbeddingCache
+def test_scan_files_lists_files_without_opening_them(tmp_path, monkeypatch):
+    """Directories and direct paths alike: every file is a candidate, none
+    is opened; _score_all's decode decides (and records non-images)."""
     from grape.cli import _scan_files
 
     scan_dir = tmp_path / "images"
     scan_dir.mkdir()
-    image_path = scan_dir / "a.jpg"
-    Image.new("RGB", (2, 2)).save(image_path)
-
-    cache = EmbeddingCache(tmp_path / "c.db")
-    cache.put(image_path, "model-a", np.ones((1, 4), dtype=np.float32))
-    index = cache.embedding_index_for_model("model-a")
-
-    def _fail_open(*_args, **_kwargs):
-        raise AssertionError("cached image should not be opened")
-
-    monkeypatch.setattr("PIL.Image.open", _fail_open)
-    items, done = _scan_files([str(scan_dir)], True, cache, ("model-a", index))
-    cache.close()
-
-    assert [item.path for item in items] == [str(image_path)]
-    assert done.image_count == 1
-
-
-def test_scan_files_rejects_non_images_passed_directly(tmp_path):
-    """Non-image files passed as direct paths are filtered during scan.
-
-    Regression: previously _scan_files accepted any file passed directly
-    without checking _is_image, so videos/broken files showed up as
-    "uncached" and triggered an unnecessary model load.
-    """
-    from grape.cli import _scan_files
-
-    jpg = tmp_path / "real.jpg"
-    Image.new("RGB", (1, 1)).save(jpg)
+    Image.new("RGB", (2, 2)).save(scan_dir / "a.jpg")
     mp4 = tmp_path / "video.mp4"
     mp4.write_bytes(b"\x00\x00\x00\x1cftypisom")
     txt = tmp_path / "readme.txt"
     txt.write_text("not an image")
 
-    items, done = _scan_files(
-        [str(jpg), str(mp4), str(txt)], False, None, (None, None),
-    )
+    def _fail_open(*_args, **_kwargs):
+        raise AssertionError("the scan must not open files")
 
-    assert done.image_count == 1
-    assert items[0].path == str(jpg)
+    monkeypatch.setattr("PIL.Image.open", _fail_open)
+    items, done = _scan_files([str(scan_dir), str(mp4), str(txt)], True, None)
+
+    assert [item.path for item in items] == [
+        str(scan_dir / "a.jpg"), str(mp4), str(txt),
+    ]
+    assert done.image_count == 3
 
 
 # --- _format_query_summary ---
@@ -1614,8 +1576,7 @@ def test_scan_files_skips_direct_file_cached_as_not_image(tmp_path):
     cache.put_not_image(bad)
 
     items, done = _scan_files(
-        [str(jpg), str(bad)], False, cache, (None, None),
-    )
+        [str(jpg), str(bad)], False, cache)
 
     assert done.image_count == 1
     assert items[0].path == str(jpg)

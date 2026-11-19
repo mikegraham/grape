@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The scan no longer opens files: it walks the directories and `stat`s each file, like `find`. Whether a file is an image is decided when it's decoded for encoding; one that fails is skipped and remembered as not an image, so later scans leave it out. Previously every file without an embedding was fully decoded during the scan, on every run, so `--cached-only` and interrupted runs reopened the same photos again and again. The scan also no longer waits for the cache index before starting.
+
 ### Fixed
 - A truncated animated GIF/WEBP/APNG that passes the scan no longer crashes the run with Pillow's `IndexError`/`struct.error`; it is skipped and recorded as not an image like other unreadable files.
 - `-print0` now composes with `-s`/`-v` like grep's `-Z`: the path is unquoted and NUL-terminated; the score before it and the `-v` breakdown line after it are unchanged. Previously the flag was silently ignored with `-s`/`-v`.

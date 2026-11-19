@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import os
 import sys
-import warnings
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -58,61 +57,16 @@ class ScoredImage:
     score: float = 0.0
 
 
-def is_image(
-    path: str,
-    cache: EmbeddingCache | None = None,
-    *,
-    path_key: str | None = None,
-    file_stat: str | None = None,
-) -> bool:
-    """Check whether a file is a recognized, loadable image.
-
-    When a cache is provided, consults and updates it to avoid
-    re-opening files already known not to be images.
-
-    Uses ``im.load()`` to catch truncated images and video containers
-    that pass header-only checks (e.g. ``im.verify()``). Only called
-    for files grape has never seen; known paths skip this via image_paths.
-    """
-    if cache is not None and cache.is_not_image(
-        path, path_key=path_key, file_stat=file_stat
-    ):
-        return False
-    from PIL import Image
-
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(path) as im:
-                im.load()
-        return True
-    except Image.DecompressionBombWarning as e:
-        log.warning("%s: %s", path, e)
-        return True
-    except Image.DecompressionBombError as e:
-        log.warning("%s: %s", path, e)
-        return True
-    except SyntaxError:
-        # PIL raises SyntaxError for some corrupt/unrecognized formats.
-        if cache is not None:
-            cache.put_not_image(path, path_key=path_key, file_stat=file_stat)
-        return False
-    except OSError as e:
-        # PIL raises OSError with errno=None for unrecognized formats.
-        # Real filesystem errors (EACCES, ENOENT, etc.) have an errno set.
-        if e.errno is not None:
-            raise
-        if cache is not None:
-            cache.put_not_image(path, path_key=path_key, file_stat=file_stat)
-        return False
-
-
 def find_images(
     directory: str,
     recursive: bool = False,
     cache: EmbeddingCache | None = None,
 ) -> list[str]:
-    """Return sorted display paths for images under *directory*."""
+    """Return sorted display paths of candidate images under *directory*.
+
+    Candidates are all files except those the cache knows aren't images;
+    whether a file really is one is decided when it's decoded.
+    """
     return sorted(iter_images(directory, recursive=recursive, cache=cache))
 
 
@@ -140,10 +94,13 @@ def iter_image_records(
     recursive: bool = False,
     cache: EmbeddingCache | None = None,
     *,
-    image_paths: set[str] | None = None,
     not_image_hits: set[tuple[str, str]] | None = None,
 ) -> Iterator[ImageRecord]:
-    """Yield image records under *directory* with cache key metadata.
+    """Yield a record for each file under *directory* that may be an image.
+
+    Opens no files: that's ``find`` plus a ``stat`` per file. Files the
+    cache records as not images (same path and stat) are left out; any
+    other file is a candidate, and decoding it is what decides.
 
     Display paths (``record.path``) preserve the caller's input style:
     a relative *directory* yields relative paths, an absolute one yields
@@ -154,8 +111,6 @@ def iter_image_records(
     real_root = os.path.realpath(directory)
     if not os.path.isdir(real_root):
         return
-    if image_paths is None and cache is not None:
-        image_paths = cache.image_paths()
     if not_image_hits is None and cache is not None:
         not_image_hits = cache.not_image_index()
     # Track visited real directory paths to avoid infinite loops from
@@ -195,26 +150,16 @@ def iter_image_records(
                 if entry.is_symlink():
                     real_path = os.path.realpath(real_path)
                 stat_key = stat_key_from_stat(entry.stat())
-                cache_key = (real_path, stat_key)
-                # Check not-image before image-hit: a file that was
-                # once embedded but later found to be broken (truncated,
-                # video container, etc.) must stay excluded.
-                if not_image_hits is not None and cache_key in not_image_hits:
-                    continue
-                # image_paths covers all models: whether a file is an image
-                # doesn't depend on which model encoded it, so a hit under
-                # any model (or with a stale stat) skips the format check,
-                # which requires opening the file to read its header.
                 if (
-                    image_paths is not None and real_path in image_paths
-                ) or is_image(
-                    display_path, cache, path_key=real_path, file_stat=stat_key,
+                    not_image_hits is not None
+                    and (real_path, stat_key) in not_image_hits
                 ):
-                    yield ImageRecord(
-                        path=display_path,
-                        path_key=real_path,
-                        file_stat=stat_key,
-                    )
+                    continue
+                yield ImageRecord(
+                    path=display_path,
+                    path_key=real_path,
+                    file_stat=stat_key,
+                )
 
 
 def iter_images(

@@ -204,13 +204,13 @@ def _load_frames(image_path: str) -> Iterator[Image.Image]:
     each frame before the next is decoded; collecting all K first would
     hold up to 8 full-size RGB copies of a large animation.
 
-    The scan (``is_image``) only decodes frame 0, so a truncated animated
-    GIF/WEBP/APNG can pass it and then make Pillow raise ``IndexError``,
-    ``struct.error``, ``ValueError`` or ``EOFError`` from
+    The scan opens no files, so this is where any file first meets
+    Pillow. A truncated animated GIF/WEBP/APNG can make Pillow raise
+    ``IndexError``, ``struct.error``, ``ValueError`` or ``EOFError`` from
     ``n_frames``/``seek``/``convert`` here. Those are re-raised as an
     ``OSError`` with ``errno`` unset, the same shape PIL uses for an
-    unrecognized file, so ``_score_all`` skips the file like any other
-    unreadable image. Real filesystem errors (errno set) pass through.
+    unrecognized file, so ``_score_all`` skips the file and records it as
+    not an image. Real filesystem errors (errno set) pass through.
     """
     try:
         with Image.open(image_path) as image:
