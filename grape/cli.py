@@ -8,13 +8,11 @@ import os
 import shlex
 import signal
 import sys
-import tempfile
 import threading
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractContextManager, closing, nullcontext
 from dataclasses import dataclass
-from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -27,6 +25,7 @@ import numpy  # noqa: E402, F401, ICN001
 if _blas_threads is None:
     del os.environ["OPENBLAS_NUM_THREADS"]
 
+from grape import __version__  # noqa: E402
 from grape.search import (  # noqa: E402
     ImageRecord,
     ScoredImage,
@@ -1015,6 +1014,8 @@ def _show_in_webview(html_doc: str, verbose: bool = False) -> list[str]:
     # show it only with -v.
     os.environ.setdefault("PYWEBVIEW_LOG", "DEBUG" if verbose else "WARNING")
     webview = _get_webview()
+    import tempfile
+
     with tempfile.TemporaryDirectory(prefix="grape-view-") as tmpdir:
         html_path = Path(tmpdir) / "index.html"
         html_path.write_text(html_doc, encoding="utf-8")
@@ -1062,6 +1063,19 @@ def _format_query_summary(
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
+
+
+def _user_cache_dir() -> str:
+    """grape's cache directory: platformdirs' user_cache_dir("grape").
+
+    On Linux that is just $XDG_CACHE_HOME (or ~/.cache) plus "grape", and
+    importing platformdirs costs ~25 ms of a ~200 ms cached run.
+    """
+    if sys.platform.startswith("linux"):
+        base = os.environ.get("XDG_CACHE_HOME", "").strip()
+        return os.path.join(base or os.path.expanduser("~/.cache"), "grape")
+    from platformdirs import user_cache_dir
+    return user_cache_dir("grape")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -1183,8 +1197,7 @@ def _build_parser() -> argparse.ArgumentParser:
         )
 
     # -- Configuration -------------------------------------------------------
-    from platformdirs import user_cache_dir
-    default_cache = os.path.join(user_cache_dir("grape"), "embeddings.db")
+    default_cache = os.path.join(_user_cache_dir(), "embeddings.db")
     parser.add_argument(
         "--cache",
         metavar="PATH",
@@ -1234,7 +1247,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version",
         action="version",
-        version=f"%(prog)s {_pkg_version('grape-image-search')}",
+        version=f"%(prog)s {__version__}",
     )
     return parser
 

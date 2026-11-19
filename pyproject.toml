@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "grape-image-search"
-version = "0.4.0"
+dynamic = ["version"]
 description = "Find images matching keywords using CLIP. Like grep, but for images."
 readme = "README.md"
 license = "MIT"
@@ -46,6 +46,9 @@ dev = [
     "ruff>=0.4.0",
     "mypy>=1.0",
 ]
+
+[tool.setuptools.dynamic]
+version = {attr = "grape.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["grape*"]

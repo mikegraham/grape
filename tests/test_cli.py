@@ -2153,3 +2153,17 @@ def test_ensemble_prompts_rejects_template_without_exactly_one_slot(
     )
     assert code != 0
     assert "exactly once" in err
+
+
+@pytest.mark.parametrize("xdg", [None, "", "  ", "/custom/cache"])
+def test_user_cache_dir_matches_platformdirs(monkeypatch, xdg):
+    """The Linux shortcut must give exactly platformdirs' answer."""
+    from platformdirs import user_cache_dir
+
+    from grape.cli import _user_cache_dir
+
+    if xdg is None:
+        monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    else:
+        monkeypatch.setenv("XDG_CACHE_HOME", xdg)
+    assert _user_cache_dir() == user_cache_dir("grape")
