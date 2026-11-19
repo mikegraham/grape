@@ -64,8 +64,9 @@ grape -R --keywords dog --exclude cat --like my_dog.jpg ~/Pictures
 # top 5 above a threshold, with scores
 grape -R -s -n 5 -t 0.25 --keywords sunset ~/Pictures
 
-# browse results in a GUI window
-grape -R --keywords sunset --view ~/Pictures
+# browse results in a GUI window (keep -n/--top at 1000 or less: the window
+# slows down badly with more results)
+grape -R -n 200 --keywords sunset --view ~/Pictures
 
 # pick images in the window (click to select); their paths print on close
 grape -R -print0 --keywords blurry --view ~/Pictures | xargs -0 rm --
