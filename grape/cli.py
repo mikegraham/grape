@@ -684,29 +684,32 @@ def _score_all(
                 for item in chunk:
                     # tqdm.write avoids breaking the progress bar.
                     tqdm.write(item.path, file=sys.stderr)
-            # Key by the scan's stat: if the file changes mid-encode, the
-            # next run re-encodes instead of trusting a stale embedding.
-            embeddings = _get_embeddings(model, chunk, cache)
-            for item, img_emb in zip(chunk, embeddings, strict=True):
-                if isinstance(img_emb, OSError) and img_emb.errno is not None:
-                    raise img_emb
-                if isinstance(img_emb, (OSError, SyntaxError)):
-                    # Files that aren't images at all (videos, sidecars,
-                    # documents) are normal in a photo folder: -v only.
-                    if isinstance(img_emb, UnidentifiedImageError):
-                        log.debug("not an image: %s", item.path)
-                    elif not quiet:
-                        print(f"  skipping {item.path}: {img_emb}", file=sys.stderr)
-                    # Record as not-image so future scans skip this file.
-                    if cache is not None:
-                        cache.put_not_image(
-                            item.path,
-                            path_key=item.path_key,
-                            file_stat=item.file_stat,
-                        )
-                    continue
-                sims.append(img_emb @ query_emb.T)
-                paths.append(item.path)
+            # One commit per batch, not per row: each is a disk sync (~1 ms).
+            # Ctrl-C hard-exits, so it loses at most this batch's writes.
+            with cache.deferred_commits() if cache is not None else nullcontext():
+                # Key by the scan's stat: if the file changes mid-encode, the
+                # next run re-encodes instead of trusting a stale embedding.
+                embeddings = _get_embeddings(model, chunk, cache)
+                for item, img_emb in zip(chunk, embeddings, strict=True):
+                    if isinstance(img_emb, OSError) and img_emb.errno is not None:
+                        raise img_emb
+                    if isinstance(img_emb, (OSError, SyntaxError)):
+                        # Files that aren't images at all (videos, sidecars,
+                        # documents) are normal in a photo folder: -v only.
+                        if isinstance(img_emb, UnidentifiedImageError):
+                            log.debug("not an image: %s", item.path)
+                        elif not quiet:
+                            print(f"  skipping {item.path}: {img_emb}", file=sys.stderr)
+                        # Record as not-image so future scans skip this file.
+                        if cache is not None:
+                            cache.put_not_image(
+                                item.path,
+                                path_key=item.path_key,
+                                file_stat=item.file_stat,
+                            )
+                        continue
+                    sims.append(img_emb @ query_emb.T)
+                    paths.append(item.path)
             progress.update(len(chunk))
         progress.close()
 

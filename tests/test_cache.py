@@ -419,3 +419,34 @@ def test_logs_cache_file_creation(tmp_path, caplog):
         (logging.INFO, f"cache file not found, creating {db}"),
         (logging.DEBUG, f"using cache file {db}"),
     ]
+
+
+def test_deferred_commits_batches_writes(tmp_path):
+    """Inside deferred_commits() embedding and not-image rows stay
+    uncommitted (invisible to another connection) until the outermost
+    context exits."""
+    import sqlite3
+
+    db = tmp_path / "c.db"
+    cache = EmbeddingCache(db)
+    other = sqlite3.connect(db)
+
+    def committed():
+        return tuple(
+            other.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("embeddings", "not_images")
+        )
+
+    with cache.deferred_commits():
+        with cache.deferred_commits():
+            for i in range(3):
+                cache.put(f"/x/{i}.jpg", "m", _rand_embedding(i),
+                          path_key=f"/x/{i}.jpg", file_stat="s")
+                cache.put_not_image(f"/x/{i}", path_key=f"/x/{i}", file_stat="s")
+        assert committed() == (0, 0), "inner exit must not commit"
+    assert committed() == (3, 3)
+
+    cache.put_not_image("/x/9", path_key="/x/9", file_stat="s")
+    assert committed() == (3, 4), "outside the context each write commits"
+    other.close()
+    cache.close()
