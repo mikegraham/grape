@@ -276,6 +276,24 @@ class CLIPModel:
             return e
 
 
+def _register_heif() -> None:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+
+
+# HEIC/HEIF (iPhone photos) isn't built into Pillow, and pillow_heif takes
+# ~80 ms to import: a background thread, started alongside the weight read
+# (preload_weights) or else by the first decode.
+_heif_thread = threading.Thread(target=_register_heif, daemon=True)
+_heif_lock = threading.Lock()
+
+
+def start_heif_registration() -> None:
+    with _heif_lock:
+        if _heif_thread.ident is None:
+            _heif_thread.start()
+
+
 def _load_frames(image_path: str) -> Iterator[Image.Image]:
     """Open an image and yield its uniformly-sampled frames as RGB.
 
@@ -292,6 +310,8 @@ def _load_frames(image_path: str) -> Iterator[Image.Image]:
     unrecognized file, so ``_score_all`` skips the file and records it as
     not an image. Real filesystem errors (errno set) pass through.
     """
+    start_heif_registration()
+    _heif_thread.join()
     try:
         with Image.open(image_path) as image:
             n_frames = getattr(image, "n_frames", 1)
@@ -776,6 +796,7 @@ def preload_weights(model_name: str, pretrained: str) -> None:
 
     _preload_thread = threading.Thread(target=_load, daemon=True)
     _preload_thread.start()
+    start_heif_registration()
 
 
 def _preload_tokenizer(open_clip: Any, model_name: str) -> None:

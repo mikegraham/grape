@@ -496,3 +496,20 @@ def test_preloaded_weights_go_only_to_the_model_they_were_read_for(monkeypatch):
 
     preloaded("ViT-X", "laion")
     assert gm._take_preloaded_state_dict("ViT-X", "laion") == {"w": 1}
+
+
+def test_load_frames_decodes_heic(tmp_path):
+    """iPhone photos: HEIC decodes through grape's path (pillow-heif)."""
+    from PIL import Image
+
+    from grape.model import _load_frames
+
+    path = tmp_path / "photo.heic"
+    Image.new("RGB", (64, 48), (200, 80, 40)).save(path, format="HEIF", quality=95)
+
+    frames = list(_load_frames(str(path)))
+
+    assert len(frames) == 1
+    assert frames[0].mode == "RGB" and frames[0].size == (64, 48)
+    pixel = frames[0].getpixel((32, 24))
+    assert all(abs(a - b) <= 8 for a, b in zip(pixel, (200, 80, 40)))

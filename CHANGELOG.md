@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- HEIC/HEIF photos (iPhone) are searchable, via the new `pillow-heif` dependency.
+
 - `--view` lets you select images: click an image (or its checkbox) to select it, and when you close the window grape prints the selected paths: shell-quoted and space-separated on one line, ready to paste as arguments, or raw and NUL-terminated with `-print0`. Pipe them to `rm`, `cp`, a file, or anything else. `--view` and `-print0` can now be combined.
 - `--cached-only`: score only images that already have a cached embedding and skip the rest, so the model is never loaded to encode images. Can't be combined with `--no-cache`.
 - `-v` prints every thread's stack trace on Ctrl-C, so a hung run shows where it is stuck.
