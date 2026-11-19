@@ -11,7 +11,8 @@ import logging
 import os
 import sqlite3
 import threading
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from itertools import chain
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
@@ -157,6 +158,9 @@ class EmbeddingCache:
 
     def __init__(self, db_path: str | Path) -> None:
         self._lock = threading.RLock()
+        # >0 while inside deferred_commits(): put and put_not_image skip
+        # their per-row commit and the context commits once on exit.
+        self._defer_commits = 0
         if os.path.exists(db_path):
             log.debug("using cache file %s", db_path)
         else:
@@ -295,7 +299,8 @@ class EmbeddingCache:
                 (resolved, stat_key,
                  model_id, embedding.tobytes()),
             )
-            self._conn.commit()
+            if not self._defer_commits:
+                self._conn.commit()
 
     def put_many(
         self,
@@ -357,7 +362,27 @@ class EmbeddingCache:
                 " VALUES (?, ?)",
                 (resolved, stat_key),
             )
-            self._conn.commit()
+            if not self._defer_commits:
+                self._conn.commit()
+
+    @contextmanager
+    def deferred_commits(self) -> Iterator[None]:
+        """Batch put() and put_not_image() writes into one commit.
+
+        Each commit is a disk sync (~1 ms), which adds up when a first
+        run records thousands of new embeddings and non-image files.
+        Other writes still commit as usual, which just flushes the batch
+        early. Nestable; the outermost exit commits.
+        """
+        with self._lock:
+            self._defer_commits += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._defer_commits -= 1
+                if not self._defer_commits:
+                    self._conn.commit()
 
     def get_text_embeddings(
         self,

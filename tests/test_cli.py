@@ -4,6 +4,7 @@ import os
 import re
 import shlex
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -1403,6 +1404,8 @@ def test_score_all_skips_syntax_error():
             pass
         def put_not_image(self, path, *, path_key=None, file_stat=None):
             self.not_images.append(str(path))
+        def deferred_commits(self):
+            return nullcontext()
 
     items = [
         ImageRecord(
@@ -1961,6 +1964,8 @@ def test_score_all_encode_reuses_scan_stat():
             return None
         def put(self, path, model_id, emb, *, path_key=None, file_stat=None):
             self.calls.append(("put", path, path_key, file_stat))
+        def deferred_commits(self):
+            return nullcontext()
 
     items = [
         ImageRecord(path="link.png", path_key="/real/a.png", file_stat="stat-a"),
@@ -2194,6 +2199,9 @@ def test_score_all_mentions_broken_images_but_not_non_images(capsys):
 
         def put_not_image(self, path, **k):
             self.not_images.append(path)
+
+        def deferred_commits(self):
+            return nullcontext()
 
     items = [
         ImageRecord(path=p, path_key=p, file_stat="s")
