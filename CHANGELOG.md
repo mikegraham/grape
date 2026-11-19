@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `scripts/install_xpu.sh`: sets up a venv with PyTorch's Intel XPU build and an editable grape, pinned so pip can't swap in the CUDA build (several GB of NVIDIA wheels). Can install torch offline from a folder of wheels.
 
 ### Changed
+- Encoding no longer copies each still RGB image before preprocessing (`convert("RGB")` on an image that is already RGB copies it: ~40 ms for a 12 MP photo, about 15% of its preprocessing). Same pixels, same embeddings.
 - Default `--ensemble-prompts` is now open_clip's seven simple ImageNet templates plus the bare keyword (was three "a photo of ..." variants). About +1.6 ImageNet zero-shot accuracy on SigLIP 2. Keyword embeddings are re-encoded on first use; image embeddings are unaffected.
 - The scan no longer opens files: it walks the directories and `stat`s each file, like `find`. Whether a file is an image is decided when it's decoded for encoding; one that fails is skipped and remembered as not an image, so later scans leave it out. Previously every file without an embedding was fully decoded during the scan, on every run, so `--cached-only` and interrupted runs reopened the same photos again and again. The scan also no longer waits for the cache index before starting.
 - `-v` log lines start with the date and time, to the millisecond (`2026-11-19 14:03:27.512 grape: ...`), to make slow phases easy to spot.

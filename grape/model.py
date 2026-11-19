@@ -321,7 +321,15 @@ def _load_frames(image_path: str) -> Iterator[Image.Image]:
             indices = [round(i * (n_frames - 1) / divisor) for i in range(k)]
             for idx in indices:
                 image.seek(idx)
-                yield image.convert("RGB")
+                if n_frames == 1 and image.mode == "RGB":
+                    # convert() would return a full copy (~40 ms for a
+                    # 12 MP photo). Animations still copy: seek() reuses
+                    # this object for every frame. load() here, not in the
+                    # caller, so decode errors pass through the except below.
+                    image.load()
+                    yield image
+                else:
+                    yield image.convert("RGB")
     except (IndexError, ValueError, EOFError, struct.error) as e:
         raise OSError(f"cannot decode image file {image_path!r}: {e}") from e
 

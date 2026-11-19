@@ -513,3 +513,111 @@ def test_load_frames_decodes_heic(tmp_path):
     assert frames[0].mode == "RGB" and frames[0].size == (64, 48)
     pixel = frames[0].getpixel((32, 24))
     assert all(abs(a - b) <= 8 for a, b in zip(pixel, (200, 80, 40)))
+
+
+# --- formats and color modes ---------------------------------------------
+
+_COLOR = (200, 80, 40)
+
+
+def _format_cases():
+    """(filename, Pillow mode to save from, save kwargs, exact_color)."""
+    from PIL import features
+
+    cases = [
+        ("baseline.jpg", "RGB", {"quality": 95}, False),
+        ("progressive.jpg", "RGB", {"quality": 95, "progressive": True}, False),
+        ("gray.jpg", "L", {"quality": 95}, False),
+        ("cmyk.jpg", "CMYK", {"quality": 95}, False),
+        ("rgb.png", "RGB", {}, True),
+        ("rgba.png", "RGBA", {}, True),
+        ("palette.png", "P", {}, False),
+        ("gray.png", "L", {}, False),
+        ("gray16.png", "I;16", {}, False),
+        ("static.gif", "P", {}, False),
+        ("lossy.webp", "RGB", {"quality": 90}, False),
+        ("lossless.webp", "RGB", {"lossless": True}, True),
+        ("alpha.webp", "RGBA", {"lossless": True}, True),
+        ("rgb.tif", "RGB", {}, True),
+        ("rgb.bmp", "RGB", {}, True),
+        ("rgb.jp2", "RGB", {}, False),
+    ]
+    if features.check("avif"):
+        cases.append(("rgb.avif", "RGB", {"quality": 90}, False))
+    return cases
+
+
+def _write_format_case(path, mode, kwargs):
+    from PIL import Image
+
+    img = Image.new("RGB", (64, 48), _COLOR)
+    img = img.convert("L").convert("I;16") if mode == "I;16" else img.convert(mode)
+    img.save(path, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "name,mode,kwargs,exact", _format_cases(), ids=[c[0] for c in _format_cases()],
+)
+def test_load_frames_handles_format(tmp_path, name, mode, kwargs, exact):
+    """Every format/mode grape may meet decodes to one RGB frame at full
+    size; formats that keep color exactly return the same color."""
+    from grape.model import _load_frames
+
+    path = tmp_path / name
+    _write_format_case(path, mode, kwargs)
+
+    frames = list(_load_frames(str(path)))
+
+    assert len(frames) == 1
+    assert frames[0].mode == "RGB"
+    assert frames[0].size == (64, 48)
+    pixel = frames[0].getpixel((32, 24))
+    if exact:
+        assert pixel == _COLOR
+    elif mode == "RGB":  # lossy: close to the original color
+        assert all(abs(a - b) <= 12 for a, b in zip(pixel, _COLOR)), pixel
+
+
+@pytest.mark.parametrize("name,kwargs", [
+    ("anim.gif", {"duration": 100, "loop": 0}),
+    ("anim.webp", {"duration": 100, "loop": 0, "lossless": True}),
+    ("anim.png", {"duration": 100, "loop": 0}),
+])
+def test_load_frames_handles_animated_format(tmp_path, name, kwargs):
+    """Animated GIF/WEBP/APNG: one independent RGB frame per sampled frame
+    (the frames must not alias the reused seek() object)."""
+    from PIL import Image
+
+    from grape.model import _load_frames
+
+    colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
+    imgs = [Image.new("RGB", (32, 32), c) for c in colors]
+    path = tmp_path / name
+    imgs[0].save(path, save_all=True, append_images=imgs[1:], **kwargs)
+
+    frames = list(_load_frames(str(path)))
+
+    assert len(frames) == 3
+    assert all(f.mode == "RGB" for f in frames)
+    got = [f.getpixel((16, 16)) for f in frames]
+    for g, want in zip(got, colors):
+        assert all(abs(a - b) <= 8 for a, b in zip(g, want)), got
+
+
+def test_load_frames_skips_copy_for_single_frame_rgb(tmp_path, monkeypatch):
+    """An RGB still is yielded as-is: convert() would copy it (~40 ms for
+    a 12 MP photo) for an identical result."""
+    from PIL import Image
+
+    from grape.model import _load_frames
+
+    path = tmp_path / "rgb.jpg"
+    Image.new("RGB", (16, 16), _COLOR).save(path)
+    calls = []
+    monkeypatch.setattr(
+        Image.Image, "convert",
+        lambda self, *a, **k: calls.append(a) or Image.Image.copy(self),
+    )
+    frames = list(_load_frames(str(path)))
+    assert len(frames) == 1 and frames[0].mode == "RGB"
+    assert calls == []
