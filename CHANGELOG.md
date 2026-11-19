@@ -9,26 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `--cached-only`: score only images that already have a cached embedding and skip the rest, so the model is never loaded to encode images. Can't be combined with `--no-cache`.
+- `-v` prints every thread's stack trace on Ctrl-C, so a hung run shows where it is stuck.
+- GPU acceleration: grape runs on an Intel GPU (XPU) or NVIDIA/AMD GPU (CUDA/ROCm) when the installed PyTorch supports it, with fp16 matmuls and batched encoding. About 16x faster indexing than CPU for the default model on an Intel Xe3 iGPU. `GRAPE_DEVICE=cpu` (or any torch device name) overrides the choice; `-v` logs it. Needs a PyTorch build for your GPU: plain `pip install` gets the CUDA build.
+- `scripts/install_xpu.sh`: sets up a venv with PyTorch's Intel XPU build and an editable grape, pinned so pip can't swap in the CUDA build (several GB of NVIDIA wheels). Can install torch offline from a folder of wheels.
 
 ### Changed
 - Default `--ensemble-prompts` is now open_clip's seven simple ImageNet templates plus the bare keyword (was three "a photo of ..." variants). About +1.6 ImageNet zero-shot accuracy on SigLIP 2. Keyword embeddings are re-encoded on first use; image embeddings are unaffected.
-
-### Added
-- `-v` prints every thread's stack trace on Ctrl-C, so a hung run shows where it is stuck.
-
-### Changed
 - The scan no longer opens files: it walks the directories and `stat`s each file, like `find`. Whether a file is an image is decided when it's decoded for encoding; one that fails is skipped and remembered as not an image, so later scans leave it out. Previously every file without an embedding was fully decoded during the scan, on every run, so `--cached-only` and interrupted runs reopened the same photos again and again. The scan also no longer waits for the cache index before starting.
-
 - `-v` log lines start with the date and time, to the millisecond (`2026-11-19 14:03:27.512 grape: ...`), to make slow phases easy to spot.
 
 ### Fixed
 - Normal (non-`-v`) runs no longer print other libraries' INFO messages, such as open_clip 4.x's "Parsing model identifier ..." and Hugging Face's HTTP request lines. grape's own messages and all warnings still show.
-
-### Added
-- GPU acceleration: grape runs on an Intel GPU (XPU) or NVIDIA/AMD GPU (CUDA/ROCm) when the installed PyTorch supports it, with fp16 matmuls and batched encoding. About 16x faster indexing than CPU for the default model on an Intel Xe3 iGPU. `GRAPE_DEVICE=cpu` (or any torch device name) overrides the choice; `-v` logs it. Needs a PyTorch build for your GPU: plain `pip install` gets the CUDA build.
-- `scripts/install_xpu.sh`: sets up a venv with PyTorch's Intel XPU build and an editable grape, pinned so pip can't swap in the CUDA build (several GB of NVIDIA wheels). Can install torch offline from a folder of wheels.
-
-### Fixed
 - With open_clip 4.x, loading the model no longer prints a misleading "No pretrained weights loaded ... Model initialized randomly" warning. The weights are loaded right after; grape already hid this message for open_clip 3.x, but 4.x logs it under a different logger.
 - Works with open_clip 4.x. Its new `mammut_model` imports names from `coca_model` that grape's startup stub doesn't provide, so every run that loaded open_clip failed with `ImportError: cannot import name 'MultimodalCfg'`. grape now falls back to a normal open_clip import when the stubbed one fails (startup is a few seconds slower on those runs).
 - A truncated animated GIF/WEBP/APNG that passes the scan no longer crashes the run with Pillow's `IndexError`/`struct.error`; it is skipped and recorded as not an image like other unreadable files.
