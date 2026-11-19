@@ -113,7 +113,7 @@ _HTML_TEMPLATE_TEXT = """
     {% if row.resolution %}<span class="res">{{ row.resolution }}</span>{% endif %}
   </p>
   <p class="meta scoreline" title="{{ row.score_line }}">{{ row.score_line }}</p>
-  <img src="{{ row.image_src }}" alt="{{ row.path_text }}">
+  <img src="{{ row.image_src }}" alt="{{ row.path_text }}" loading="lazy">
   </div>
   {% endfor %}
   <script>
