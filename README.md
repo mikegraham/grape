@@ -64,8 +64,7 @@ grape -R --keywords dog --exclude cat --like my_dog.jpg ~/Pictures
 # top 5 above a threshold, with scores
 grape -R -s -n 5 -t 0.25 --keywords sunset ~/Pictures
 
-# browse results in a GUI window (keep -n/--top at 1000 or less: the window
-# slows down badly with more results)
+# browse results in a GUI window
 grape -R -n 200 --keywords sunset --view ~/Pictures
 
 # pick images in the window (click to select); their paths print on close
@@ -91,6 +90,10 @@ grape -R --keywords 'golden gate bridge' -n 1 ~/Pictures | xargs open
 # interactive selection with fzf
 grape -R --keywords dog ~/Pictures | fzf --preview 'chafa {}'
 ```
+
+> [!NOTE]
+> When using `--view`, keep `-n` at 1000 or less: the window gets slow
+> with too many results.
 
 Run `grape --help` for the full flag list.
 
