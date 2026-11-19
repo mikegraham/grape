@@ -586,7 +586,7 @@ def _scan_files(
         error_message = f"grape: {p}: No such file or directory"
         break
 
-    log.debug("scan_files: %d images found", len(items))
+    log.debug("scan_files: %d candidate files", len(items))
     return items, ScanReport(
         image_count=len(items), error_message=error_message,
     )
