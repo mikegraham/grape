@@ -382,3 +382,27 @@ def test_fast_tokenizer_matches_hf_tokenizer_for_default_model():
         snapshot, ctx, text_cfg["tokenizer_kwargs"]["clean"],
     )
     assert torch.equal(fast(texts), ref(texts))
+
+
+def test_encode_images_every_format(clip_model, tmp_path):
+    """Every format/mode from the unit tests, plus animations, encodes in
+    one batch to a unit-norm embedding (no per-file errors)."""
+    from PIL import Image
+    from test_model_unit import _format_cases, _write_format_case
+
+    paths = []
+    for name, mode, kwargs, _exact in _format_cases():
+        _write_format_case(tmp_path / name, mode, kwargs)
+        paths.append(str(tmp_path / name))
+    imgs = [Image.new("RGB", (32, 32), c) for c in ((255, 0, 0), (0, 0, 255))]
+    for name in ("anim.gif", "anim.webp", "anim.png"):
+        imgs[0].save(tmp_path / name, save_all=True, append_images=imgs[1:])
+        paths.append(str(tmp_path / name))
+
+    results = clip_model.encode_images(paths)
+
+    assert len(results) == len(paths)
+    for path, emb in zip(paths, results):
+        assert isinstance(emb, np.ndarray), (path, emb)
+        assert emb.shape == (1, results[0].shape[1])
+        assert abs(float(np.linalg.norm(emb)) - 1.0) < 1e-3, path
