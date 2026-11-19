@@ -697,14 +697,20 @@ def _score_all(
                 embeddings = _get_embeddings(model, chunk, cache)
                 for item, img_emb in zip(chunk, embeddings, strict=True):
                     if isinstance(img_emb, OSError) and img_emb.errno is not None:
-                        raise img_emb
+                        # Unreadable (permissions, deleted mid-run): skip it
+                        # but don't record it, so a later run tries again.
+                        if not quiet:
+                            tqdm.write(f"grape: {item.path}: {_os_reason(img_emb)}",
+                                       file=sys.stderr)
+                        continue
                     if isinstance(img_emb, (OSError, SyntaxError)):
                         # Files that aren't images at all (videos, sidecars,
                         # documents) are normal in a photo folder: -v only.
                         if isinstance(img_emb, UnidentifiedImageError):
                             log.debug("not an image: %s", item.path)
                         elif not quiet:
-                            print(f"  skipping {item.path}: {img_emb}", file=sys.stderr)
+                            tqdm.write(f"  skipping {item.path}: {img_emb}",
+                                       file=sys.stderr)
                         # Record as not-image so future scans skip this file.
                         if cache is not None:
                             cache.put_not_image(

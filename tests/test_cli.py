@@ -1471,8 +1471,8 @@ def test_score_all_skips_oserror_no_errno():
     assert table.sims.shape == (0, 1)
 
 
-def test_score_all_propagates_real_oserror():
-    """OSError with an errno (e.g. ENOENT) must not be swallowed."""
+def test_score_all_skips_unreadable_file_without_caching(capsys):
+    """An unreadable file (errno set) is reported and skipped, not cached."""
     import errno
 
     from grape.cli import (
@@ -1485,9 +1485,21 @@ def test_score_all_propagates_real_oserror():
         def model_id(self):
             return "test-model"
         def encode_image(self, path):
-            raise FileNotFoundError(
-                errno.ENOENT, "No such file", str(path),
+            raise PermissionError(
+                errno.EACCES, "Permission denied", str(path),
             )
+
+    class _RecordingCache:
+        def __init__(self):
+            self.not_images: list[str] = []
+        def deferred_commits(self):
+            return nullcontext()
+        def get(self, *args, **kwargs):
+            return None
+        def put(self, *args, **kwargs):
+            pass
+        def put_not_image(self, path, **kwargs):
+            self.not_images.append(path)
 
     items = [
         ImageRecord(
@@ -1504,11 +1516,14 @@ def test_score_all_propagates_real_oserror():
         scan_result, cache_context,
     )
 
-    with pytest.raises(FileNotFoundError):
-        _score_all(
-            prepared, _RaisingModel(), text_emb,
-            None, True, False,
-        )
+    cache = _RecordingCache()
+    table, _ = _score_all(
+        prepared, _RaisingModel(), text_emb,
+        cache, False, False,
+    )
+    assert table.paths == []
+    assert cache.not_images == []
+    assert "grape: /tmp/gone.jpg: Permission denied" in capsys.readouterr().err
 
 
 def test_score_all_verbose_prints_uncached_paths(capsys):
