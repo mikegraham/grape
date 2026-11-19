@@ -94,7 +94,7 @@ Results are listed best match first.
   ```
 
 > [!NOTE]
-> When using `--view`, keep `-n` at 1000 or less: the window gets slow
+> When using `--view`, keep `-n` at 500 or less: the window gets slow
 > with too many results.
 
 ## Using grape with other commands
