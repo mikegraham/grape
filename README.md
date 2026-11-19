@@ -24,7 +24,7 @@ For a headless install without the `--view` GUI deps:
 
 ```
 pip install grape-image-search --no-deps
-pip install open-clip-torch torch Pillow platformdirs tqdm transformers sentencepiece
+pip install open-clip-torch torch Pillow pillow-heif platformdirs tqdm transformers sentencepiece
 ```
 
 ## Usage
