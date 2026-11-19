@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `--view` lets you select images: click an image (or its checkbox) to select it, and when you close the window grape prints the selected paths, in the same format as normal output (shell-quoted lines, or raw with `-print0`). Pipe them to `rm`, `cp`, a file, or anything else. `--view` and `-print0` can now be combined.
+
 ### Fixed
 - A truncated animated GIF/WEBP/APNG that passes the scan no longer crashes the run with Pillow's `IndexError`/`struct.error`; it is skipped and recorded as not an image like other unreadable files.
 - `-print0` now composes with `-s`/`-v` like grep's `-Z`: the path is unquoted and NUL-terminated; the score before it and the `-v` breakdown line after it are unchanged. Previously the flag was silently ignored with `-s`/`-v`.

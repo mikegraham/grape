@@ -85,18 +85,40 @@ _HTML_TEMPLATE_TEXT = """
     }
     /* max-height: 100vh: never taller than one viewport. */
     img { display: block; max-width: 100%; max-height: 100vh; margin-bottom: 16px; }
+    /* Click an image (or its checkbox) to select it; grape prints the
+       selected paths when the window closes. */
+    .result img { cursor: pointer; }
+    .result.selected img { outline: 4px solid #2a7ae2; outline-offset: -4px; }
+    .pick { margin: 0; }
   </style>
 </head>
 <body>
   <p class="meta">{{ count }} image(s) for {{ keywords }}</p>
   {% for row in rows %}
+  <div class="result" data-path="{{ row.path_text }}">
   <p class="meta path-line">
+    <input type="checkbox" class="pick" aria-label="select">
     <span class="path" title="{{ row.path_text }}">{{ row.path_text }}</span>
     {% if row.resolution %}<span class="res">{{ row.resolution }}</span>{% endif %}
   </p>
   <p class="meta scoreline" title="{{ row.score_line }}">{{ row.score_line }}</p>
   <img src="{{ row.image_src }}" alt="{{ row.path_text }}">
+  </div>
   {% endfor %}
+  <script>
+    // Click an image or its checkbox to (de)select it. The selection is
+    // sent to grape (window.pywebview.api), which prints it on close.
+    document.addEventListener("click", (e) => {
+      const result = e.target.closest(".result");
+      if (!result || !e.target.matches("img, .pick")) return;
+      const box = result.querySelector(".pick");
+      if (e.target.tagName === "IMG") box.checked = !box.checked;
+      result.classList.toggle("selected", box.checked);
+      const paths = [...document.querySelectorAll(".result.selected")]
+        .map((r) => r.dataset.path);
+      if (window.pywebview) window.pywebview.api.set_selected(paths);
+    });
+  </script>
 </body>
 </html>
 """.strip()
@@ -791,7 +813,8 @@ def _emit(
             ranking, keywords, exclude_keywords, like_paths,
         )
         html_doc = _format_html(results, display_keywords)
-        _show_in_webview(html_doc)
+        for path in _show_in_webview(html_doc):
+            sys.stdout.write(_path_record(path, print0))
         return len(results)
     if show_scores:
         results = _scored_images(
@@ -962,8 +985,23 @@ def _format_html(
     return result
 
 
-def _show_in_webview(html_doc: str) -> None:
-    """Display HTML in a native webview window."""
+class _SelectionApi:
+    """Exposed to the --view page as ``window.pywebview.api``."""
+
+    def __init__(self) -> None:
+        self._paths: list[str] = []
+
+    def set_selected(self, paths: list[str]) -> None:
+        self._paths = list(paths)
+
+
+def _show_in_webview(html_doc: str) -> list[str]:
+    """Display HTML in a native webview window; return the selected paths.
+
+    Blocks until the window is closed. The page reports its selection
+    (clicked images) to a _SelectionApi as it changes.
+    """
+    api = _SelectionApi()
     webview = _get_webview()
     with tempfile.TemporaryDirectory(prefix="grape-view-") as tmpdir:
         html_path = Path(tmpdir) / "index.html"
@@ -982,8 +1020,10 @@ def _show_in_webview(html_doc: str) -> None:
             text_select=True,
             zoomable=True,
             min_size=(480, 320),
+            js_api=api,
         )
         webview.start(debug=True)
+    return api._paths
 
 
 def _format_query_summary(
@@ -1109,23 +1149,24 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="suppress progress messages on stderr",
     )
-    output_group = parser.add_mutually_exclusive_group()
-    output_group.add_argument(
+    parser.add_argument(
         "-print0",
         action="store_true",
         help="NUL after each path instead of newline; paths unquoted"
-             " (works with -s/-v like grep -Z)",
+             " (works with -s/-v like grep -Z, and with --view)",
     )
     _has_view_deps = (
         importlib.util.find_spec("webview") is not None
         and importlib.util.find_spec("jinja2") is not None
     )
     if _has_view_deps:
-        output_group.add_argument(
+        parser.add_argument(
             "--view",
             action="store_true",
             help="open results in a graphical window"
-                 " (HTML grid with thumbnails)",
+                 " (HTML grid with thumbnails); click images to select"
+                 " them, and their paths are printed when the window"
+                 " closes",
         )
 
     # -- Configuration -------------------------------------------------------
