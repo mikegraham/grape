@@ -439,8 +439,8 @@ def test_cached_run_draws_no_progress_bar(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("print0", [False, True])
 def test_view_prints_selected_paths_on_close(tmp_path, monkeypatch, print0):
-    """--view prints the images clicked in the window, in the same format
-    as normal results: shell-quoted lines, or raw with -print0."""
+    """--view prints the images clicked in the window: shell-quoted words
+    on one line, ready to paste as arguments, or raw with -print0."""
     image_path = tmp_path / "my photo.jpg"
     Image.new("RGB", (1, 1)).save(image_path)
     _stub_pipeline(monkeypatch)
@@ -452,7 +452,7 @@ def test_view_prints_selected_paths_on_close(tmp_path, monkeypatch, print0):
     if print0:
         assert out == f"{image_path}\0it's.jpg\0"
     else:
-        assert out == f"{shlex.quote(str(image_path))}\n'it'\"'\"'s.jpg'\n"
+        assert out == f"{shlex.quote(str(image_path))} 'it'\"'\"'s.jpg'\n"
 
 
 def test_module_entry_point_flushes_before_fast_exit(tmp_path):

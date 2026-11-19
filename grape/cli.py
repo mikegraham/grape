@@ -813,8 +813,12 @@ def _emit(
             ranking, keywords, exclude_keywords, like_paths,
         )
         html_doc = _format_html(results, display_keywords)
-        for path in _show_in_webview(html_doc):
-            sys.stdout.write(_path_record(path, print0))
+        selected = _show_in_webview(html_doc)
+        if print0:
+            sys.stdout.write("".join(f"{path}\0" for path in selected))
+        elif selected:
+            # One line of shell-quoted words, to paste as arguments.
+            sys.stdout.write(" ".join(shlex.quote(p) for p in selected) + "\n")
         return len(results)
     if show_scores:
         results = _scored_images(
@@ -1166,7 +1170,8 @@ def _build_parser() -> argparse.ArgumentParser:
             help="open results in a graphical window"
                  " (HTML grid with thumbnails); click images to select"
                  " them, and their paths are printed when the window"
-                 " closes",
+                 " closes, shell-quoted on one line (NUL-terminated with"
+                 " -print0)",
         )
 
     # -- Configuration -------------------------------------------------------
