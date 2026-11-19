@@ -446,7 +446,7 @@ def test_view_prints_selected_paths_on_close(tmp_path, monkeypatch, print0):
     Image.new("RGB", (1, 1)).save(image_path)
     _stub_pipeline(monkeypatch)
     selected = [str(image_path), "it's.jpg"]
-    monkeypatch.setattr("grape.cli._show_in_webview", lambda _html: selected)
+    monkeypatch.setattr("grape.cli._show_in_webview", lambda _html, **_: selected)
     args = ["-q", "--view", "-k", "dog", str(image_path)]
     out, _, code = run_main(args + (["-print0"] if print0 else []), monkeypatch)
     assert code == 0
@@ -1087,7 +1087,7 @@ def test_view_calls_webview_with_html(tmp_path, monkeypatch):
     _stub_pipeline(monkeypatch)
     captured: list[str] = []
 
-    def _show(html_doc):
+    def _show(html_doc, **_):
         captured.append(html_doc)
         return []  # nothing selected
 
