@@ -2142,3 +2142,14 @@ def test_format_html_marks_each_result_selectable(tmp_path):
     assert html_doc.count('class="pick"') == 1
     assert f'data-path="{str(image_path).replace(chr(34), "&#34;")}"' in html_doc
     assert "window.pywebview.api.set_selected" in html_doc
+
+
+@pytest.mark.parametrize("template", ["bad template", "{{}}", "{} and {}", "{0}{1}"])
+def test_ensemble_prompts_rejects_template_without_exactly_one_slot(
+    monkeypatch, template,
+):
+    _, err, code = run_main(
+        ["--ensemble-prompts", template, "-k", "dog", "x.jpg"], monkeypatch,
+    )
+    assert code != 0
+    assert "exactly once" in err

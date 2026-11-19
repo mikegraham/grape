@@ -472,3 +472,27 @@ def test_load_frames_rejects_truncated_jpeg(fixtures_dir):
     with pytest.raises(OSError) as info:
         list(_load_frames(str(fixtures_dir / "truncated.jpg")))
     assert info.value.errno is None
+
+
+def test_preloaded_weights_go_only_to_the_model_they_were_read_for(monkeypatch):
+    """Two checkpoints of one architecture both pass load_state_dict(strict=
+    True), so a preload for another model must never be handed over."""
+    import threading
+
+    import grape.model as gm
+
+    def preloaded(model_name, pretrained):
+        done = threading.Thread(target=lambda: None)
+        done.start()
+        done.join()
+        monkeypatch.setattr(gm, "_preload_thread", done)
+        monkeypatch.setattr(
+            gm, "_preloaded_state_dict", ((model_name, pretrained), {"w": 1}),
+        )
+
+    preloaded("ViT-X", "laion")
+    assert gm._take_preloaded_state_dict("ViT-X", "openai") is None
+    assert gm._preloaded_state_dict is None, "a mismatched preload is dropped"
+
+    preloaded("ViT-X", "laion")
+    assert gm._take_preloaded_state_dict("ViT-X", "laion") == {"w": 1}

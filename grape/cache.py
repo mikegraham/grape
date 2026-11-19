@@ -236,7 +236,8 @@ class EmbeddingCache:
                 return EmbeddingIndex({}, np.empty((0, 0), dtype=np.float32))
             # Copy blobs straight into one matrix: an array per row plus a
             # vstack cost ~420ms at 20k rows, this ~70ms.
-            size = len(first[2])
+            _path, _stat, first_embedding = first
+            size = len(first_embedding)
             matrix = np.empty((capacity, size // 4), dtype=np.float32)
             buf = matrix.data.cast("B")
             row = 0

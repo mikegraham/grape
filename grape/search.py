@@ -252,7 +252,7 @@ def _get_embeddings(
         results.append(cached)
     if missing:
         fresh = model.encode_images([items[i].path for i in missing])
-        for i, emb in zip(missing, fresh):
+        for i, emb in zip(missing, fresh, strict=True):
             results[i] = emb
             if cache is not None and not isinstance(emb, BaseException):
                 cache.put(
@@ -315,7 +315,7 @@ def score_image_with_text_embeddings(
 ) -> ScoredImage:
     """Score a single image using precomputed keyword embeddings."""
     img_emb = _get_embedding(model, image_path, cache)
-    sims = (img_emb @ text_emb.T)[0]
+    (sims,) = img_emb @ text_emb.T  # one image: a row of keyword similarities
     return _build_result(image_path, keywords, sims)
 
 
