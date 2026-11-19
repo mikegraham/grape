@@ -2041,3 +2041,18 @@ def test_configure_logging_timestamps_only_with_verbose(monkeypatch, verbose):
     stamped = re.fullmatch(r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3} grape: hi", line)
     assert bool(stamped) is verbose
     assert line == "grape: hi" or verbose
+
+
+def test_sigint_handler_dumps_threads_only_when_verbose(monkeypatch, capfd):
+    import grape.cli as cli_mod
+
+    exits: list[int] = []
+    monkeypatch.setattr(cli_mod.os, "_exit", exits.append)
+
+    cli_mod._sigint_handler(verbose=False)()
+    assert exits == [130]
+    assert "Current thread" not in capfd.readouterr().err
+
+    cli_mod._sigint_handler(verbose=True)()
+    assert exits == [130, 130]
+    assert "Current thread" in capfd.readouterr().err
