@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- The scan no longer opens files: it walks the directories and `stat`s each file, like `find`. Whether a file is an image is decided when it's decoded for encoding; one that fails is skipped and remembered as not an image, so later scans leave it out. Previously every file without an embedding was fully decoded during the scan, on every run, so `--cached-only` and interrupted runs reopened the same photos again and again. The scan also no longer waits for the cache index before starting.
+
 - `-v` log lines start with the date and time, to the millisecond (`2026-11-19 14:03:27.512 grape: ...`), to make slow phases easy to spot.
 
 ### Fixed

@@ -10,12 +10,11 @@ from grape.cache import EmbeddingCache
 from grape.search import find_images, iter_image_records, score_image
 
 
-def test_finds_images_not_text(fixtures_dir):
+def test_finds_images(fixtures_dir):
     images = find_images(str(fixtures_dir), recursive=False)
     names = {os.path.basename(p) for p in images}
     assert "dog.jpg" in names
     assert "cat.jpg" in names
-    assert "readme.txt" not in names
 
 
 def test_recursive_finds_subdirs(fixtures_dir):
@@ -41,20 +40,19 @@ def test_returns_sorted(fixtures_dir):
     assert names == sorted(names)
 
 
-def test_detects_by_content_not_extension(tmp_path):
-    """Files are identified as images by content, not extension."""
-    # Real image, wrong extension -- should be found
+def test_scan_lists_every_file_without_opening(tmp_path, monkeypatch):
+    """The scan is a walk plus a stat: it never opens a file. Whether a
+    file is an image is decided when it's decoded for encoding."""
     Image.new("RGB", (1, 1)).save(tmp_path / "photo.dat", format="JPEG")
-    # Text file with image extension -- should be skipped
     (tmp_path / "fake.jpg").write_bytes(b"not an image at all")
-    # Plain text -- should be skipped
     (tmp_path / "notes.txt").write_bytes(b"hello world")
 
-    images = find_images(str(tmp_path))
-    names = {os.path.basename(p) for p in images}
-    assert "photo.dat" in names
-    assert "fake.jpg" not in names
-    assert "notes.txt" not in names
+    def _fail_open(*_args, **_kwargs):
+        pytest.fail("the scan must not open files")
+
+    monkeypatch.setattr("PIL.Image.open", _fail_open)
+    names = {os.path.basename(p) for p in find_images(str(tmp_path))}
+    assert names == {"photo.dat", "fake.jpg", "notes.txt"}
 
 
 def test_iter_image_records_includes_cache_keys(tmp_path):
@@ -71,67 +69,35 @@ def test_iter_image_records_includes_cache_keys(tmp_path):
 
 # --- find_images with cache ---
 
-def test_find_images_caches_non_images(tmp_path):
-    """Second scan of a mixed directory skips PIL for known non-images."""
-    Image.new("RGB", (1, 1)).save(tmp_path / "real.jpg", format="JPEG")
-    (tmp_path / "data.bin").write_bytes(b"not an image")
+def test_scan_skips_files_recorded_as_not_images(tmp_path):
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    Image.new("RGB", (1, 1)).save(lib / "real.jpg", format="JPEG")
+    (lib / "data.bin").write_bytes(b"not an image")
 
     cache = EmbeddingCache(tmp_path / "test.db")
-    images = find_images(str(tmp_path), cache=cache)
+    assert len(find_images(str(lib), cache=cache)) == 2
+    cache.put_not_image(lib / "data.bin")  # as _score_all does
+    images = find_images(str(lib), cache=cache)
     assert {os.path.basename(p) for p in images} == {"real.jpg"}
-    # The non-image is now recorded
-    assert cache.is_not_image(tmp_path / "data.bin")
-    # Second call still returns the same results
-    assert find_images(str(tmp_path), cache=cache) == images
     cache.close()
 
 
-def test_find_images_cache_invalidates_on_change(tmp_path):
-    """If a non-image file is replaced with a real image, cache adapts."""
-    bad = tmp_path / "file.dat"
+def test_scan_retries_recorded_non_image_once_it_changes(tmp_path):
+    """A not_images row is keyed by stat: replace the file and it's a
+    candidate again."""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    bad = lib / "file.dat"
     bad.write_bytes(b"not an image")
 
     cache = EmbeddingCache(tmp_path / "test.db")
-    assert find_images(str(tmp_path), cache=cache) == []
-    assert cache.is_not_image(bad)
+    cache.put_not_image(bad)
+    assert find_images(str(lib), cache=cache) == []
 
-    # Replace the file with a real image
     Image.new("RGB", (1, 1)).save(bad, format="PNG")
-    # Cache entry is stale (stat changed), so PIL re-checks
-    images = find_images(str(tmp_path), cache=cache)
-    assert len(images) == 1
+    assert len(find_images(str(lib), cache=cache)) == 1
     cache.close()
-
-
-def test_find_images_uses_embedding_cache_for_known_images(tmp_path, monkeypatch):
-    """Known cached images skip PIL verification on re-scan."""
-    scan_dir = tmp_path / "images"
-    scan_dir.mkdir()
-    image_path = scan_dir / "real.jpg"
-    Image.new("RGB", (1, 1)).save(image_path, format="JPEG")
-
-    cache = EmbeddingCache(tmp_path / "test.db")
-    cache.put(image_path, "model-a", np.ones((1, 4), dtype=np.float32))
-
-    def _fail_open(*_args, **_kwargs):
-        pytest.fail("Image.open should not be called for cached image hits")
-
-    monkeypatch.setattr("PIL.Image.open", _fail_open)
-    images = find_images(str(scan_dir), cache=cache)
-    assert [os.path.basename(p) for p in images] == ["real.jpg"]
-    cache.close()
-
-
-def test_find_images_real_filesystem_error_propagates(tmp_path):
-    """OSError with an errno (e.g. permission denied) is not swallowed."""
-    img = tmp_path / "locked.jpg"
-    img.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
-    img.chmod(0o000)
-    try:
-        with pytest.raises(PermissionError):
-            find_images(str(tmp_path))
-    finally:
-        img.chmod(0o644)
 
 
 def test_recursive_symlink_cycle_terminates(tmp_path):
@@ -180,7 +146,7 @@ def test_scan_without_dir_fd_support_matches(tmp_path, monkeypatch):
     assert via_path == via_fd
     assert [r.path for r in via_fd] == [
         "real/a.jpg", "real/filelink.jpg", "real/linkdir/b.jpg",
-        "real/sub/sp ace.png",
+        "real/notes.txt", "real/sub/sp ace.png",
     ]
     assert via_fd[1].path_key == str((tmp_path / "other" / "b.jpg").resolve())
     assert via_fd[0].path_key == str((real / "a.jpg").resolve())
@@ -199,23 +165,12 @@ def test_scan_closes_directory_fds(tmp_path):
     assert len(os.listdir("/proc/self/fd")) == before
 
 
-def test_truncated_image_rejected(fixtures_dir):
-    """Truncated JPEG (valid header, incomplete body) is not an image.
-
-    Pillow's verify() only checks headers and lets these through.
-    We use load() to catch them.  Regression test for files that pass
-    the scan but fail encode_image, triggering an unnecessary model load.
-    """
+def test_scan_lists_broken_and_non_image_fixtures(fixtures_dir):
+    """truncated.jpg and not_an_image.mp4 are candidates; encoding finds
+    out they aren't images (see test_load_frames_rejects_truncated_jpeg)."""
     images = find_images(str(fixtures_dir), recursive=False)
     names = {os.path.basename(p) for p in images}
-    assert "truncated.jpg" not in names
-
-
-def test_mp4_rejected(fixtures_dir):
-    """Video files are not images."""
-    images = find_images(str(fixtures_dir), recursive=False)
-    names = {os.path.basename(p) for p in images}
-    assert "not_an_image.mp4" not in names
+    assert {"truncated.jpg", "not_an_image.mp4"} <= names
 
 
 def test_not_image_takes_priority_over_image_hit(tmp_path):
@@ -237,41 +192,6 @@ def test_not_image_takes_priority_over_image_hit(tmp_path):
 
     records = list(iter_image_records(str(scan_dir), cache=cache))
     assert len(records) == 0, "not_image should take priority over image_hit"
-    cache.close()
-
-
-def test_is_image_returns_false_from_cache(tmp_path):
-    """is_image returns False immediately for files cached as not-image."""
-    from grape.search import is_image
-
-    bad = tmp_path / "bad.dat"
-    bad.write_bytes(b"not an image")
-
-    cache = EmbeddingCache(tmp_path / "test.db")
-    cache.put_not_image(bad)
-
-    # Cache says it's not an image -- should return False without opening
-    assert is_image(bad, cache) is False
-    cache.close()
-
-
-def test_is_image_catches_syntax_error(tmp_path):
-    """PIL SyntaxError (corrupt format) is caught and cached."""
-    from unittest.mock import patch
-
-    from grape.search import is_image
-
-    bad = tmp_path / "corrupt.xyz"
-    bad.write_bytes(b"\x00" * 100)
-
-    cache = EmbeddingCache(tmp_path / "test.db")
-
-    # Patch Image.open to raise SyntaxError (some corrupt formats do this)
-    with patch("PIL.Image.open", side_effect=SyntaxError("bad format")):
-        result = is_image(bad, cache)
-
-    assert result is False
-    assert cache.is_not_image(bad)
     cache.close()
 
 

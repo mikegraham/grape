@@ -28,7 +28,6 @@ if _blas_threads is None:
 from grape.search import (  # noqa: E402
     ImageRecord,
     ScoredImage,
-    is_image,
     iter_image_records,
 )
 
@@ -136,11 +135,11 @@ def _os_reason(e: OSError) -> str:
 #   _load_model (instant) ------+-- _encode_keywords ------+
 #                                \-- _encode_like_images --+ |
 #                                                    _combine +
-#   _resolve_and_index_cache -- _scan_files -- _prepare      |
-#                                   \-- _score_all ----------+
+#   _resolve_and_index_cache --+-- _prepare --+               |
+#   _scan_files ---------------+               \-- _score_all --+
 #
-# _scan_files waits for the cache index on purpose: both hold the GIL, so
-# running them concurrently was slower than back to back.
+# _scan_files opens no files (a walk plus a stat each), so it starts at
+# once instead of waiting for the cache index.
 #
 # After the graph completes, _filter_and_sort and _emit run on the main
 # thread (pywebview requires it, stdout is cleaner without interleaving).
@@ -518,18 +517,14 @@ def _scan_files(
     path_args: list[str],
     recursive: bool,
     cache: "EmbeddingCache | None",
-    cache_context: tuple[str | None, EmbeddingIndex | None],
 ) -> tuple[list[ImageRecord], ScanReport]:
-    """Discover image files from CLI paths. Independent of model loading."""
-    model_id, cached_index = cache_context
-    image_paths: set[str] | None = None
-    not_image_hits: set[tuple[str, str]] | None = None
-    if cache is not None:
-        # This model's rows are already in memory; read only the others.
-        image_paths = cache.image_paths(exclude_model=model_id)
-        if cached_index is not None:
-            image_paths.update(p for p, _ in cached_index.rows)
-        not_image_hits = cache.not_image_index()
+    """List candidate image files from CLI paths, opening none of them.
+
+    Every file is a candidate except those the cache records as not
+    images; _score_all decodes each new one, and a file that fails to
+    decode is skipped and recorded in not_images for the next scan.
+    """
+    not_image_hits = cache.not_image_index() if cache is not None else None
     items: list[ImageRecord] = []
     error_message: str | None = None
 
@@ -542,14 +537,6 @@ def _scan_files(
             cache_key = (record.path_key, record.file_stat)
             if not_image_hits is not None and cache_key in not_image_hits:
                 continue
-            if (
-                (image_paths is None or record.path_key not in image_paths)
-                and not is_image(
-                    record.path, cache,
-                    path_key=record.path_key, file_stat=record.file_stat,
-                )
-            ):
-                continue
             items.append(record)
             continue
         if os.path.isdir(p):
@@ -561,7 +548,6 @@ def _scan_files(
                 p,
                 recursive=True,
                 cache=cache,
-                image_paths=image_paths,
                 not_image_hits=not_image_hits,
             ))
             continue
@@ -704,7 +690,9 @@ def _filter_and_sort(
     if scan_done.error_message:
         print(scan_done.error_message, file=sys.stderr)
         sys.exit(1)
-    if scan_done.image_count == 0:
+    if not table.paths:
+        # Checked after encoding: the scan lists candidates, and only
+        # decoding shows which files are images.
         print("grape: no images found", file=sys.stderr)
         sys.exit(1)
 
@@ -1241,11 +1229,7 @@ def _run_pipeline(
         f_cache_ctx = ex.submit(
             _resolve_and_index_cache, model_name, pretrained, cache,
         )
-        f_scan = ex.submit(
-            lambda: _scan_files(
-                path_args, recursive, cache, f_cache_ctx.result(),
-            ),
-        )
+        f_scan = ex.submit(_scan_files, path_args, recursive, cache)
 
         # Text keyword embeddings (None when no text keywords).
         f_text_emb = ex.submit(

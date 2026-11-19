@@ -389,13 +389,12 @@ def test_load_frames_samples_static_and_animated(tmp_path):
 
 
 def test_load_frames_never_leaks_pillow_errors_for_truncated_gif(tmp_path):
-    """Every truncation of an animated GIF that passes the scan either
+    """Every truncation of an animated GIF either
     decodes or fails as an errno-less OSError -- never as Pillow's raw
     IndexError / struct.error / ValueError / EOFError (issue #15)."""
     from PIL import Image
 
     from grape.model import _load_frames
-    from grape.search import is_image
 
     colors = [
         (255, 0, 0), (0, 255, 0), (0, 0, 255),
@@ -413,9 +412,6 @@ def test_load_frames_never_leaks_pillow_errors_for_truncated_gif(tmp_path):
     passed = raised = 0
     for n in range(int(len(data) * 0.6), len(data) + 1):
         trunc.write_bytes(data[:n])
-        if not is_image(str(trunc)):
-            continue
-        passed += 1
         try:
             frames = list(_load_frames(str(trunc)))
         except OSError as e:
@@ -426,7 +422,8 @@ def test_load_frames_never_leaks_pillow_errors_for_truncated_gif(tmp_path):
             raised += 1
         else:
             assert frames, n
-    assert passed > 0, "no truncation passed is_image()"
+            passed += 1
+    assert passed > 0, "no truncation decoded"
     if raised == 0:
         pytest.skip("no truncation reproduced a decode error on this Pillow")
 
@@ -465,3 +462,13 @@ def test_import_open_clip_falls_back_when_stubs_break_import(monkeypatch):
     assert calls == ["stubbed", "plain"]
     assert "open_clip.mammut_model" not in sys.modules
     assert gm._open_clip_fast_path is False
+
+
+def test_load_frames_rejects_truncated_jpeg(fixtures_dir):
+    """The scan lists a truncated JPEG like any file; decoding it must
+    fail the way _score_all skips: an OSError with no errno."""
+    from grape.model import _load_frames
+
+    with pytest.raises(OSError) as info:
+        list(_load_frames(str(fixtures_dir / "truncated.jpg")))
+    assert info.value.errno is None
