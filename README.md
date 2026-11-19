@@ -4,11 +4,15 @@ Find images matching keywords using [CLIP](https://arxiv.org/abs/2103.00020)
 (Radford et al., 2021). Like grep, but for images.
 
 ```
-$ grape -R -s --keywords sunset ~/Pictures
-0.327  ~/Pictures/vacation/beach_golden_hour.jpg
-0.285  ~/Pictures/vacation/pier_evening.jpg
-0.241  ~/Pictures/hiking/mountain_view.jpg
+$ grape -R -s -n 5 --keywords sunset tests/fixtures
+0.283  tests/fixtures/subdir/sunset.jpg
+0.163  tests/fixtures/beach.jpg
+0.145  tests/fixtures/omelette.jpg
+0.144  tests/fixtures/lenna.png
+0.128  tests/fixtures/toms_diner.jpg
 ```
+
+The same search with `--view`:
 
 <img src="https://raw.githubusercontent.com/mikegraham/grape/master/docs/screenshot_view.png" alt="grape --view screenshot" width="600">
 
@@ -19,13 +23,6 @@ pip install grape-image-search
 ```
 
 Python 3.10+. Model weights (~3.5 GB for the default) download on first run.
-
-For a headless install without the `--view` GUI deps:
-
-```
-pip install grape-image-search --no-deps
-pip install open-clip-torch torch Pillow pillow-heif platformdirs tqdm transformers sentencepiece
-```
 
 ### GPU
 
@@ -52,7 +49,8 @@ Paths can be files, directories (with `-R`), or `-` to read from stdin.
 At least one of `-k` or `--like` is required.
 
 ```bash
-# text search
+# describe what's in the picture (it matches what the photo shows, not
+# words written in it)
 grape -R --keywords sunset ~/Pictures
 
 # find images similar to a reference
@@ -61,8 +59,8 @@ grape -R --like ref.jpg ~/Pictures
 # combine text + reference, and penalize something
 grape -R --keywords dog --exclude cat --like my_dog.jpg ~/Pictures
 
-# top 5 above a threshold, with scores
-grape -R -s -n 5 -t 0.25 --keywords sunset ~/Pictures
+# top 5, with scores
+grape -R -s -n 5 --keywords sunset ~/Pictures
 
 # browse results in a GUI window
 grape -R -n 200 --keywords sunset --view ~/Pictures
@@ -70,25 +68,11 @@ grape -R -n 200 --keywords sunset --view ~/Pictures
 # pick images in the window (click to select); their paths print on close
 grape -R -print0 --keywords blurry --view ~/Pictures | xargs -0 rm --
 
-# aesthetic ranking (skip default templating -- prompts are already full sentences)
-grape -R -n 20 --ensemble-prompts '{}' --keywords 'beautiful photo' --exclude 'ugly photo' ~/Pictures
-
 # read paths from stdin
 find ~/Pictures -mtime -7 -type f | grape --keywords selfie -
 
 # copy the top 10 cat photos to a folder
 grape -R -print0 -n 10 --keywords cat ~/Pictures | xargs -0 cp -t ~/cats/
-
-# scores with NUL-terminated paths, like grep -Z (safe for any filename)
-grape -R -s -print0 --keywords cat ~/Pictures | while IFS= read -r -d '' rec; do
-  score=${rec%%  *}; path=${rec#*  }; echo "$score $(basename "$path")"
-done
-
-# open the best match directly
-grape -R --keywords 'golden gate bridge' -n 1 ~/Pictures | xargs open
-
-# interactive selection with fzf
-grape -R --keywords dog ~/Pictures | fzf --preview 'chafa {}'
 ```
 
 > [!NOTE]
@@ -115,21 +99,6 @@ $ grape -R -v -n 3 --keywords 'playful puppy,golden retriever' ~/Pictures
 `-v` also dumps every thread's stack on Ctrl-C, which shows where a run
 is stuck.
 
-**Calibrate, then threshold.** Run with `-s` first to see what scores real
-matches land at, then set `-t` just below the noise floor.
-
-```
-$ grape -R -s --keywords sunset ~/Pictures | head -5
-0.312  /home/me/Pictures/travel/santorini_evening.jpg
-0.287  /home/me/Pictures/deck_sunset.jpg
-0.244  /home/me/Pictures/travel/ocean_dusk.jpg
-0.198  /home/me/Pictures/outdoor/golden_leaves.jpg   # weak, off-topic
-$ grape -R -s -t 0.24 --keywords sunset ~/Pictures
-0.312  /home/me/Pictures/travel/santorini_evening.jpg
-0.287  /home/me/Pictures/deck_sunset.jpg
-0.244  /home/me/Pictures/travel/ocean_dusk.jpg
-```
-
 **Aesthetic ranking** uses `--exclude` to subtract the mean score of a
 contrast prompt. Scores are smaller here because both sides are competing.
 
@@ -151,9 +120,8 @@ image's score is:
     mean(similarity to --keywords and --like) - mean(similarity to --exclude)
 
 Cosine similarities are **not probabilities**. Meaningful matches typically
-sit in the 0.15-0.35 range; even strong matches rarely exceed 0.35. Use `-s`
-to calibrate before choosing a `-t` threshold. Scores are **not comparable
-across models** -- switch models and the numbers shift.
+sit in the 0.15-0.35 range; even strong matches rarely exceed 0.35. Scores
+are **not comparable across models** -- switch models and the numbers shift.
 
 **`--like` matches semantics, not pixels.** Two different photos of dogs
 playing fetch score high; a photo and its crop do too. For actual duplicate
@@ -190,8 +158,9 @@ grape --model ViT-B-16-SigLIP2-256/webli -R --keywords sunset ~/Pictures    # 3.
 grape --model ViT-SO400M-14-SigLIP2/webli -R --keywords sunset ~/Pictures   # strongest
 ```
 
-`ViT-B-16-SigLIP2-256` encodes ~3.5x faster for a 1.5 GB download, giving up
-a few points of zero-shot accuracy.
+`ViT-B-16-SigLIP2-256` indexes photos about 3.5x faster and is a 1.5 GB
+download instead of 3.5 GB. Its matches are slightly worse: on the standard
+ImageNet test it names about 3 in 100 more photos wrong than the default.
 
 Embeddings are scoped per model; switching re-encodes everything.
 
