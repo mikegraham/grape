@@ -129,7 +129,7 @@ class CLIPModel:
 
         Slow path: normal open_clip.create_model_and_transforms().
         """
-        state_dict = _take_preloaded_state_dict()
+        state_dict = _take_preloaded_state_dict(model_name, pretrained)
         if state_dict is not None:
             self._init_model_fast(open_clip, model_name, pretrained, state_dict)
             return
@@ -368,7 +368,8 @@ def resolve_model_id(
 
 _open_clip_module = None
 _open_clip_fast_path = False
-_preloaded_state_dict: dict | None = None
+# Tagged with the (model_name, pretrained) it was read for, like the tokenizer.
+_preloaded_state_dict: tuple[tuple[str, str], dict] | None = None
 _preload_thread: "threading.Thread | None" = None
 _tokenizer_thread: "threading.Thread | None" = None
 _preloaded_tokenizer: Any | None = None
@@ -768,11 +769,10 @@ def preload_weights(model_name: str, pretrained: str) -> None:
         global _preloaded_state_dict
         if path.endswith(".safetensors"):
             from safetensors.torch import load_file
-            _preloaded_state_dict = load_file(path)
+            state_dict = load_file(path)
         else:
-            _preloaded_state_dict = torch.load(
-                path, map_location="cpu", weights_only=True,
-            )
+            state_dict = torch.load(path, map_location="cpu", weights_only=True)
+        _preloaded_state_dict = ((model_name, pretrained), state_dict)
 
     _preload_thread = threading.Thread(target=_load, daemon=True)
     _preload_thread.start()
@@ -813,11 +813,13 @@ def _take_preloaded_tokenizer(model_name: str) -> Any | None:
     return tokenizer if loaded_for == model_name else None
 
 
-def _take_preloaded_state_dict() -> dict | None:
-    """Wait for and consume the preloaded state dict, if any.
+def _take_preloaded_state_dict(model_name: str, pretrained: str) -> dict | None:
+    """Wait for and consume the preloaded state dict, if it is for this model.
 
-    Returns the state dict and clears the preload state so it can't be
-    used twice. Returns None if no preload was started.
+    Clears the preload state so it can't be used twice. Returns None if no
+    preload was started, or if it was for another model or checkpoint:
+    load_state_dict(strict=True) would accept any checkpoint of the same
+    architecture, silently giving the wrong weights.
     """
     global _preload_thread, _preloaded_state_dict
     if _preload_thread is None:
@@ -827,10 +829,13 @@ def _take_preloaded_state_dict() -> dict | None:
         # Timed out waiting for background weight read; fall back to
         # normal open_clip loading.
         return None
-    sd = _preloaded_state_dict
+    loaded = _preloaded_state_dict
     _preload_thread = None
     _preloaded_state_dict = None
-    return sd
+    if loaded is None:
+        return None
+    loaded_for, state_dict = loaded
+    return state_dict if loaded_for == (model_name, pretrained) else None
 
 
 _INIT_PATCH_LOCK = threading.RLock()
