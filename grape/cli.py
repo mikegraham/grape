@@ -496,6 +496,25 @@ def _refresh_model_id(
     return current
 
 
+def _start_reading_weights(model_id: str) -> None:
+    """Read the model's weight file in the background, discarding the data."""
+    from grape import hf_cache
+    hf_hub, _, commit = model_id.partition("@")
+    path = hf_cache.cached_weight_blob(hf_hub, commit) if commit else None
+    if path is None:
+        return
+
+    def _read() -> None:
+        # Gets the file into the OS cache while torch imports. Loading it
+        # uncached is 10+ s slower. (fadvise didn't help in my test.)
+        with open(path, "rb", buffering=0) as f:
+            buf = bytearray(16 << 20)
+            while f.readinto(buf):
+                pass
+
+    threading.Thread(target=_read, daemon=True, name="grape-read-weights").start()
+
+
 def _resolve_and_index_cache(
     model_name: str,
     pretrained: str,
@@ -520,6 +539,7 @@ def _resolve_and_index_cache(
     else:
         log.debug("model_id from cache: %s", model_id)
         model_id = _refresh_model_id(cache, model_name, pretrained, model_id)
+        _start_reading_weights(model_id)
 
     cached_index = cache.embedding_index_for_model(model_id)
     log.debug("cache index: %d image embeddings", len(cached_index.rows))
