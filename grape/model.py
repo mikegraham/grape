@@ -807,9 +807,10 @@ def _take_preloaded_tokenizer(model_name: str) -> Any | None:
     loaded = _preloaded_tokenizer
     _tokenizer_thread = None
     _preloaded_tokenizer = None
-    if loaded is None or loaded[0] != model_name:
+    if loaded is None:
         return None
-    return loaded[1]
+    loaded_for, tokenizer = loaded
+    return tokenizer if loaded_for == model_name else None
 
 
 def _take_preloaded_state_dict() -> dict | None:

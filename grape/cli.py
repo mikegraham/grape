@@ -394,7 +394,7 @@ def _encode_like_images(
     the same reason _like_records rejects a missing one.
     """
     import numpy as np
-    model_id = cache_context[0]
+    model_id, _index = cache_context
     embeddings = []
     for record in like_records:
         p = record.path
@@ -469,12 +469,12 @@ def _refresh_model_id(
 
     hf_hub, _, old_commit = stored.partition("@")
     current = hf_cache.resolve_model_id(hf_hub)
-    if current == stored or current == hf_hub:
+    if current in (stored, hf_hub):
         # Unchanged, or no weights cached right now (the post-load path
         # in _encode_keywords handles the download case).
         return stored
 
-    new_commit = current.partition("@")[2]
+    _, _, new_commit = current.partition("@")
     old_blob = None if not old_commit else (
         hf_cache.cached_weight_blob(hf_hub, old_commit)
     )
@@ -685,7 +685,8 @@ def _score_all(
                 tqdm.write(item.path, file=sys.stderr)
         # Key by the scan's stat: if the file changes mid-encode, the
         # next run re-encodes instead of trusting a stale embedding.
-        for item, img_emb in zip(chunk, _get_embeddings(model, chunk, cache)):
+        embeddings = _get_embeddings(model, chunk, cache)
+        for item, img_emb in zip(chunk, embeddings, strict=True):
             if isinstance(img_emb, OSError) and img_emb.errno is not None:
                 raise img_emb
             if isinstance(img_emb, (OSError, SyntaxError)):
