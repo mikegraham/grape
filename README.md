@@ -29,9 +29,9 @@ pip install open-clip-torch torch Pillow pillow-heif platformdirs tqdm transform
 
 ### GPU
 
-grape uses a GPU when PyTorch has one: NVIDIA, AMD or Intel. On an Intel
-laptop iGPU, indexing with the default model is ~20x faster than on the
-CPU. `-v` logs the device it picked; `GRAPE_DEVICE=cpu` forces the CPU.
+grape uses a GPU when PyTorch has one: NVIDIA, AMD or Intel. Even a
+laptop's integrated GPU indexes ~20x faster than the CPU with the default
+model. `-v` logs the device it picked; `GRAPE_DEVICE=cpu` forces the CPU.
 
 - **NVIDIA**: the plain `pip install` above already gets PyTorch's CUDA build.
 - **Intel (XPU)**: install the GPU driver and PyTorch's XPU build first
