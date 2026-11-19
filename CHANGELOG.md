@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `--view` lets you select images: click an image (or its checkbox) to select it, and when you close the window grape prints the selected paths, in the same format as normal output (shell-quoted lines, or raw with `-print0`). Pipe them to `rm`, `cp`, a file, or anything else. `--view` and `-print0` can now be combined.
+- `--view` lets you select images: click an image (or its checkbox) to select it, and when you close the window grape prints the selected paths: shell-quoted and space-separated on one line, ready to paste as arguments, or raw and NUL-terminated with `-print0`. Pipe them to `rm`, `cp`, a file, or anything else. `--view` and `-print0` can now be combined.
 - `--cached-only`: score only images that already have a cached embedding and skip the rest, so the model is never loaded to encode images. Can't be combined with `--no-cache`.
 - `-v` prints every thread's stack trace on Ctrl-C, so a hung run shows where it is stuck.
 - GPU acceleration: grape runs on an Intel GPU (XPU) or NVIDIA/AMD GPU (CUDA/ROCm) when the installed PyTorch supports it, with fp16 matmuls and batched encoding. About 16x faster indexing than CPU for the default model on an Intel Xe3 iGPU. `GRAPE_DEVICE=cpu` (or any torch device name) overrides the choice; `-v` logs it. Needs a PyTorch build for your GPU: plain `pip install` gets the CUDA build.
