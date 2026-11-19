@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Normal (non-`-v`) runs no longer print other libraries' INFO messages, such as open_clip 4.x's "Parsing model identifier ..." and Hugging Face's HTTP request lines. grape's own messages and all warnings still show.
 - A truncated animated GIF/WEBP/APNG that passes the scan no longer crashes the run with Pillow's `IndexError`/`struct.error`; it is skipped and recorded as not an image like other unreadable files.
 - `-print0` now composes with `-s`/`-v` like grep's `-Z`: the path is unquoted and NUL-terminated; the score before it and the `-v` breakdown line after it are unchanged. Previously the flag was silently ignored with `-s`/`-v`.
 - A missing or unreadable `--like` image now exits with `grape: <path>: <reason>` instead of a traceback.

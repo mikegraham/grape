@@ -2023,3 +2023,24 @@ def test_e2e_like_caches_reference(tmp_path, monkeypatch):
     out2, _, code = run_main(args, monkeypatch)
     assert code == 0
     assert out2 == out
+
+
+@pytest.mark.parametrize("verbose", [False, True])
+def test_configure_logging_hides_library_info(monkeypatch, verbose):
+    """Library INFO chatter stays hidden; grape's own INFO shows."""
+    import logging
+
+    from grape.cli import _configure_logging
+
+    root = logging.getLogger()
+    monkeypatch.setattr(root, "handlers", [])  # let basicConfig act
+    monkeypatch.setattr(root, "level", root.level)
+    grape_log = logging.getLogger("grape")
+    monkeypatch.setattr(grape_log, "level", grape_log.level)
+
+    _configure_logging(verbose=verbose, quiet=False)
+
+    assert not logging.getLogger("open_clip.factory").isEnabledFor(logging.INFO)
+    assert logging.getLogger("open_clip.factory").isEnabledFor(logging.WARNING)
+    assert grape_log.isEnabledFor(logging.INFO)
+    assert grape_log.isEnabledFor(logging.DEBUG) is verbose
