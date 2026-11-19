@@ -77,6 +77,20 @@ def test_suppress_filter_drops_target_message(caplog):
     )
 
 
+def test_suppress_filter_drops_open_clip_4_factory_logger_message(caplog):
+    """open_clip 4.x logs the warning on its own module logger."""
+    import logging
+    with caplog.at_level(logging.WARNING, logger=""):
+        with _suppress_open_clip_no_weights_warning():
+            logging.getLogger("open_clip.factory").warning(
+                "No pretrained weights loaded for model 'X'."
+                " Model initialized randomly.",
+            )
+    assert not any(
+        "No pretrained weights loaded" in r.getMessage() for r in caplog.records
+    )
+
+
 def test_suppress_filter_keeps_other_root_warnings(caplog):
     import logging
     with caplog.at_level(logging.WARNING, logger=""):
@@ -87,11 +101,12 @@ def test_suppress_filter_keeps_other_root_warnings(caplog):
 
 def test_suppress_filter_removed_after_context_exits():
     import logging
-    root = logging.getLogger()
-    before = list(root.filters)
+    loggers = [logging.getLogger(), logging.getLogger("open_clip.factory")]
+    before = [list(lg.filters) for lg in loggers]
     with _suppress_open_clip_no_weights_warning():
-        assert len(root.filters) == len(before) + 1
-    assert root.filters == before
+        for lg, b in zip(loggers, before):
+            assert len(lg.filters) == len(b) + 1
+    assert [lg.filters for lg in loggers] == before
 
 
 def test_no_parameter_init_stubs_nn_init_but_not_tensor_methods():
@@ -414,3 +429,39 @@ def test_load_frames_never_leaks_pillow_errors_for_truncated_gif(tmp_path):
     assert passed > 0, "no truncation passed is_image()"
     if raised == 0:
         pytest.skip("no truncation reproduced a decode error on this Pillow")
+
+
+def test_import_open_clip_falls_back_when_stubs_break_import(monkeypatch):
+    """open_clip 4.x imports names the coca_model stub lacks; the stubbed
+    import must fall back to a plain one instead of raising ImportError."""
+    import sys
+
+    import grape.model as gm
+
+    real = SimpleNamespace(__name__="open_clip")
+    calls = []
+
+    def fake_import(name):
+        assert name == "open_clip"
+        coca = sys.modules.get("open_clip.coca_model")
+        stubbed = coca is not None and getattr(coca, "__file__", None) is None
+        calls.append("stubbed" if stubbed else "plain")
+        if stubbed:
+            sys.modules["open_clip.mammut_model"] = SimpleNamespace()  # half-import
+            raise ImportError("cannot import name 'MultimodalCfg'")
+        return real
+
+    # Isolate sys.modules and the module-level import state.
+    monkeypatch.setattr(sys, "modules", dict(sys.modules))
+    for name in list(sys.modules):
+        if name == "open_clip" or name.startswith("open_clip."):
+            del sys.modules[name]
+    monkeypatch.setattr(gm, "_open_clip_module", None)
+    monkeypatch.setattr(gm, "_open_clip_fast_path", False)
+    monkeypatch.setattr(gm.importlib, "import_module", fake_import)
+    monkeypatch.setattr(gm, "_model_needs_timm", lambda _name: False)
+
+    assert gm._import_open_clip(use_transformers=False, model_name="X") is real
+    assert calls == ["stubbed", "plain"]
+    assert "open_clip.mammut_model" not in sys.modules
+    assert gm._open_clip_fast_path is False

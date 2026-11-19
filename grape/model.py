@@ -583,7 +583,17 @@ def _import_open_clip(
     # Only stub timm when we know the model doesn't need it.
     stub_timm = model_name is not None and not _model_needs_timm(model_name)
     _install_import_stubs(stub_timm=stub_timm)
-    _open_clip_module = importlib.import_module("open_clip")
+    try:
+        _open_clip_module = importlib.import_module("open_clip")
+    except ImportError as exc:
+        # open_clip's own imports outgrew the stubs (4.x's mammut_model
+        # pulls names from coca_model at import time). Drop the
+        # half-imported package and take the slow, stub-free path.
+        log.debug("open_clip import failed with stubs (%s); retrying without", exc)
+        for name in list(sys.modules):
+            if name == "open_clip" or name.startswith("open_clip."):
+                del sys.modules[name]
+        return _import_open_clip(use_transformers=True)
     _open_clip_fast_path = True
     return _open_clip_module
 
@@ -679,32 +689,40 @@ def _temporary_hf_hub_offline():
 def _suppress_open_clip_no_weights_warning():
     """Suppress open_clip's stale "no pretrained weights" warning during fast-init.
 
-    open_clip emits this warning via ``logging.warning(...)`` (root logger,
-    WARNING level) when called with ``load_weights=False``. In our fast-init
-    path the warning is technically correct at the moment it fires but stale
-    a few lines later, after we ``load_state_dict`` from preloaded weights.
+    open_clip emits this warning at WARNING level when called with
+    ``load_weights=False``: on the root logger in 3.x
+    (``logging.warning(...)``), on its ``open_clip.factory`` logger in
+    4.x. In our fast-init path the warning is technically correct at the
+    moment it fires but stale a few lines later, after we
+    ``load_state_dict`` from preloaded weights.
 
-    The filter is narrow on three axes -- logger name, level, message
-    substring -- and is installed only for the duration of the wrapped call,
-    so it cannot accidentally drop unrelated warnings.
+    A logger's filters only see records created on that logger, not ones
+    propagated from children, so the filter goes on both loggers. It is
+    narrow on three axes -- logger name, level, message substring -- and
+    is installed only for the duration of the wrapped call, so it cannot
+    accidentally drop unrelated warnings.
     """
     import logging
+
+    names = ("root", "open_clip.factory")
 
     class _Filter(logging.Filter):
         def filter(self, record):
             return not (
-                record.name == "root"
+                record.name in names
                 and record.levelno == logging.WARNING
                 and "No pretrained weights loaded" in record.getMessage()
             )
 
     f = _Filter()
-    root = logging.getLogger()
-    root.addFilter(f)
+    loggers = [logging.getLogger(), logging.getLogger("open_clip.factory")]
+    for lg in loggers:
+        lg.addFilter(f)
     try:
         yield
     finally:
-        root.removeFilter(f)
+        for lg in loggers:
+            lg.removeFilter(f)
 
 
 # -- Hacks 3 & 4: Background weight preload + fast init -------------------
