@@ -585,7 +585,8 @@ def _stub_pipeline(monkeypatch, score=0.75):
         items, scan_done = scan_result
         return (None, [], [], items, scan_done)
 
-    def _fake_score_all(prepared, model, text_emb, cache, quiet, verbose):
+    def _fake_score_all(prepared, model, get_query, cache, quiet, verbose):
+        get_query()  # like the real one: query errors still fail the run
         return _fake_score_table(prepared, [score])
 
     def _fake_encode_like_images(model, like_paths, cache_context, cache):
@@ -778,7 +779,8 @@ def test_exclude_keywords_adjusts_output_score(tmp_path, monkeypatch):
     # Custom stub that returns different scores per keyword
     import grape.cli as cli_mod
 
-    def _fake_score_all(prepared, model, text_emb, cache, quiet, verbose):
+    def _fake_score_all(prepared, model, get_query, cache, quiet, verbose):
+        get_query()  # like the real one: query errors still fail the run
         return _fake_score_table(prepared, [0.9, 0.2])
 
     _stub_pipeline(monkeypatch)
@@ -810,7 +812,8 @@ def test_exclude_verbose_shows_not_keyword(tmp_path, monkeypatch):
 
     import grape.cli as cli_mod
 
-    def _fake_score_all(prepared, model, text_emb, cache, quiet, verbose):
+    def _fake_score_all(prepared, model, get_query, cache, quiet, verbose):
+        get_query()  # like the real one: query errors still fail the run
         return _fake_score_table(prepared, [0.9, 0.2])
 
     _stub_pipeline(monkeypatch)
@@ -1158,7 +1161,7 @@ def test_score_all_uses_in_memory_cache_index():
     )
 
     table, _done = _score_all(
-        prepared, object(), text_emb,
+        prepared, object(), lambda: text_emb,
         _NoDbCache(), True, False,
     )
 
@@ -1270,7 +1273,7 @@ def test_score_all_duplicate_like_paths_keep_separate_scores():
     )
 
     score_result = _score_all(
-        prepared, object(), query_emb,
+        prepared, object(), lambda: query_emb,
         _NoDbCache(), True, False,
     )
     ranking = _filter_and_sort(
@@ -1448,7 +1451,7 @@ def test_score_all_skips_syntax_error():
     )
 
     table, _done = _score_all(
-        prepared, _RaisingModel(), text_emb,
+        prepared, _RaisingModel(), lambda: text_emb,
         tracking, True, False,
     )
 
@@ -1487,7 +1490,7 @@ def test_score_all_skips_oserror_no_errno():
     )
 
     table, _done = _score_all(
-        prepared, _RaisingModel(), text_emb,
+        prepared, _RaisingModel(), lambda: text_emb,
         None, True, False,
     )
 
@@ -1542,7 +1545,7 @@ def test_score_all_skips_unreadable_file_without_caching(capsys):
 
     cache = _RecordingCache()
     table, _ = _score_all(
-        prepared, _RaisingModel(), text_emb,
+        prepared, _RaisingModel(), lambda: text_emb,
         cache, False, False,
     )
     assert table.paths == []
@@ -1585,7 +1588,7 @@ def test_score_all_verbose_prints_uncached_paths(capsys):
     )
 
     _score_all(
-        prepared, _StubModel(), text_emb,
+        prepared, _StubModel(), lambda: text_emb,
         None, True, True,
     )
 
@@ -1624,7 +1627,7 @@ def test_score_all_non_verbose_omits_uncached_paths(capsys):
     )
 
     _score_all(
-        prepared, _StubModel(), text_emb,
+        prepared, _StubModel(), lambda: text_emb,
         None, True, False,
     )
 
@@ -2014,7 +2017,7 @@ def test_score_all_encode_reuses_scan_stat():
         (items, ScanReport(image_count=1)), ("test-model", None),
     )
     cache = _RecordingCache()
-    table, _done = _score_all(prepared, _Model(), text_emb, cache, True, False)
+    table, _done = _score_all(prepared, _Model(), lambda: text_emb, cache, True, False)
 
     assert table.paths == ["link.png"]
     assert cache.calls == [
@@ -2251,7 +2254,9 @@ def test_score_all_mentions_broken_images_but_not_non_images(capsys):
         (items, ScanReport(image_count=2)), ("test-model", None),
     )
     cache = _Cache()
-    _score_all(prepared, _Model(), np.ones((1, 2), np.float32), cache, False, False)
+    _score_all(
+        prepared, _Model(), lambda: np.ones((1, 2), np.float32), cache, False, False,
+    )
 
     err = capsys.readouterr().err
     assert "IMG_2.jpg" in err and "truncated" in err
