@@ -32,6 +32,8 @@ from grape.search import (  # noqa: E402
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import jinja2
     import numpy as np
     from numpy.typing import NDArray
@@ -659,27 +661,24 @@ def _score_all(
         list[ImageRecord], list[ImageRecord], ScanReport,
     ],
     model: _LazyModel,
-    query_emb: NDArray[np.float32],
+    get_query: Callable[[], NDArray[np.float32]],
     cache: EmbeddingCache | None,
     quiet: bool,
     verbose: bool,
 ) -> tuple[ScoreTable, ScanReport]:
-    """Compute every scanned image's similarity to each query embedding."""
+    """Compute every scanned image's similarity to each query embedding.
+
+    *get_query* is only called once the new images are encoded, so image
+    encoding doesn't wait for the keywords to be encoded.
+    """
     import numpy as np
 
     from grape.search import ENCODE_BATCH_SIZE, _get_embeddings
 
     image_emb, cached_rows, cached_items, uncached_items, scan_done = prepared
 
-    paths: list[str] = []
-    sims: list[NDArray[np.float32]] = []
-
-    # Fast path: score cached items via a single matrix multiply.
-    if image_emb is not None:
-        # Score every cached row, then pick ours: indexing image_emb first
-        # would copy the whole matrix.
-        sims.append((image_emb @ query_emb.T)[cached_rows])
-        paths.extend(item.path for item in cached_items)
+    paths = [item.path for item in cached_items]
+    new_embs: list[NDArray[np.float32]] = []
 
     # Slow path: encode uncached images through the model in batches.
     # Fully cached runs skip this, tqdm included: creating even a disabled
@@ -734,13 +733,21 @@ def _score_all(
                                 file_stat=item.file_stat,
                             )
                         continue
-                    sims.append(img_emb @ query_emb.T)
+                    new_embs.append(img_emb)
                     paths.append(item.path)
             progress.update(len(chunk))
         progress.close()
 
-    if not sims:
-        sims.append(np.empty((0, len(query_emb)), dtype=np.float32))
+    query_emb = get_query()
+    sims: list[NDArray[np.float32]] = [
+        np.empty((0, len(query_emb)), dtype=np.float32),
+    ]
+    if image_emb is not None:
+        # Score every cached row, then pick ours: indexing image_emb first
+        # would copy the whole matrix.
+        sims.append((image_emb @ query_emb.T)[cached_rows])
+    if new_embs:
+        sims.append(np.vstack(new_embs) @ query_emb.T)
     return ScoreTable(paths=paths, sims=np.vstack(sims)), scan_done
 
 
@@ -1392,10 +1399,10 @@ def _run_pipeline(
                 f_scan.result(), f_cache_ctx.result(), cached_only,
             ),
         )
-        # Convergence: scoring needs prepared + query + model.
+        # Image encoding needs only the model; scoring waits for the query.
         f_score = ex.submit(
             lambda: _score_all(
-                f_prepared.result(), f_model.result(), f_query.result(),
+                f_prepared.result(), f_model.result(), f_query.result,
                 cache, quiet, verbose,
             ),
         )
