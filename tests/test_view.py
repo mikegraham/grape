@@ -186,25 +186,6 @@ def test_multiple_small_images_share_viewport(tmp_path, browser_page):
     )
 
 
-def test_resolution_shown_next_to_filename(tmp_path, browser_page):
-    """Image dimensions render right after the filename on the same line."""
-    img_path = tmp_path / "img.jpg"
-    Image.new("RGB", (321, 234), (50, 100, 200)).save(img_path, format="JPEG")
-    results = [ScoredImage(path=str(img_path), scores={"x": 0.5}, score=0.5)]
-    html = _format_html(results, ["x"])
-    _render(browser_page, html, tmp_path)
-
-    res_el = browser_page.query_selector(".res")
-    assert res_el is not None, "resolution element missing"
-    assert res_el.text_content().strip() == "321x234"
-    # Resolution should be visually adjacent to the path, not on a new line.
-    path_box = browser_page.query_selector(".path").bounding_box()
-    res_box = res_el.bounding_box()
-    assert abs(path_box["y"] - res_box["y"]) < 4, (
-        f"resolution not on same line as path: {path_box} vs {res_box}"
-    )
-
-
 def test_long_path_stays_single_line(tmp_path, browser_page):
     """Long paths render on one line with ellipsis, not wrapped."""
     img_path = tmp_path / ("a" * 200 + ".jpg")

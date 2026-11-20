@@ -9,7 +9,6 @@ import shlex
 import signal
 import sys
 import threading
-import warnings
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractContextManager, closing, nullcontext
 from dataclasses import dataclass
@@ -82,14 +81,11 @@ _HTML_TEMPLATE_TEXT = """
       display: flex; align-items: baseline; gap: 8px;
       scroll-snap-align: start;
     }
-    /* flex: 0 1 auto so the path uses its natural width when short
-       (resolution sits right next to it) and shrinks with ellipsis
-       only when there isn't room. */
+    /* One line: a long path shrinks with an ellipsis. */
     .path {
       flex: 0 1 auto; min-width: 0;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
-    .res { flex: 0 0 auto; opacity: 0.6; font-size: 11px; }
     .scoreline {
       opacity: 0.6; font-size: 11px; margin-bottom: 4px;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -110,7 +106,6 @@ _HTML_TEMPLATE_TEXT = """
   <p class="meta path-line">
     <input type="checkbox" class="pick" aria-label="select">
     <span class="path" title="{{ row.path_text }}">{{ row.path_text }}</span>
-    {% if row.resolution %}<span class="res">{{ row.resolution }}</span>{% endif %}
   </p>
   <p class="meta scoreline" title="{{ row.score_line }}">{{ row.score_line }}</p>
   <img src="{{ row.image_src }}" alt="{{ row.path_text }}">
@@ -991,22 +986,6 @@ def _combined_scores(
 _html_template_cache: jinja2.Template | None = None
 
 
-def _read_resolution(path: str) -> str | None:
-    """Return ``"WIDTHxHEIGHT"`` or ``None`` if the image can't be read."""
-    from PIL import Image, UnidentifiedImageError
-
-    try:
-        # Suppress DecompressionBombWarning: we're reading the header only,
-        # not decompressing pixels, so the DOS-attack guard is a false positive.
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", Image.DecompressionBombWarning)
-            with Image.open(path) as im:
-                w, h = im.size
-    except (OSError, UnidentifiedImageError, Image.DecompressionBombError):
-        return None
-    return f"{w}x{h}"
-
-
 def _format_html(
     results: list[ScoredImage],
     keywords: list[str],
@@ -1030,7 +1009,6 @@ def _format_html(
         rows.append({
             "image_src": src_uri,
             "path_text": r.path,
-            "resolution": _read_resolution(r.path) or "",
             "score_line": score_line,
         })
     result: str = template.render(
