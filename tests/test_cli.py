@@ -570,7 +570,7 @@ def _stub_pipeline(monkeypatch, score=0.75):
     """
     import grape.cli as cli_mod
 
-    def _fake_load_model(model_name, pretrained, quiet):
+    def _fake_load_model(model_name, pretrained, quiet, cache=None):
         return object()
 
     def _fake_encode_keywords(

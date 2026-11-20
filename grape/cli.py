@@ -205,10 +205,12 @@ class _LazyModel:
 
     def __init__(
         self, model_name: str, pretrained: str, quiet: bool,
+        cache: EmbeddingCache | None = None,
     ) -> None:
         self._model_name = model_name
         self._pretrained = pretrained
         self._quiet = quiet
+        self._cache = cache
         self._model: CLIPModel | None = None
         self._lock = threading.Lock()
 
@@ -216,6 +218,13 @@ class _LazyModel:
         if self._model is None:
             with self._lock:
                 if self._model is None:
+                    # Before importing torch, so the read overlaps it.
+                    if self._cache is not None:
+                        model_id = self._cache.get_model_id(
+                            self._model_name, self._pretrained,
+                        )
+                        if model_id is not None:
+                            _start_reading_weights(model_id)
                     import grape.model
                     grape.model.preload_weights(
                         self._model_name, self._pretrained,
@@ -244,6 +253,7 @@ class _LazyModel:
 
 def _load_model(
     model_name: str, pretrained: str, quiet: bool,
+    cache: EmbeddingCache | None = None,
 ) -> _LazyModel:
     """Return a lazy model proxy -- no import until first method call.
 
@@ -251,7 +261,7 @@ def _load_model(
     and torch/open_clip are never imported.  scan_files runs without
     GIL contention.
     """
-    return _LazyModel(model_name, pretrained, quiet)
+    return _LazyModel(model_name, pretrained, quiet, cache)
 
 
 def _encode_keywords(
@@ -536,7 +546,6 @@ def _resolve_and_index_cache(
     else:
         log.debug("model_id from cache: %s", model_id)
         model_id = _refresh_model_id(cache, model_name, pretrained, model_id)
-        _start_reading_weights(model_id)
 
     cached_index = cache.embedding_index_for_model(model_id)
     log.debug("cache index: %d image embeddings", len(cached_index.rows))
@@ -1366,7 +1375,7 @@ def _run_pipeline(
     # and added ~9% to cold-large wall time.
     with ThreadPoolExecutor(max_workers=4, thread_name_prefix="grape") as ex:
         # Two independent roots, started in parallel.
-        f_model = ex.submit(_load_model, model_name, pretrained, quiet)
+        f_model = ex.submit(_load_model, model_name, pretrained, quiet, cache)
         f_cache_ctx = ex.submit(
             _resolve_and_index_cache, model_name, pretrained, cache,
         )
