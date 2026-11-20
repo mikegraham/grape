@@ -7,11 +7,16 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+        include:
+          # grape never picks Apple's MPS GPU, so this runs on the CPU too.
+          - os: macos-latest
+            python-version: '3.14'
 
     steps:
       - uses: actions/checkout@v4
@@ -25,6 +30,7 @@ jobs:
       # pulls in ~2 GB of CUDA libraries we don't need and which inflate
       # CI install time dramatically.
       - name: Install CPU-only torch
+        if: runner.os == 'Linux'  # macOS wheels on PyPI have no CUDA
         run: pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
 
       - name: Install project and dev/browser deps
