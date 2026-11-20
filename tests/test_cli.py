@@ -2,11 +2,11 @@
 
 import os
 import re
-import shlex
 import sys
 from contextlib import nullcontext
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import numpy as np
 import pytest
@@ -23,11 +23,21 @@ from grape.cli import (
     _format_html,
     _format_results,
     _like_records,
+    _shell_quote,
     _show_in_webview,
     main,
     parse_keywords,
 )
 from grape.search import ImageRecord, ScoredImage
+
+
+def _no_such_file(path) -> str:
+    """The OS's own wording for a missing file (Windows words it differently)."""
+    try:
+        os.stat(path)
+    except FileNotFoundError as e:
+        return e.strerror
+    raise AssertionError(f"{path} exists")
 
 
 def run_main(args, monkeypatch):
@@ -340,7 +350,7 @@ def test_show_in_webview_calls_create_window_and_start(monkeypatch):
 
         def create_window(self, *args, **kwargs):
             calls.append(("create", args, kwargs))
-            html_path = Path(unquote(urlparse(kwargs["url"]).path))
+            html_path = Path(url2pathname(urlparse(kwargs["url"]).path))
             loaded_html.append(html_path.read_text(encoding="utf-8"))
 
         def start(self, **kwargs):
@@ -458,7 +468,8 @@ def test_view_prints_selected_paths_on_close(tmp_path, monkeypatch, print0):
     image_path = tmp_path / "my photo.jpg"
     Image.new("RGB", (1, 1)).save(image_path)
     _stub_pipeline(monkeypatch)
-    selected = [str(image_path), "it's.jpg"]
+    other = "it's.jpg"
+    selected = [str(image_path), other]
     monkeypatch.setattr("grape.cli._show_in_webview", lambda _html, **_: selected)
     args = ["-q", "--view", "-k", "dog", str(image_path)]
     out, _, code = run_main(args + (["-print0"] if print0 else []), monkeypatch)
@@ -466,7 +477,8 @@ def test_view_prints_selected_paths_on_close(tmp_path, monkeypatch, print0):
     if print0:
         assert out == f"{image_path}\0it's.jpg\0"
     else:
-        assert out == f"{shlex.quote(str(image_path))} 'it'\"'\"'s.jpg'\n"
+        expected = f"{_shell_quote(str(image_path))} {_shell_quote(other)}\n"
+        assert out == expected
 
 
 def test_module_entry_point_flushes_before_fast_exit(tmp_path):
@@ -495,7 +507,7 @@ def test_module_entry_point_flushes_before_fast_exit(tmp_path):
          "-k", "dog", str(image)],
         capture_output=True, text=True, check=True,
     )
-    assert out.stdout == f"{shlex.quote(str(image))}\n"
+    assert out.stdout == f"{_shell_quote(str(image))}\n"
 
 
 # --- error paths ---
@@ -605,7 +617,7 @@ def test_default_output_shell_quotes_paths(tmp_path, monkeypatch):
     _stub_pipeline(monkeypatch)
     out, _, code = run_main(["-q", "-k", "dog", str(image_path)], monkeypatch)
     assert code == 0
-    assert out == f"{shlex.quote(str(image_path))}\n"
+    assert out == f"{_shell_quote(str(image_path))}\n"
 
 
 def test_path_output_skips_score_breakdowns(tmp_path, monkeypatch):
@@ -649,7 +661,7 @@ def test_recursive_relative_dir_keeps_relative_paths(tmp_path, monkeypatch):
 
     out, _, code = run_main(["-q", "-R", "-k", "dog", "photos"], monkeypatch)
     assert code == 0
-    assert out == "photos/kitten.jpg\n"
+    assert out == os.path.join("photos", "kitten.jpg") + "\n"
 
 
 def test_recursive_dot_prefix_preserved_like_find(tmp_path, monkeypatch):
@@ -660,7 +672,7 @@ def test_recursive_dot_prefix_preserved_like_find(tmp_path, monkeypatch):
 
     out, _, code = run_main(["-q", "-R", "-k", "dog", "."], monkeypatch)
     assert code == 0
-    assert out == "./kitten.jpg\n"
+    assert out == os.path.join(".", "kitten.jpg") + "\n"
 
 
 def test_stdin_dot_prefix_preserved(tmp_path, monkeypatch):
@@ -727,7 +739,7 @@ def test_scores_output_shell_quotes_paths(tmp_path, monkeypatch):
     _stub_pipeline(monkeypatch)
     out, _, code = run_main(["-q", "-s", "-k", "dog", str(image_path)], monkeypatch)
     assert code == 0
-    assert shlex.quote(str(image_path)) in out
+    assert _shell_quote(str(image_path)) in out
 
 
 def test_print0_with_scores_nul_terminates_raw_path(tmp_path, monkeypatch):
@@ -778,7 +790,7 @@ def test_exclude_keywords_adjusts_output_score(tmp_path, monkeypatch):
     )
     assert code == 0
     assert "0.700" in out
-    assert shlex.quote(str(image_path)) in out
+    assert _shell_quote(str(image_path)) in out
 
 
 def test_exclude_alias_anti_is_rejected(tmp_path, monkeypatch):
@@ -833,7 +845,7 @@ def test_ensemble_prompts_uses_default_template_set(tmp_path, monkeypatch):
         monkeypatch,
     )
     assert code == 0
-    assert out == f"{shlex.quote(str(image_path))}\n"
+    assert out == f"{_shell_quote(str(image_path))}\n"
     assert captured["prompt_templates"] == DEFAULT_PROMPT_ENSEMBLE
     assert len(DEFAULT_PROMPT_ENSEMBLE) == 8
 
@@ -865,7 +877,7 @@ def test_ensemble_prompts_custom_templates_override_default(tmp_path, monkeypatc
         monkeypatch,
     )
     assert code == 0
-    assert out == f"{shlex.quote(str(image_path))}\n"
+    assert out == f"{_shell_quote(str(image_path))}\n"
     assert captured["prompt_templates"] == ["one {}", "two {}"]
 
 
@@ -1734,7 +1746,7 @@ def test_like_records_missing_file_is_clean_error(tmp_path):
     missing = tmp_path / "missing.jpg"
     with pytest.raises(
         GrapeError,
-        match=rf"^{re.escape(str(missing))}: No such file or directory$",
+        match=rf"^{re.escape(str(missing))}: {re.escape(_no_such_file(missing))}$",
     ):
         _like(missing)
 
@@ -1897,7 +1909,7 @@ def test_like_missing_file_exits_before_any_work(tmp_path, monkeypatch):
     )
     assert code == 1
     assert out == ""
-    assert err == f"grape: {missing}: No such file or directory\n"
+    assert err == f"grape: {missing}: {_no_such_file(missing)}\n"
 
 
 # --- end-to-end with real model (slow) ---
@@ -2164,8 +2176,9 @@ def test_show_in_webview_returns_selection_reported_by_page(monkeypatch):
 
 def test_format_html_marks_each_result_selectable(tmp_path):
     """Each result carries its path for the selection script, escaped."""
+    # Not created: Windows doesn't allow " in names. The page is built
+    # all the same, just without the image's dimensions.
     image_path = tmp_path / 'say "cheese".jpg'
-    Image.new("RGB", (1, 1)).save(image_path)
     results = [ScoredImage(path=str(image_path), scores={"dog": 0.5}, score=0.5)]
 
     html_doc = _format_html(results, ["dog"])
@@ -2244,3 +2257,12 @@ def test_score_all_mentions_broken_images_but_not_non_images(capsys):
     assert "IMG_2.jpg" in err and "truncated" in err
     assert "IMG_1.xmp" not in err
     assert cache.not_images == ["/lib/IMG_1.xmp", "/lib/IMG_2.jpg"]
+
+
+def test_shell_quote_is_posix_only(monkeypatch):
+    """POSIX quoting on POSIX; paths as they are on Windows."""
+    monkeypatch.setattr("sys.platform", "linux")
+    assert _shell_quote("photos/cat.jpg") == "photos/cat.jpg"
+    assert _shell_quote("my photo.jpg") == "'my photo.jpg'"
+    monkeypatch.setattr("sys.platform", "win32")
+    assert _shell_quote(r"C:\My Photos\cat.jpg") == r"C:\My Photos\cat.jpg"

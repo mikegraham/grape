@@ -68,7 +68,9 @@ def test_cached_file_uses_refs_main(hub):
         "org/model", "open_clip_model.safetensors"
     )
     assert got is not None
-    assert got.endswith("snapshots/abc123/open_clip_model.safetensors")
+    assert got.endswith(
+        os.path.join("snapshots", "abc123", "open_clip_model.safetensors")
+    )
 
 
 def test_cached_file_missing_repo_returns_none(hub):
@@ -92,7 +94,7 @@ def test_cached_file_newest_snapshot_when_no_ref(hub):
         "org/model", "open_clip_pytorch_model.bin"
     )
     assert got is not None
-    assert "snapshots/new/" in got
+    assert os.path.join("snapshots", "new", "") in got
 
 
 # --- resolve_model_id / find_cached_weight ---

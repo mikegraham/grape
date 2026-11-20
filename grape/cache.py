@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import sqlite3
+import sys
 import threading
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -103,9 +104,13 @@ def stat_key_from_stat(st: os.stat_result) -> str:
     the field positions stay stable and ``_canonical_stat`` can
     neutralize the real dev stored in pre-0.3.0 rows.
     """
+    # On Windows, DirEntry.stat() (the scan) always reports ino 0 but
+    # os.stat() reports the file index (Python's os docs), so ignore it
+    # there, as Git for Windows and restic do.
+    ino = 0 if sys.platform == "win32" else st.st_ino
     return (
         f"[{st.st_size}, {st.st_mtime_ns},"
-        f" {st.st_ino}, 0, {st.st_ctime_ns}]"
+        f" {ino}, 0, {st.st_ctime_ns}]"
     )
 
 

@@ -145,8 +145,9 @@ def test_scan_without_dir_fd_support_matches(tmp_path, monkeypatch):
 
     assert via_path == via_fd
     assert [r.path for r in via_fd] == [
-        "real/a.jpg", "real/filelink.jpg", "real/linkdir/b.jpg",
-        "real/notes.txt", "real/sub/sp ace.png",
+        os.path.join("real", *p.split("/")) for p in (
+            "a.jpg", "filelink.jpg", "linkdir/b.jpg", "notes.txt", "sub/sp ace.png",
+        )
     ]
     assert via_fd[1].path_key == str((tmp_path / "other" / "b.jpg").resolve())
     assert via_fd[0].path_key == str((real / "a.jpg").resolve())

@@ -17,6 +17,8 @@ jobs:
           # grape never picks Apple's MPS GPU, so this runs on the CPU too.
           - os: macos-latest
             python-version: '3.14'
+          - os: windows-latest
+            python-version: '3.14'
 
     steps:
       - uses: actions/checkout@v7

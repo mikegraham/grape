@@ -440,7 +440,8 @@ def _builtin_model_config(model_name: str) -> dict | None:
     if not cfg_file.is_file():
         return None
     import json
-    cfg: dict = json.loads(cfg_file.read_text())
+    # JSON is UTF-8 by spec; the locale default is cp1252 on Windows.
+    cfg: dict = json.loads(cfg_file.read_text(encoding="utf-8"))
     return cfg
 
 
@@ -490,7 +491,9 @@ class _FastHFTokenizer:
         from open_clip.tokenizer import get_clean_fn
         from tokenizers import Tokenizer
 
-        config = json.loads((snapshot / "tokenizer_config.json").read_text())
+        config = json.loads(  # UTF-8 by spec, not the locale's encoding
+            (snapshot / "tokenizer_config.json").read_text(encoding="utf-8")
+        )
         pad = config["pad_token"]
         pad = pad["content"] if isinstance(pad, dict) else pad
         self._clean = get_clean_fn(clean)
