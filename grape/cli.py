@@ -73,7 +73,7 @@ _HTML_TEMPLATE_TEXT = """
   <title>grape results</title>
   <style>
     /* proximity, not mandatory: small wheel scrolls don't snap. */
-    html { scroll-snap-type: y proximity; }
+    {% if snap %}html { scroll-snap-type: y proximity; }{% endif %}
     body { margin: 12px; color-scheme: light dark; font-family: sans-serif; }
     .meta { font-size: 12px; line-height: 1.3; margin: 0; }
     /* Space/PgDn lands on the start of each result. */
@@ -985,6 +985,9 @@ def _combined_scores(
 
 _html_template_cache: jinja2.Template | None = None
 
+# --view pages with more results than this don't scroll-snap (too slow).
+SNAP_MAX_RESULTS = 500
+
 
 def _format_html(
     results: list[ScoredImage],
@@ -1013,6 +1016,9 @@ def _format_html(
         })
     result: str = template.render(
         count=len(results),
+        # Snapping recomputes every snap point on layout: at 45,000 results
+        # each scroll cost ~85 ms with it, ~1.5 ms without.
+        snap=len(results) <= SNAP_MAX_RESULTS,
         keywords=", ".join(keywords),
         rows=rows,
     )

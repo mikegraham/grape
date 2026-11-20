@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from grape.cli import _format_html
+from grape.cli import SNAP_MAX_RESULTS, _format_html
 from grape.search import ScoredImage
 
 
@@ -238,3 +238,20 @@ def test_click_toggles_selection_and_reports_it(tmp_path, browser_page):
     ]
     assert browser_page.locator(".result.selected").count() == 1
     assert browser_page.locator(".result .pick").nth(0).is_checked()
+
+
+@pytest.mark.parametrize(
+    "n, snaps", [(SNAP_MAX_RESULTS, True), (SNAP_MAX_RESULTS + 1, False)],
+)
+def test_scroll_snapping_only_up_to_the_limit(tmp_path, browser_page, n, snaps):
+    """Snapping makes scrolling slow on huge result sets, so it's off above
+    the limit. The images needn't exist for the page's styling."""
+    results = [
+        ScoredImage(path=str(tmp_path / f"{i}.jpg"), scores={"x": 0.5}, score=0.5)
+        for i in range(n)
+    ]
+    _render(browser_page, _format_html(results, ["x"]), tmp_path)
+    snap_type = browser_page.evaluate(
+        "getComputedStyle(document.documentElement).scrollSnapType",
+    )
+    assert (snap_type != "none") == snaps, snap_type
