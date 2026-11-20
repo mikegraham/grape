@@ -450,3 +450,14 @@ def test_deferred_commits_batches_writes(tmp_path):
     assert committed() == (3, 4), "outside the context each write commits"
     other.close()
     cache.close()
+
+
+def test_stat_key_ignores_file_id_on_windows(monkeypatch):
+    """On Windows the scan's DirEntry.stat() reports ino 0 and os.stat()
+    the real file ID; both must give the same key."""
+    scanned = os.stat_result((0o100644, 0, 0, 1, 0, 0, 12, 0, 0, 0))
+    statted = os.stat_result((0o100644, 987654, 0, 1, 0, 0, 12, 0, 0, 0))
+    monkeypatch.setattr("sys.platform", "win32")
+    assert stat_key_from_stat(scanned) == stat_key_from_stat(statted)
+    monkeypatch.setattr("sys.platform", "linux")
+    assert stat_key_from_stat(scanned) != stat_key_from_stat(statted)
