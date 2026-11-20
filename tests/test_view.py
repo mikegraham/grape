@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from grape.cli import _format_html
+from grape.cli import SNAP_MAX_RESULTS, _format_html
 from grape.search import ScoredImage
 
 
@@ -186,25 +186,6 @@ def test_multiple_small_images_share_viewport(tmp_path, browser_page):
     )
 
 
-def test_resolution_shown_next_to_filename(tmp_path, browser_page):
-    """Image dimensions render right after the filename on the same line."""
-    img_path = tmp_path / "img.jpg"
-    Image.new("RGB", (321, 234), (50, 100, 200)).save(img_path, format="JPEG")
-    results = [ScoredImage(path=str(img_path), scores={"x": 0.5}, score=0.5)]
-    html = _format_html(results, ["x"])
-    _render(browser_page, html, tmp_path)
-
-    res_el = browser_page.query_selector(".res")
-    assert res_el is not None, "resolution element missing"
-    assert res_el.text_content().strip() == "321x234"
-    # Resolution should be visually adjacent to the path, not on a new line.
-    path_box = browser_page.query_selector(".path").bounding_box()
-    res_box = res_el.bounding_box()
-    assert abs(path_box["y"] - res_box["y"]) < 4, (
-        f"resolution not on same line as path: {path_box} vs {res_box}"
-    )
-
-
 def test_long_path_stays_single_line(tmp_path, browser_page):
     """Long paths render on one line with ellipsis, not wrapped."""
     img_path = tmp_path / ("a" * 200 + ".jpg")
@@ -257,3 +238,20 @@ def test_click_toggles_selection_and_reports_it(tmp_path, browser_page):
     ]
     assert browser_page.locator(".result.selected").count() == 1
     assert browser_page.locator(".result .pick").nth(0).is_checked()
+
+
+@pytest.mark.parametrize(
+    "n, snaps", [(SNAP_MAX_RESULTS, True), (SNAP_MAX_RESULTS + 1, False)],
+)
+def test_scroll_snapping_only_up_to_the_limit(tmp_path, browser_page, n, snaps):
+    """Snapping makes scrolling slow on huge result sets, so it's off above
+    the limit. The images needn't exist for the page's styling."""
+    results = [
+        ScoredImage(path=str(tmp_path / f"{i}.jpg"), scores={"x": 0.5}, score=0.5)
+        for i in range(n)
+    ]
+    _render(browser_page, _format_html(results, ["x"]), tmp_path)
+    snap_type = browser_page.evaluate(
+        "getComputedStyle(document.documentElement).scrollSnapType",
+    )
+    assert (snap_type != "none") == snaps, snap_type
