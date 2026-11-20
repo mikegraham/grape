@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-20
+
+### Added
+- Windows support, tested in CI alongside Linux and macOS.
+- Python 3.14 support.
+
+### Changed
+- Faster first runs: big JPEGs are decoded at reduced size (never below twice the model's input size), 1.2-1.7x faster overall. Scores for JPEGs can move by up to ~0.004; images already in the cache keep their embeddings.
+- On a GPU, model weights are kept in fp16: half the GPU memory and slightly faster encoding.
+- The first search after a reboot is about twice as fast: grape reads the model's weight file while torch imports.
+- `--view` is much faster with big result sets: it no longer shows each image's dimensions (reading them opened every file before the window appeared), and pages with more than 500 results don't scroll-snap.
+- On Windows, printed paths are no longer shell-quoted.
+
+### Fixed
+- On Windows, the default model failed to load (`UnicodeDecodeError` reading its tokenizer config).
+- On Windows, a photo found by scanning a folder and the same photo given directly were cached separately and encoded twice.
+
 ## [0.5.0] - 2026-11-19
 
 ### Added
