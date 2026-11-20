@@ -83,7 +83,7 @@ def _scandir(path: str) -> Iterator[Iterator[os.DirEntry[str]]]:
     Entries then stat via fstatat() instead of re-walking the full path
     (2.8 vs 5.1us per file on ext4). ``entry.path`` is just the name.
     """
-    if os.scandir not in os.supports_fd:
+    if sys.platform == "win32" or os.scandir not in os.supports_fd:
         with os.scandir(path) as entries:
             yield entries
         return
