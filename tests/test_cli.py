@@ -5,7 +5,8 @@ import re
 import sys
 from contextlib import nullcontext
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import numpy as np
 import pytest
@@ -28,6 +29,15 @@ from grape.cli import (
     parse_keywords,
 )
 from grape.search import ImageRecord, ScoredImage
+
+
+def _no_such_file(path) -> str:
+    """The OS's own wording for a missing file (Windows words it differently)."""
+    try:
+        os.stat(path)
+    except FileNotFoundError as e:
+        return e.strerror
+    raise AssertionError(f"{path} exists")
 
 
 def run_main(args, monkeypatch):
@@ -340,7 +350,7 @@ def test_show_in_webview_calls_create_window_and_start(monkeypatch):
 
         def create_window(self, *args, **kwargs):
             calls.append(("create", args, kwargs))
-            html_path = Path(unquote(urlparse(kwargs["url"]).path))
+            html_path = Path(url2pathname(urlparse(kwargs["url"]).path))
             loaded_html.append(html_path.read_text(encoding="utf-8"))
 
         def start(self, **kwargs):
@@ -651,7 +661,7 @@ def test_recursive_relative_dir_keeps_relative_paths(tmp_path, monkeypatch):
 
     out, _, code = run_main(["-q", "-R", "-k", "dog", "photos"], monkeypatch)
     assert code == 0
-    assert out == "photos/kitten.jpg\n"
+    assert out == os.path.join("photos", "kitten.jpg") + "\n"
 
 
 def test_recursive_dot_prefix_preserved_like_find(tmp_path, monkeypatch):
@@ -662,7 +672,7 @@ def test_recursive_dot_prefix_preserved_like_find(tmp_path, monkeypatch):
 
     out, _, code = run_main(["-q", "-R", "-k", "dog", "."], monkeypatch)
     assert code == 0
-    assert out == "./kitten.jpg\n"
+    assert out == os.path.join(".", "kitten.jpg") + "\n"
 
 
 def test_stdin_dot_prefix_preserved(tmp_path, monkeypatch):
@@ -1736,7 +1746,7 @@ def test_like_records_missing_file_is_clean_error(tmp_path):
     missing = tmp_path / "missing.jpg"
     with pytest.raises(
         GrapeError,
-        match=rf"^{re.escape(str(missing))}: No such file or directory$",
+        match=rf"^{re.escape(str(missing))}: {re.escape(_no_such_file(missing))}$",
     ):
         _like(missing)
 
@@ -1899,7 +1909,7 @@ def test_like_missing_file_exits_before_any_work(tmp_path, monkeypatch):
     )
     assert code == 1
     assert out == ""
-    assert err == f"grape: {missing}: No such file or directory\n"
+    assert err == f"grape: {missing}: {_no_such_file(missing)}\n"
 
 
 # --- end-to-end with real model (slow) ---
@@ -2166,8 +2176,9 @@ def test_show_in_webview_returns_selection_reported_by_page(monkeypatch):
 
 def test_format_html_marks_each_result_selectable(tmp_path):
     """Each result carries its path for the selection script, escaped."""
+    # Not created: Windows doesn't allow " in names. The page is built
+    # all the same, just without the image's dimensions.
     image_path = tmp_path / 'say "cheese".jpg'
-    Image.new("RGB", (1, 1)).save(image_path)
     results = [ScoredImage(path=str(image_path), scores={"dog": 0.5}, score=0.5)]
 
     html_doc = _format_html(results, ["dog"])

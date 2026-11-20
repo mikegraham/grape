@@ -23,6 +23,13 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 DOCS = REPO / "docs"
 
+# The samples are generated, and so compared, on Linux: on Windows paths
+# print with \, and the hashed inputs check out with CRLF and sort
+# differently.
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32", reason="docs samples are generated on Linux",
+)
+
 
 def _load_generator():
     spec = importlib.util.spec_from_file_location(
