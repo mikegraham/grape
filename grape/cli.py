@@ -841,7 +841,7 @@ def _emit(
             sys.stdout.write("".join(f"{path}\0" for path in selected))
         elif selected:
             # One line of shell-quoted words, to paste as arguments.
-            sys.stdout.write(" ".join(shlex.quote(p) for p in selected) + "\n")
+            sys.stdout.write(" ".join(_shell_quote(p) for p in selected) + "\n")
         return len(results)
     if show_scores:
         results = _scored_images(
@@ -919,7 +919,16 @@ def _path_record(path: str, print0: bool) -> str:
     follows the path changes; a score before it or a breakdown line
     after it is formatted the same either way.
     """
-    return f"{path}\0" if print0 else f"{shlex.quote(path)}\n"
+    return f"{path}\0" if print0 else f"{_shell_quote(path)}\n"
+
+
+def _shell_quote(path: str) -> str:
+    """Quote *path* for a POSIX shell; on Windows, leave it as is."""
+    # POSIX quoting would wrap every Windows path (\ is special to sh),
+    # and cmd and PowerShell disagree on quoting, so don't try there.
+    if sys.platform == "win32":
+        return path
+    return shlex.quote(path)
 
 
 def _format_results(
