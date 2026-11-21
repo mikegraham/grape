@@ -17,6 +17,7 @@ This module contains some crazy hacks to reduce latency.
 
 from __future__ import annotations
 
+import functools
 import importlib
 import logging
 import os
@@ -114,6 +115,7 @@ class CLIPModel:
                 raise
             open_clip = _import_open_clip(use_transformers=True)
             self._init_model(open_clip, model_name, pretrained)
+        self._open_clip = open_clip
         size = self.model.visual.preprocess_cfg["size"]
         self._image_size = max(size) if isinstance(size, (tuple, list)) else size
         self.device = pick_device()
@@ -132,6 +134,15 @@ class CLIPModel:
         if not quiet:
             print("done.", file=sys.stderr)
 
+    @functools.cached_property
+    def tokenizer(self) -> Any:
+        """Built on first use: runs that encode no text never need it, and
+        loading SigLIP 2's takes ~2 s, holding the GIL the whole time."""
+        # Not preloaded in a background thread: that was tried, and since
+        # tokenizers' from_file holds the GIL, it only stalled the model
+        # build running alongside it.
+        return _load_tokenizer(self._open_clip, self._model_name)
+
     def _autocast(self) -> Any:
         """fp16 autocast off-CPU: matmuls run on tensor cores (Intel XMX,
         NVIDIA) at ~4x fp32 speed. Scores move by <0.001, well inside the
@@ -146,7 +157,7 @@ class CLIPModel:
         model_name: str,
         pretrained: str,
     ) -> None:
-        """Initialize model, tokenizer, and preprocess transform.
+        """Initialize the model and preprocess transform.
 
         Two paths:
 
@@ -175,10 +186,6 @@ class CLIPModel:
                     device=self.device,
                 )
             )
-        self.tokenizer = (
-            _take_preloaded_tokenizer(model_name)
-            or _load_tokenizer(open_clip, model_name)
-        )
 
     def _init_model_fast(
         self,
@@ -436,11 +443,9 @@ def resolve_model_id(
 
 _open_clip_module = None
 _open_clip_fast_path = False
-# Tagged with the (model_name, pretrained) it was read for, like the tokenizer.
+# Tagged with the (model_name, pretrained) it was read for.
 _preloaded_state_dict: tuple[tuple[str, str], dict] | None = None
 _preload_thread: "threading.Thread | None" = None
-_tokenizer_thread: "threading.Thread | None" = None
-_preloaded_tokenizer: Any | None = None
 
 
 # -- Hack 1: Import stubs -------------------------------------------------
@@ -828,10 +833,7 @@ def preload_weights(model_name: str, pretrained: str) -> None:
     # Side effect: installs import stubs for open_clip (unless the model
     # needs the real transformers).
     needs_tf = _model_needs_transformers(model_name)
-    open_clip = _import_open_clip(use_transformers=needs_tf, model_name=model_name)
-    cfg = _builtin_model_config(model_name) or {}
-    if cfg.get("text_cfg", {}).get("hf_tokenizer_name"):
-        _preload_tokenizer(open_clip, model_name)
+    _import_open_clip(use_transformers=needs_tf, model_name=model_name)
     path = _cached_weight_path(model_name, pretrained)
     if path is None:
         return
@@ -848,41 +850,6 @@ def preload_weights(model_name: str, pretrained: str) -> None:
     _preload_thread = threading.Thread(target=_load, daemon=True)
     _preload_thread.start()
     start_heif_registration()
-
-
-def _preload_tokenizer(open_clip: Any, model_name: str) -> None:
-    """Import transformers and build the tokenizer while weights are read."""
-    global _tokenizer_thread, _preloaded_tokenizer
-    if _tokenizer_thread is not None:
-        return
-
-    def _load():
-        global _preloaded_tokenizer
-        # Tagged with the model it belongs to. A load that overran the
-        # take() timeout stays tracked, so without the tag a later,
-        # different model would be handed this tokenizer and would
-        # silently embed with the wrong vocab.
-        _preloaded_tokenizer = (model_name, _load_tokenizer(open_clip, model_name))
-
-    _tokenizer_thread = threading.Thread(target=_load, daemon=True)
-    _tokenizer_thread.start()
-
-
-def _take_preloaded_tokenizer(model_name: str) -> Any | None:
-    """Consume the preloaded tokenizer, but only if it is for *model_name*."""
-    global _tokenizer_thread, _preloaded_tokenizer
-    if _tokenizer_thread is None:
-        return None
-    _tokenizer_thread.join(timeout=30)
-    if _tokenizer_thread.is_alive():
-        return None
-    loaded = _preloaded_tokenizer
-    _tokenizer_thread = None
-    _preloaded_tokenizer = None
-    if loaded is None:
-        return None
-    loaded_for, tokenizer = loaded
-    return tokenizer if loaded_for == model_name else None
 
 
 def _take_preloaded_state_dict(model_name: str, pretrained: str) -> dict | None:
@@ -1014,7 +981,3 @@ def _init_from_state_dict(
     from open_clip.transform import PreprocessCfg, image_transform_v2
     pp_cfg = PreprocessCfg(**model.visual.preprocess_cfg)
     clip.preprocess = image_transform_v2(pp_cfg, is_train=False)
-    clip.tokenizer = (
-        _take_preloaded_tokenizer(model_name)
-        or _load_tokenizer(open_clip, model_name)
-    )
