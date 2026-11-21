@@ -46,26 +46,12 @@ log = logging.getLogger("grape")
 # SigLIP 2 (Tschannen et al., 2025) https://arxiv.org/abs/2502.14786
 DEFAULT_MODEL = "ViT-L-16-SigLIP2-256/webli"
 
-# Prompt ensembling: average embeddings across multiple prompt templates
-# per keyword, then L2-normalize. See CLIP (Radford et al., 2021) Section
-# 3.1.4 and Appendix A. https://arxiv.org/abs/2103.00020
-#
-# These are open_clip's SIMPLE_IMAGENET_TEMPLATES (the 7 templates CLIP's
-# forward selection kept out of its 80) plus the bare keyword. On SigLIP 2
-# this "Avg'" set scores +1.6 ImageNet over the bare keyword and +0.6 over
-# the best single template; three near-synonym templates gain ~nothing
-# because the ensemble's value comes from template diversity, not count.
-# Volkov et al., BMVC 2025, Table 2. https://arxiv.org/abs/2509.09311
-DEFAULT_PROMPT_ENSEMBLE = [
-    "{}",
-    "itap of a {}.",
-    "a bad photo of the {}.",
-    "a origami {}.",
-    "a photo of the large {}.",
-    "a {} in a video game.",
-    "art of the {}.",
-    "a photo of the small {}.",
-]
+# Keywords are embedded as written. Averaging several templates per keyword
+# (--ensemble-prompts, CLIP section 3.1.4, https://arxiv.org/abs/2103.00020)
+# didn't help photo retrieval: over 164 keyword queries on 443 Unsplash
+# photos, the bare keyword scored mAP 0.480 with SigLIP2-L vs 0.474 for
+# open_clip's ImageNet templates, and it encodes far less text.
+DEFAULT_PROMPT_ENSEMBLE = ["{}"]
 
 _HTML_TEMPLATE_TEXT = """
 <!doctype html>
@@ -1142,7 +1128,7 @@ def _build_parser() -> argparse.ArgumentParser:
                "  grape -R --keywords 'cat,dog' ~/Pictures\n"
                "  grape -R --like ref.jpg ~/Pictures\n"
                "  grape -R --keywords dog --exclude cat ~/Pictures\n"
-               "  grape -R -n 20 --ensemble-prompts '{}'"
+               "  grape -R -n 20"
                " --keywords 'beautiful photo' --exclude 'ugly photo'"
                " --view ~/Pictures\n"
                "  find ~/Pictures -mtime -7 | grape --keywords selfie -\n"
@@ -1279,10 +1265,9 @@ def _build_parser() -> argparse.ArgumentParser:
         default=",".join(DEFAULT_PROMPT_ENSEMBLE),
         metavar="TEMPLATES",
         help="comma-separated prompt templates ('{}' is replaced with each"
-             " keyword); the keyword's final embedding is the normalized mean"
-             " across templates. Pass a single template (e.g. '{}') to"
-             " disable ensembling. Default:"
-             f" {','.join(DEFAULT_PROMPT_ENSEMBLE)}",
+             " keyword); a keyword's embedding is the normalized mean across"
+             " templates, e.g. '{},a photo of a {}.'. Default: '{}', the"
+             " keyword as written",
     )
     parser.add_argument(
         "--keyword-separator",

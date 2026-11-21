@@ -1,6 +1,6 @@
-0.205  tests/fixtures/beach.jpg
-  sunset: 0.163  beach: 0.247
-0.192  tests/fixtures/subdir/sunset.jpg
-  sunset: 0.283  beach: 0.102
-0.144  tests/fixtures/lenna.png
-  sunset: 0.144  beach: 0.143
+0.232  tests/fixtures/beach.jpg
+  sunset: 0.193  beach: 0.271
+0.230  tests/fixtures/lenna.png
+  sunset: 0.228  beach: 0.231
+0.204  tests/fixtures/subdir/sunset.jpg
+  sunset: 0.258  beach: 0.151

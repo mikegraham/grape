@@ -4,11 +4,11 @@ Search your photos by describing what's in them. Like grep, but for images.
 
 ```
 $ grape -R -s -n 5 --keywords sunset tests/fixtures
-0.283  tests/fixtures/subdir/sunset.jpg
-0.163  tests/fixtures/beach.jpg
-0.146  tests/fixtures/omelette.jpg
-0.144  tests/fixtures/lenna.png
-0.128  tests/fixtures/cat.jpg
+0.258  tests/fixtures/subdir/sunset.jpg
+0.228  tests/fixtures/lenna.png
+0.193  tests/fixtures/beach.jpg
+0.191  tests/fixtures/omelette.jpg
+0.179  tests/fixtures/teapot.png
 ```
 
 The same search with `--view`:
@@ -77,12 +77,12 @@ Results are listed best match first.
 
   ```
   $ grape -R -v -n 3 --keywords sunset,beach tests/fixtures
-  0.205  tests/fixtures/beach.jpg
-    sunset: 0.163  beach: 0.247
-  0.192  tests/fixtures/subdir/sunset.jpg
-    sunset: 0.283  beach: 0.102
-  0.144  tests/fixtures/lenna.png
-    sunset: 0.144  beach: 0.143
+  0.232  tests/fixtures/beach.jpg
+    sunset: 0.193  beach: 0.271
+  0.230  tests/fixtures/lenna.png
+    sunset: 0.228  beach: 0.231
+  0.204  tests/fixtures/subdir/sunset.jpg
+    sunset: 0.258  beach: 0.151
   ```
 
 - `--view` opens the results in a window. Click photos to select them;
@@ -123,8 +123,7 @@ With `--exclude`, the score is the keyword score minus the exclude score.
 That makes it useful for ranking photos by quality:
 
 ```bash
-grape -R -n 20 --ensemble-prompts '{}' \
-    --keywords 'beautiful photo' --exclude 'ugly photo' ~/Pictures
+grape -R -n 20 --keywords 'beautiful photo' --exclude 'ugly photo' ~/Pictures
 ```
 
 `--like` matches what a photo shows, not its exact pixels: two different
@@ -152,13 +151,6 @@ download instead of 3.5 GB. Its matches are slightly worse: on the standard
 ImageNet test it names about 3 in 100 more photos wrong than the default.
 
 Each model has its own index, so switching models reads all photos again.
-
-grape turns each keyword into a few short sentences ("itap of a sunset.",
-"a bad photo of the sunset.", ...) and averages them, which matches photos
-better than the bare word
-([Radford et al. 2021](https://arxiv.org/abs/2103.00020), section 3.1.4).
-`--ensemble-prompts '{}'` uses your keywords exactly as written, which is
-better when they're already full sentences.
 
 ## Cache
 

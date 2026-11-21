@@ -67,7 +67,7 @@ def pick_device() -> str:
 
 # From this many prompts in one call, text encodes faster on the GPU than
 # on the CPU, even counting the GPU's startup (~12-15 prompts measured with
-# SigLIP2-L on an Intel Xe3 iGPU; one keyword is 8 prompts by default).
+# SigLIP2-L on an Intel Xe3 iGPU).
 GPU_TEXT_MIN_PROMPTS = 16
 
 
