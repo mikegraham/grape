@@ -1456,6 +1456,8 @@ def _stub_imports_HACK() -> None:
     stub a model needs the real module for.
     """
     def stub(name: str, **attrs: Any) -> None:
+        if name in sys.modules:  # already imported for real
+            return
         module = types.ModuleType(name, "grape startup stub")
         for attr, value in attrs.items():
             setattr(module, attr, value)

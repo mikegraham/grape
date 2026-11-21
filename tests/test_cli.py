@@ -2271,3 +2271,18 @@ def test_shell_quote_is_posix_only(monkeypatch):
     assert _shell_quote("my photo.jpg") == "'my photo.jpg'"
     monkeypatch.setattr("sys.platform", "win32")
     assert _shell_quote(r"C:\My Photos\cat.jpg") == r"C:\My Photos\cat.jpg"
+
+
+def test_stub_imports_hack_keeps_modules_already_imported(monkeypatch):
+    """A stub must never replace a real module (e.g. transformers, once a
+    model that needs it has loaded): later imports from it would fail."""
+    import types
+
+    import grape.cli
+
+    monkeypatch.setattr(sys, "modules", dict(sys.modules))
+    real = types.ModuleType("transformers")
+    real.__file__ = "transformers/__init__.py"
+    sys.modules["transformers"] = real
+    grape.cli._stub_imports_HACK()
+    assert sys.modules["transformers"] is real
