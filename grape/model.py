@@ -63,6 +63,24 @@ def pick_device() -> str:
     return "cpu"
 
 
+def _cpu_threads() -> int:
+    """Threads for torch on the CPU: three quarters of the usable CPUs.
+
+    Every CPU (torch's default) was the slowest setting for a full run on
+    both a hybrid 8-core laptop and a 24-core server: grape's image-decode
+    threads need CPU at the same time.
+    """
+    cpus: int | None
+    getaffinity = getattr(os, "sched_getaffinity", None)
+    if getaffinity is not None:
+        cpus = len(getaffinity(0))  # respects taskset and containers
+    else:
+        cpus = os.cpu_count()
+    if cpus is None:  # the OS can't say
+        return 1
+    return max(1, cpus * 3 // 4)
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -99,6 +117,8 @@ class CLIPModel:
         size = self.model.visual.preprocess_cfg["size"]
         self._image_size = max(size) if isinstance(size, (tuple, list)) else size
         self.device = pick_device()
+        if self.device == "cpu":
+            torch.set_num_threads(_cpu_threads())
         # On a GPU, store the weights in fp16: autocast converts them to
         # fp16 for every matmul anyway, so this halves GPU memory, the copy
         # and per-batch traffic (~6% faster encoding) for the same scores

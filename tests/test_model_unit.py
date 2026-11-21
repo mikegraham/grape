@@ -639,3 +639,13 @@ def test_load_frames_drafts_large_jpegs_to_twice_the_size(tmp_path):
     png = tmp_path / "big.png"
     Image.new("RGB", (2000, 1500), (90, 120, 150)).save(png, format="PNG")
     assert next(_load_frames(str(png), 256)).size == (2000, 1500)
+
+
+@pytest.mark.parametrize("cpus, threads", [(8, 6), (6, 4), (4, 3), (1, 1)])
+def test_cpu_threads_leave_a_quarter_free(monkeypatch, cpus, threads):
+    from grape.model import _cpu_threads
+
+    monkeypatch.setattr(
+        os, "sched_getaffinity", lambda _pid: set(range(cpus)), raising=False,
+    )
+    assert _cpu_threads() == threads
