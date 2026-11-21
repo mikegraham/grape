@@ -30,10 +30,10 @@ MODEL = "ViT-B-32/laion2b_s34b_b79k"
 # Repo-relative fixture path here (subprocess runs with cwd=REPO) so the
 # hash is reproducible across machines.
 SAMPLE_SCORES_ARGS = [
-    "--scores", "--keywords", "sunset", "--top", "5", "-R", "tests/fixtures",
+    "--scores", "--keywords", "dog", "--top", "5", "-R", "tests/fixtures",
 ]
 SAMPLE_VERBOSE_ARGS = [
-    "-v", "--keywords", "sunset,beach", "--top", "3", "-R", "tests/fixtures",
+    "-v", "--keywords", "dog,howling", "--top", "3", "-R", "tests/fixtures",
 ]
 
 
@@ -86,7 +86,7 @@ def generate_view_screenshot() -> None:
         [
             sys.executable, "-m", "grape",
             "--no-cache", "--model", MODEL,
-            "--scores", "--keywords", "sunset",
+            "--scores", "--keywords", "dog",
             "--top", "5",
             "-R", "tests/fixtures",
         ],
@@ -102,11 +102,11 @@ def generate_view_screenshot() -> None:
         path = path_str.strip()
         results.append(ScoredImage(
             path=path,
-            scores={"sunset": float(score_str)},
+            scores={"dog": float(score_str)},
             score=float(score_str),
         ))
 
-    html = _format_html(results, ["sunset"])
+    html = _format_html(results, ["dog"])
 
     from playwright.sync_api import sync_playwright
 

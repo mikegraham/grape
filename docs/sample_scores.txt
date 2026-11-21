@@ -1,5 +1,5 @@
-0.283  tests/fixtures/subdir/sunset.jpg
-0.163  tests/fixtures/beach.jpg
-0.146  tests/fixtures/omelette.jpg
-0.144  tests/fixtures/lenna.png
-0.128  tests/fixtures/cat.jpg
+0.274  tests/fixtures/dog.jpg
+0.261  tests/fixtures/wolves.jpg
+0.208  tests/fixtures/dovetail.jpg
+0.205  tests/fixtures/cat.jpg
+0.203  tests/fixtures/beach.jpg

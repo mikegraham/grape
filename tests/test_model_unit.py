@@ -194,52 +194,6 @@ def test_no_parameter_init_nests():
     assert init.normal_ is real
 
 
-def test_preloaded_tokenizer_not_reused_across_models(monkeypatch):
-    """A preload that overran its timeout must not be handed to another model.
-
-    The thread stays tracked after a timeout, so without keying on the
-    model name the next (different) model receives this tokenizer and
-    embeds with the wrong vocab -- silently, since tokenizers are
-    duck-typed and nothing validates the pairing.
-    """
-    import threading
-
-    import grape.model as gm
-
-    slow = threading.Event()
-
-    def fake_load(_open_clip, model_name):
-        if model_name == "ModelA":
-            slow.wait(timeout=5)
-        return f"tokenizer-for-{model_name}"
-
-    monkeypatch.setattr(gm, "_load_tokenizer", fake_load)
-    monkeypatch.setattr(gm, "_tokenizer_thread", None)
-    monkeypatch.setattr(gm, "_preloaded_tokenizer", None)
-
-    gm._preload_tokenizer(None, "ModelA")
-    gm._tokenizer_thread.join(timeout=0.05)
-    assert gm._tokenizer_thread.is_alive(), "expected the A load to overrun"
-    slow.set()
-    gm._tokenizer_thread.join(timeout=5)
-
-    gm._preload_tokenizer(None, "ModelB")
-    assert gm._take_preloaded_tokenizer("ModelB") is None
-
-    monkeypatch.setattr(gm, "_tokenizer_thread", None)
-    monkeypatch.setattr(gm, "_preloaded_tokenizer", None)
-
-
-def test_preloaded_tokenizer_returned_for_matching_model(monkeypatch):
-    import grape.model as gm
-
-    monkeypatch.setattr(gm, "_load_tokenizer", lambda _oc, name: f"tok-{name}")
-    monkeypatch.setattr(gm, "_tokenizer_thread", None)
-    monkeypatch.setattr(gm, "_preloaded_tokenizer", None)
-    gm._preload_tokenizer(None, "ModelA")
-    assert gm._take_preloaded_tokenizer("ModelA") == "tok-ModelA"
-
-
 def _tiny_hf_tokenizer(snapshot):
     """A tokenizer.json + tokenizer_config.json shaped like SigLIP's."""
     import json
@@ -428,11 +382,19 @@ def test_load_frames_never_leaks_pillow_errors_for_truncated_gif(tmp_path):
         pytest.skip("no truncation reproduced a decode error on this Pillow")
 
 
-def test_import_open_clip_falls_back_when_stubs_break_import(monkeypatch):
+@pytest.mark.parametrize("cli, expected", [
+    (True, ["stubbed", "plain"]),
+    (False, ["plain"]),  # library use: never stubbed
+])
+def test_import_open_clip_falls_back_when_stubs_break_import(
+    monkeypatch, cli, expected,
+):
     """open_clip 4.x imports names the coca_model stub lacks; the stubbed
-    import must fall back to a plain one instead of raising ImportError."""
+    import must fall back to a plain one instead of raising ImportError.
+    Only the CLI installs the stubs."""
     import sys
 
+    import grape.cli
     import grape.model as gm
 
     real = SimpleNamespace(__name__="open_clip")
@@ -457,9 +419,11 @@ def test_import_open_clip_falls_back_when_stubs_break_import(monkeypatch):
     monkeypatch.setattr(gm, "_open_clip_fast_path", False)
     monkeypatch.setattr(gm.importlib, "import_module", fake_import)
     monkeypatch.setattr(gm, "_model_needs_timm", lambda _name: False)
+    if cli:
+        grape.cli._stub_imports_HACK()
 
     assert gm._import_open_clip(use_transformers=False, model_name="X") is real
-    assert calls == ["stubbed", "plain"]
+    assert calls == expected
     assert "open_clip.mammut_model" not in sys.modules
     assert gm._open_clip_fast_path is False
 
@@ -639,3 +603,13 @@ def test_load_frames_drafts_large_jpegs_to_twice_the_size(tmp_path):
     png = tmp_path / "big.png"
     Image.new("RGB", (2000, 1500), (90, 120, 150)).save(png, format="PNG")
     assert next(_load_frames(str(png), 256)).size == (2000, 1500)
+
+
+@pytest.mark.parametrize("cpus, threads", [(8, 6), (6, 4), (4, 3), (1, 1)])
+def test_cpu_threads_leave_a_quarter_free(monkeypatch, cpus, threads):
+    from grape.model import _cpu_threads
+
+    monkeypatch.setattr(
+        os, "sched_getaffinity", lambda _pid: set(range(cpus)), raising=False,
+    )
+    assert _cpu_threads() == threads

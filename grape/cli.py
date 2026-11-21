@@ -9,6 +9,7 @@ import shlex
 import signal
 import sys
 import threading
+import types
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractContextManager, closing, nullcontext
 from dataclasses import dataclass
@@ -46,26 +47,12 @@ log = logging.getLogger("grape")
 # SigLIP 2 (Tschannen et al., 2025) https://arxiv.org/abs/2502.14786
 DEFAULT_MODEL = "ViT-L-16-SigLIP2-256/webli"
 
-# Prompt ensembling: average embeddings across multiple prompt templates
-# per keyword, then L2-normalize. See CLIP (Radford et al., 2021) Section
-# 3.1.4 and Appendix A. https://arxiv.org/abs/2103.00020
-#
-# These are open_clip's SIMPLE_IMAGENET_TEMPLATES (the 7 templates CLIP's
-# forward selection kept out of its 80) plus the bare keyword. On SigLIP 2
-# this "Avg'" set scores +1.6 ImageNet over the bare keyword and +0.6 over
-# the best single template; three near-synonym templates gain ~nothing
-# because the ensemble's value comes from template diversity, not count.
-# Volkov et al., BMVC 2025, Table 2. https://arxiv.org/abs/2509.09311
-DEFAULT_PROMPT_ENSEMBLE = [
-    "{}",
-    "itap of a {}.",
-    "a bad photo of the {}.",
-    "a origami {}.",
-    "a photo of the large {}.",
-    "a {} in a video game.",
-    "art of the {}.",
-    "a photo of the small {}.",
-]
+# Keywords are embedded as written. Averaging several templates per keyword
+# (--ensemble-prompts, CLIP section 3.1.4, https://arxiv.org/abs/2103.00020)
+# didn't help photo retrieval: over 164 keyword queries on 443 Unsplash
+# photos, the bare keyword scored mAP 0.480 with SigLIP2-L vs 0.474 for
+# open_clip's ImageNet templates, and it encodes far less text.
+DEFAULT_PROMPT_ENSEMBLE = ["{}"]
 
 _HTML_TEMPLATE_TEXT = """
 <!doctype html>
@@ -1142,7 +1129,7 @@ def _build_parser() -> argparse.ArgumentParser:
                "  grape -R --keywords 'cat,dog' ~/Pictures\n"
                "  grape -R --like ref.jpg ~/Pictures\n"
                "  grape -R --keywords dog --exclude cat ~/Pictures\n"
-               "  grape -R -n 20 --ensemble-prompts '{}'"
+               "  grape -R -n 20"
                " --keywords 'beautiful photo' --exclude 'ugly photo'"
                " --view ~/Pictures\n"
                "  find ~/Pictures -mtime -7 | grape --keywords selfie -\n"
@@ -1279,10 +1266,9 @@ def _build_parser() -> argparse.ArgumentParser:
         default=",".join(DEFAULT_PROMPT_ENSEMBLE),
         metavar="TEMPLATES",
         help="comma-separated prompt templates ('{}' is replaced with each"
-             " keyword); the keyword's final embedding is the normalized mean"
-             " across templates. Pass a single template (e.g. '{}') to"
-             " disable ensembling. Default:"
-             f" {','.join(DEFAULT_PROMPT_ENSEMBLE)}",
+             " keyword); a keyword's embedding is the normalized mean across"
+             " templates, e.g. '{},a photo of a {}.'. Default: '{}', the"
+             " keyword as written",
     )
     parser.add_argument(
         "--keyword-separator",
@@ -1461,7 +1447,40 @@ def _sigint_handler(verbose: bool):
     return handler
 
 
+def _stub_imports_HACK() -> None:
+    """Put stand-ins in sys.modules for heavy modules open_clip imports
+    but grape doesn't use, so loading the model takes ~2.7 s less.
+
+    For the CLI only: they're process-wide, which grape as a library
+    shouldn't impose on the program importing it. grape.model drops any
+    stub a model needs the real module for.
+    """
+    def stub(name: str, **attrs: Any) -> None:
+        if name in sys.modules:  # already imported for real
+            return
+        module = types.ModuleType(name, "grape startup stub")
+        for attr, value in attrs.items():
+            setattr(module, attr, value)
+        sys.modules[name] = module
+
+    # HF text towers; plain CLIP and SigLIP don't need them.
+    stub("transformers")
+    stub("open_clip.coca_model", CoCa=None)
+    stub("open_clip.timm_model", TimmModel=None)
+
+    # torchvision.ops pulls in torch._dynamo and sympy (~1.2 s), and grape
+    # never calls torch.compile. torch uses `disable` as a decorator.
+    def disable(fn: Any = None, recursive: bool = True, **kwargs: Any) -> Any:
+        if fn is None:
+            return disable
+        return fn
+
+    stub("torch._dynamo.utils", is_compile_supported=lambda: False)
+    stub("torch._dynamo", disable=disable, utils=sys.modules["torch._dynamo.utils"])
+
+
 def main() -> None:
+    _stub_imports_HACK()
     parser = _build_parser()
 
     args = parser.parse_args()

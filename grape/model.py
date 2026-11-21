@@ -17,13 +17,14 @@ This module contains some crazy hacks to reduce latency.
 
 from __future__ import annotations
 
+import functools
+import hashlib
 import importlib
 import logging
 import os
 import struct
 import sys
 import threading
-import types
 from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
@@ -52,15 +53,44 @@ def pick_device() -> str:
     if requested:
         log.debug("device: %s (from $GRAPE_DEVICE)", requested)
         return requested
-    if hasattr(torch, "xpu") and torch.xpu.is_available():
-        log.debug("device: xpu (%s)", torch.xpu.get_device_name(0))
-        return "xpu"
-    if torch.cuda.is_available():
-        # ROCm builds report AMD GPUs here too.
-        log.debug("device: cuda (%s)", torch.cuda.get_device_name(0))
-        return "cuda"
+    xpu = getattr(torch, "xpu", None)  # absent in older torch
+    if xpu is not None and xpu.is_available():
+        device = "xpu"
+    elif torch.cuda.is_available():  # ROCm builds report AMD GPUs here too
+        device = "cuda"
+    else:
+        log.debug("device: cpu (torch %s sees no xpu or cuda)", torch.__version__)
+        return "cpu"
+    if log.isEnabledFor(logging.DEBUG):  # the GPU's name takes ~0.2 s to get
+        name = getattr(torch, device).get_device_name(0)
+        log.debug("device: %s (%s)", device, name)
+    return device
     log.debug("device: cpu (torch %s sees no xpu or cuda)", torch.__version__)
     return "cpu"
+
+
+# From this many prompts in one call, text encodes faster on the GPU than
+# on the CPU, even counting the GPU's startup (~12-15 prompts measured with
+# SigLIP2-L on an Intel Xe3 iGPU).
+GPU_TEXT_MIN_PROMPTS = 16
+
+
+def _cpu_threads() -> int:
+    """Threads for torch on the CPU: three quarters of the usable CPUs.
+
+    Every CPU (torch's default) was the slowest setting for a full run on
+    both a hybrid 8-core laptop and a 24-core server: grape's image-decode
+    threads need CPU at the same time.
+    """
+    cpus: int | None
+    getaffinity = getattr(os, "sched_getaffinity", None)
+    if getaffinity is not None:
+        cpus = len(getaffinity(0))  # respects taskset and containers
+    else:
+        cpus = os.cpu_count()
+    if cpus is None:  # the OS can't say
+        return 1
+    return max(1, cpus * 3 // 4)
 
 
 # ---------------------------------------------------------------------------
@@ -96,21 +126,27 @@ class CLIPModel:
                 raise
             open_clip = _import_open_clip(use_transformers=True)
             self._init_model(open_clip, model_name, pretrained)
+        self._open_clip = open_clip
         size = self.model.visual.preprocess_cfg["size"]
         self._image_size = max(size) if isinstance(size, (tuple, list)) else size
         self.device = pick_device()
-        # On a GPU, store the weights in fp16: autocast converts them to
-        # fp16 for every matmul anyway, so this halves GPU memory, the copy
-        # and per-batch traffic (~6% faster encoding) for the same scores
-        # within ~0.0005. The CPU has no fast fp16 and stays fp32.
-        dtype = torch.float32 if self.device == "cpu" else torch.float16
-        self.model.to(self.device, dtype=dtype).eval()
-        log.debug(
-            "model: %s/%s on %s, %s", model_name, pretrained, self.device,
-            "fp32" if self.device == "cpu" else "fp16",
-        )
+        torch.set_num_threads(_cpu_threads())  # text usually runs on the CPU
+        self._text_on_gpu = False
+        self._gpu_move_lock = threading.Lock()
+        self.model.eval()
+        log.debug("model: %s/%s, images on %s, text on cpu",
+                  model_name, pretrained, self.device)
         if not quiet:
             print("done.", file=sys.stderr)
+
+    @functools.cached_property
+    def tokenizer(self) -> Any:
+        """Built on first use: runs that encode no text never need it, and
+        loading SigLIP 2's takes ~2 s, holding the GIL the whole time."""
+        # Not preloaded in a background thread: that was tried, and since
+        # tokenizers' from_file holds the GIL, it only stalled the model
+        # build running alongside it.
+        return _load_tokenizer(self._open_clip, self._model_name)
 
     def _autocast(self) -> Any:
         """fp16 autocast off-CPU: matmuls run on tensor cores (Intel XMX,
@@ -126,7 +162,7 @@ class CLIPModel:
         model_name: str,
         pretrained: str,
     ) -> None:
-        """Initialize model, tokenizer, and preprocess transform.
+        """Initialize the model and preprocess transform.
 
         Two paths:
 
@@ -155,10 +191,6 @@ class CLIPModel:
                     device=self.device,
                 )
             )
-        self.tokenizer = (
-            _take_preloaded_tokenizer(model_name)
-            or _load_tokenizer(open_clip, model_name)
-        )
 
     def _init_model_fast(
         self,
@@ -199,11 +231,33 @@ class CLIPModel:
         dim: int = cfg["embed_dim"]
         return dim
 
+    def _move_to_gpu(self, module: torch.nn.Module) -> None:
+        """Move part of the model to the GPU, a no-op once it's there.
+
+        In fp16, since autocast converts the weights for every matmul
+        anyway: half the memory and copy, scores within ~0.0005. Locked,
+        since images can encode in two threads at once (--like and the
+        library), and neither may run the model halfway through a move.
+        """
+        with self._gpu_move_lock:
+            module.to(self.device, dtype=torch.float16)
+
     @torch.no_grad()
     def encode_texts(self, texts: list[str]) -> NDArray[np.float32]:
-        """Encode text strings to L2-normalized embeddings. Shape: (n, dim)."""
-        tokens = self.tokenizer(texts).to(self.device)
-        with self._autocast():
+        """Encode text strings to L2-normalized embeddings. Shape: (n, dim).
+
+        A few prompts run on the CPU (see __init__). Past
+        GPU_TEXT_MIN_PROMPTS the GPU pays for its startup: the text half
+        moves there for the rest of the run.
+        """
+        tokens = self.tokenizer(texts)
+        if len(texts) >= GPU_TEXT_MIN_PROMPTS and self.device != "cpu":
+            self._move_to_gpu(self.model)
+            self._text_on_gpu = True
+        if self._text_on_gpu:
+            with self._autocast():
+                emb = self.model.encode_text(tokens.to(self.device)).float()
+        else:
             emb = self.model.encode_text(tokens).float()
         emb = emb / emb.norm(dim=-1, keepdim=True)
         result: NDArray[np.float32] = emb.cpu().numpy().astype(np.float32)
@@ -257,6 +311,12 @@ class CLIPModel:
         if not ok:
             return loaded  # type: ignore[return-value]
         frames = torch.cat(ok)
+        if self.device != "cpu":
+            # Only the image half goes to the GPU, and only once images
+            # need it. A search encodes a few prompts, which the CPU does
+            # faster than the GPU can start up: its first call alone took
+            # ~2.4 s here.
+            self._move_to_gpu(self.model.visual)
         chunks = []
         with self._autocast():
             for i in range(0, len(frames), ENCODE_BATCH_SIZE):
@@ -394,7 +454,7 @@ def resolve_model_id(
 # path (import open_clip -> create_model -> load_checkpoint) takes ~3s on
 # a cold start.  These hacks bring it to ~1s by:
 #
-#   1. Import stubs (~1.2s saved): inject fake modules into sys.modules
+#   1. Import stubs (~2.7s saved, CLI only): fake modules in sys.modules
 #      so that `import open_clip` skips heavy dependencies we never use
 #      (transformers, CoCa, timm, torch._dynamo/sympy).
 #
@@ -416,33 +476,35 @@ def resolve_model_id(
 
 _open_clip_module = None
 _open_clip_fast_path = False
-# Tagged with the (model_name, pretrained) it was read for, like the tokenizer.
+# Tagged with the (model_name, pretrained) it was read for.
 _preloaded_state_dict: tuple[tuple[str, str], dict] | None = None
 _preload_thread: "threading.Thread | None" = None
-_tokenizer_thread: "threading.Thread | None" = None
-_preloaded_tokenizer: Any | None = None
 
 
 # -- Hack 1: Import stubs -------------------------------------------------
 #
-# open_clip eagerly imports modules we never use for plain CLIP inference:
-#   - transformers (~0.5s) -- HF text towers, only needed for custom text
-#   - open_clip.coca_model (~0.35s) -- CoCa architecture
-#   - open_clip.timm_model (~0.25s) -- timm vision backbones
-#   - torch._dynamo + sympy (~1.2s) -- pulled in by torchvision.ops;
-#     we never call torch.compile so this is pure waste
-#
-# We inject stub modules into sys.modules before importing open_clip.
-# The stubs are permanent for the process lifetime. If a model actually
-# needs one of these (e.g. CoCa or a timm backbone), _import_open_clip
-# purges them and reimports cleanly.
+# The CLI stubs out modules open_clip imports but grape doesn't use (see
+# cli._stub_imports_HACK). Library use never has them. _import_open_clip
+# drops a stub when the model needs the real module.
 
-def _make_stub(name: str, doc: str, **attrs: Any) -> types.ModuleType:
-    """Create a stub module with a docstring explaining why it exists."""
-    stub = types.ModuleType(name, doc)
-    for attr, val in attrs.items():
-        setattr(stub, attr, val)
-    return stub
+def _is_stub(module: object) -> bool:
+    """True for a stub from cli._stub_imports_HACK: it has no file."""
+    return module is not None and getattr(module, "__file__", None) is None
+
+
+def _drop_stubs(*names: str) -> None:
+    """Remove the stubs for these modules and their submodules."""
+    for key in list(sys.modules):
+        if key in names or key.startswith(tuple(n + "." for n in names)):
+            if _is_stub(sys.modules[key]):
+                del sys.modules[key]
+
+
+def _forget_open_clip() -> None:
+    """Remove open_clip from sys.modules, so it can be imported afresh."""
+    for name in list(sys.modules):
+        if name == "open_clip" or name.startswith("open_clip."):
+            del sys.modules[name]
 
 
 def _builtin_model_config(model_name: str) -> dict | None:
@@ -531,73 +593,88 @@ class _FastHFTokenizer:
         return torch.tensor([e.ids for e in encodings], dtype=torch.long)
 
 
-def _install_import_stubs(*, stub_timm: bool = True) -> None:
-    """Inject stub modules into sys.modules to skip heavy imports.
+# tokenizer.json files, by SHA-256 of their contents, that have an
+# equivalent SentencePiece model: (repo, file, SHA-256 of that file).
+# tokenizers parses a 256k-word tokenizer.json in ~2 s, holding the GIL;
+# SentencePiece loads the same vocabulary in ~0.1 s without it. Keyed by
+# contents, so a changed tokenizer.json quietly falls back to the JSON.
+# test_sentencepiece_tokenizer_matches_json checks each entry.
+_SENTENCEPIECE_EQUIVALENTS = {
+    # Gemma's tokenizer, shared by every SigLIP 2 model. timm's repos
+    # ship only tokenizer.json; Google's ship tokenizer.model too.
+    "220c63d496e0c14e63eb656c91e0215e926202e4c74b1f089e09f1920d779b04": (
+        "google/siglip2-base-patch16-256",
+        "tokenizer.model",
+        "61a7b147390c64585d6c3543dd6fc636906c9af3865a5548f27f31aee1d4c8e2",
+    ),
+}
 
-    Permanent for the process lifetime. See "Hack 1" comment above.
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(1 << 20):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _sentencepiece_equivalent(tokenizer_json: Path) -> Path | None:
+    """A verified SentencePiece model equivalent to *tokenizer_json*, or None.
+
+    Downloaded once (4 MB) into the Hugging Face cache; offline, the
+    tokenizer.json is used instead.
     """
-    if "transformers" not in sys.modules:
-        sys.modules["transformers"] = _make_stub(
-            "transformers",
-            "grape startup stub: blocks heavy transformers import",
-        )
-    if "open_clip.coca_model" not in sys.modules:
-        sys.modules["open_clip.coca_model"] = _make_stub(
-            "open_clip.coca_model",
-            "grape startup stub: CoCa not needed for plain CLIP",
-            CoCa="STUBBED by grape/model.py: CoCa not needed",
-        )
-    if stub_timm and "open_clip.timm_model" not in sys.modules:
-        sys.modules["open_clip.timm_model"] = _make_stub(
-            "open_clip.timm_model",
-            "grape startup stub: timm backbone not needed for this model",
-            TimmModel="STUBBED by grape/model.py: timm not needed",
-        )
-    # torch._dynamo stub must provide `disable` (used as a no-op decorator
-    # by torch.compiler.disable and torch._compile.inner) and `utils` with
-    # `is_compile_supported`. Since we never call torch.compile, `disable`
-    # just returns the decorated function unchanged.
-    #
-    # The stub is tagged with _grape_stub=True so remove_dynamo_stubs() can
-    # find and purge it when the caller actually wants torch.compile.
-    if "torch._dynamo" not in sys.modules:
-
-        def _dynamo_disable_noop(fn=None, recursive=True, **kwargs):
-            """No-op: torch.compile is never used."""
-            if fn is None:
-                return _dynamo_disable_noop
-            return fn
-
-        dynamo_stub = _make_stub(
-            "torch._dynamo",
-            "grape startup stub: torch.compile not used",
-            disable=_dynamo_disable_noop,
-            _grape_stub=True,
-        )
-        dynamo_utils_stub = _make_stub(
-            "torch._dynamo.utils",
-            "grape startup stub: deferred",
-            is_compile_supported=lambda: False,
-            _grape_stub=True,
-        )
-        dynamo_stub.utils = dynamo_utils_stub  # type: ignore[attr-defined]
-        sys.modules["torch._dynamo"] = dynamo_stub
-        sys.modules["torch._dynamo.utils"] = dynamo_utils_stub
+    entry = _SENTENCEPIECE_EQUIVALENTS.get(_sha256(tokenizer_json))
+    if entry is None:
+        return None
+    repo, filename, sha256 = entry
+    path = _cached_file_from_repo(repo, filename)
+    if path is None:
+        from huggingface_hub import hf_hub_download
+        try:
+            path = hf_hub_download(repo, filename)
+        except OSError as exc:
+            log.debug("no %s from %s (%s); using tokenizer.json", filename, repo, exc)
+            return None
+    if _sha256(Path(path)) != sha256:
+        log.debug("%s from %s has changed; using tokenizer.json", filename, repo)
+        return None
+    return Path(path)
 
 
-def remove_dynamo_stubs() -> None:
-    """Remove grape's torch._dynamo stubs from sys.modules.
+class _SentencePieceTokenizer:
+    """_FastHFTokenizer's output from an equivalent SentencePiece model.
 
-    Call this before torch.compile to let the real torch._dynamo load.
-    The stubs are only installed to skip the ~620ms torchvision.ops import
-    cost on startup; once open_clip is loaded they are no longer needed.
-    Does nothing if the real module is already loaded.
+    Matches tokenizer.json files whose post-processor appends the EOS token
+    and which pad on the right, as Gemma's does.
     """
-    for key in list(sys.modules):
-        if (key == "torch._dynamo" or key.startswith("torch._dynamo.")) and (
-            getattr(sys.modules[key], "_grape_stub", False)
-        ):
-            del sys.modules[key]
+
+    def __init__(
+        self, model_file: Path, snapshot: Path, context_length: int, clean: str,
+    ) -> None:
+        import json
+
+        import sentencepiece
+        from open_clip.tokenizer import get_clean_fn
+
+        config = json.loads(  # UTF-8 by spec, not the locale's encoding
+            (snapshot / "tokenizer_config.json").read_text(encoding="utf-8")
+        )
+        pad = config["pad_token"]
+        pad = pad["content"] if isinstance(pad, dict) else pad
+        self._sp = sentencepiece.SentencePieceProcessor(model_file=str(model_file))
+        self._clean = get_clean_fn(clean)
+        self._length = context_length
+        self._pad = self._sp.piece_to_id(pad)
+
+    def __call__(self, texts: list[str]) -> torch.Tensor:
+        rows = []
+        for text in texts:
+            ids = self._sp.encode(self._clean(text))[: self._length - 1]
+            ids.append(self._sp.eos_id())
+            ids.extend([self._pad] * (self._length - len(ids)))
+            rows.append(ids)
+        return torch.tensor(rows, dtype=torch.long)
 
 
 def _import_open_clip(
@@ -605,48 +682,35 @@ def _import_open_clip(
     use_transformers: bool,
     model_name: str | None = None,
 ):
-    """Import open_clip, optionally with import stubs installed."""
+    """Import open_clip, keeping the CLI's import stubs the model can do
+    without."""
     global _open_clip_fast_path, _open_clip_module
     if _open_clip_module is not None:
         if use_transformers and _open_clip_fast_path:
-            # Previously imported with stubs; purge and reimport cleanly.
-            for name in list(sys.modules):
-                if name == "open_clip" or name.startswith("open_clip."):
-                    del sys.modules[name]
+            _forget_open_clip()  # imported with stubs; reimport without
             _open_clip_module = None
         else:
             return _open_clip_module
 
     if use_transformers:
-        # Purge any stubs we installed so the real modules load.
-        for prefix in ("transformers", "open_clip.coca_model",
-                        "open_clip.timm_model"):
-            for key in list(sys.modules):
-                mod = sys.modules[key]
-                if (key == prefix or key.startswith(prefix + ".")) and (
-                    getattr(mod, "__file__", None) is None
-                ):
-                    del sys.modules[key]
-        remove_dynamo_stubs()  # transformers' lazy imports trip on it
-        _open_clip_module = importlib.import_module("open_clip")
-        _open_clip_fast_path = False
-        return _open_clip_module
-
-    # Only stub timm when we know the model doesn't need it.
-    stub_timm = model_name is not None and not _model_needs_timm(model_name)
-    _install_import_stubs(stub_timm=stub_timm)
+        # transformers' lazy imports trip on the torch._dynamo stub too.
+        _drop_stubs("transformers", "open_clip.coca_model",
+                    "open_clip.timm_model", "torch._dynamo")
+    elif model_name is None or _model_needs_timm(model_name):
+        _drop_stubs("open_clip.timm_model")
+    stubbed = _is_stub(sys.modules.get("open_clip.coca_model"))
     try:
         _open_clip_module = importlib.import_module("open_clip")
     except ImportError as exc:
+        if not stubbed:
+            raise
         # open_clip's own imports outgrew the stubs (4.x's mammut_model
         # pulls names from coca_model at import time). Drop the
         # half-imported package and take the slow, stub-free path.
         log.debug("open_clip import failed with stubs (%s); retrying without", exc)
-        for name in list(sys.modules):
-            if name == "open_clip" or name.startswith("open_clip."):
-                del sys.modules[name]
+        _forget_open_clip()
         return _import_open_clip(use_transformers=True)
-    _open_clip_fast_path = True
+    _open_clip_fast_path = stubbed
     return _open_clip_module
 
 
@@ -658,8 +722,7 @@ def _requires_transformers(exc: Exception) -> bool:
     if "install" in text:
         return True
     # Against our stub, HF tokenizers fail with "cannot import name", not "install".
-    stub = sys.modules.get("transformers")
-    return stub is not None and getattr(stub, "__file__", None) is None
+    return _is_stub(sys.modules.get("transformers"))
 
 
 # -- Hack 2: HF cache probing ---------------------------------------------
@@ -719,6 +782,11 @@ def _load_tokenizer(open_clip: Any, model_name: str) -> Any:
     fast = _fast_tokenizer_dir(text_cfg) if "hf_tokenizer_name" in text_cfg else None
     if fast is not None:
         clean = text_cfg.get("tokenizer_kwargs", {}).get("clean", "whitespace")
+        sentencepiece_model = _sentencepiece_equivalent(fast / "tokenizer.json")
+        if sentencepiece_model is not None:
+            return _SentencePieceTokenizer(
+                sentencepiece_model, fast, context_length, clean,
+            )
         return _FastHFTokenizer(fast, context_length, clean)
     repo = text_cfg.get("hf_tokenizer_name")
     local = _cached_file_from_repo(repo, "tokenizer_config.json") if repo else None
@@ -805,13 +873,8 @@ def preload_weights(model_name: str, pretrained: str) -> None:
     global _preload_thread, _preloaded_state_dict
     if _preload_thread is not None:
         return  # already started
-    # Side effect: installs import stubs for open_clip (unless the model
-    # needs the real transformers).
     needs_tf = _model_needs_transformers(model_name)
-    open_clip = _import_open_clip(use_transformers=needs_tf, model_name=model_name)
-    cfg = _builtin_model_config(model_name) or {}
-    if cfg.get("text_cfg", {}).get("hf_tokenizer_name"):
-        _preload_tokenizer(open_clip, model_name)
+    _import_open_clip(use_transformers=needs_tf, model_name=model_name)
     path = _cached_weight_path(model_name, pretrained)
     if path is None:
         return
@@ -828,41 +891,6 @@ def preload_weights(model_name: str, pretrained: str) -> None:
     _preload_thread = threading.Thread(target=_load, daemon=True)
     _preload_thread.start()
     start_heif_registration()
-
-
-def _preload_tokenizer(open_clip: Any, model_name: str) -> None:
-    """Import transformers and build the tokenizer while weights are read."""
-    global _tokenizer_thread, _preloaded_tokenizer
-    if _tokenizer_thread is not None:
-        return
-
-    def _load():
-        global _preloaded_tokenizer
-        # Tagged with the model it belongs to. A load that overran the
-        # take() timeout stays tracked, so without the tag a later,
-        # different model would be handed this tokenizer and would
-        # silently embed with the wrong vocab.
-        _preloaded_tokenizer = (model_name, _load_tokenizer(open_clip, model_name))
-
-    _tokenizer_thread = threading.Thread(target=_load, daemon=True)
-    _tokenizer_thread.start()
-
-
-def _take_preloaded_tokenizer(model_name: str) -> Any | None:
-    """Consume the preloaded tokenizer, but only if it is for *model_name*."""
-    global _tokenizer_thread, _preloaded_tokenizer
-    if _tokenizer_thread is None:
-        return None
-    _tokenizer_thread.join(timeout=30)
-    if _tokenizer_thread.is_alive():
-        return None
-    loaded = _preloaded_tokenizer
-    _tokenizer_thread = None
-    _preloaded_tokenizer = None
-    if loaded is None:
-        return None
-    loaded_for, tokenizer = loaded
-    return tokenizer if loaded_for == model_name else None
 
 
 def _take_preloaded_state_dict(model_name: str, pretrained: str) -> dict | None:
@@ -994,7 +1022,3 @@ def _init_from_state_dict(
     from open_clip.transform import PreprocessCfg, image_transform_v2
     pp_cfg = PreprocessCfg(**model.visual.preprocess_cfg)
     clip.preprocess = image_transform_v2(pp_cfg, is_train=False)
-    clip.tokenizer = (
-        _take_preloaded_tokenizer(model_name)
-        or _load_tokenizer(open_clip, model_name)
-    )

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Keywords are matched as written by default, instead of averaged over several prompt templates: as good on photo retrieval in our tests, and a new keyword encodes much faster. Keyword scores change slightly.
+
 ## [0.6.0] - 2026-11-20
 
 ### Added
