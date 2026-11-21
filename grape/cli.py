@@ -1449,7 +1449,7 @@ def _sigint_handler(verbose: bool):
 
 def _stub_imports_HACK() -> None:
     """Put stand-ins in sys.modules for heavy modules open_clip imports
-    but grape doesn't use, so loading the model takes ~2.7 s less.
+    but grape doesn't use, so importing open_clip takes ~3 s less.
 
     For the CLI only: they're process-wide, which grape as a library
     shouldn't impose on the program importing it. grape.model drops any
@@ -1463,12 +1463,12 @@ def _stub_imports_HACK() -> None:
             setattr(module, attr, value)
         sys.modules[name] = module
 
-    # HF text towers; plain CLIP and SigLIP don't need them.
+    # HF text towers; plain CLIP and SigLIP don't need them. (Not CoCa's
+    # module: open_clip 4 imports from it, and stubbing it saved nothing.)
     stub("transformers")
-    stub("open_clip.coca_model", CoCa=None)
     stub("open_clip.timm_model", TimmModel=None)
 
-    # torchvision.ops pulls in torch._dynamo and sympy (~1.2 s), and grape
+    # torchvision.ops pulls in torch._dynamo and sympy (~1.3 s), and grape
     # never calls torch.compile. torch uses `disable` as a decorator.
     def disable(fn: Any = None, recursive: bool = True, **kwargs: Any) -> Any:
         if fn is None:
