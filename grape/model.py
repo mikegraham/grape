@@ -64,6 +64,12 @@ def pick_device() -> str:
     return "cpu"
 
 
+# From this many prompts in one call, text encodes faster on the GPU than
+# on the CPU, even counting the GPU's startup (~12-15 prompts measured with
+# SigLIP2-L on an Intel Xe3 iGPU; one keyword is 8 prompts by default).
+GPU_TEXT_MIN_PROMPTS = 16
+
+
 def _cpu_threads() -> int:
     """Threads for torch on the CPU: three quarters of the usable CPUs.
 
@@ -119,18 +125,18 @@ class CLIPModel:
         size = self.model.visual.preprocess_cfg["size"]
         self._image_size = max(size) if isinstance(size, (tuple, list)) else size
         self.device = pick_device()
-        if self.device == "cpu":
-            torch.set_num_threads(_cpu_threads())
-        # On a GPU, store the weights in fp16: autocast converts them to
-        # fp16 for every matmul anyway, so this halves GPU memory, the copy
-        # and per-batch traffic (~6% faster encoding) for the same scores
-        # within ~0.0005. The CPU has no fast fp16 and stays fp32.
-        dtype = torch.float32 if self.device == "cpu" else torch.float16
-        self.model.to(self.device, dtype=dtype).eval()
-        log.debug(
-            "model: %s/%s on %s, %s", model_name, pretrained, self.device,
-            "fp32" if self.device == "cpu" else "fp16",
-        )
+        torch.set_num_threads(_cpu_threads())  # text usually runs on the CPU
+        self._text_on_gpu = False
+        self.model.eval()
+        if self.device != "cpu":
+            # Only the image half goes to the GPU. A search encodes a few
+            # prompts, which the CPU does faster than the GPU can start up:
+            # its first call alone took ~2.4 s here. In fp16, since autocast
+            # converts the weights for every matmul anyway: half the memory
+            # and copy, scores within ~0.0005.
+            self.model.visual.to(self.device, dtype=torch.float16)
+        log.debug("model: %s/%s, images on %s, text on cpu",
+                  model_name, pretrained, self.device)
         if not quiet:
             print("done.", file=sys.stderr)
 
@@ -228,9 +234,20 @@ class CLIPModel:
 
     @torch.no_grad()
     def encode_texts(self, texts: list[str]) -> NDArray[np.float32]:
-        """Encode text strings to L2-normalized embeddings. Shape: (n, dim)."""
-        tokens = self.tokenizer(texts).to(self.device)
-        with self._autocast():
+        """Encode text strings to L2-normalized embeddings. Shape: (n, dim).
+
+        A few prompts run on the CPU (see __init__). Past
+        GPU_TEXT_MIN_PROMPTS the GPU pays for its startup: the text half
+        moves there for the rest of the run.
+        """
+        tokens = self.tokenizer(texts)
+        if len(texts) >= GPU_TEXT_MIN_PROMPTS and self.device != "cpu":
+            self.model.to(self.device, dtype=torch.float16)  # image half: no-op
+            self._text_on_gpu = True
+        if self._text_on_gpu:
+            with self._autocast():
+                emb = self.model.encode_text(tokens.to(self.device)).float()
+        else:
             emb = self.model.encode_text(tokens).float()
         emb = emb / emb.norm(dim=-1, keepdim=True)
         result: NDArray[np.float32] = emb.cpu().numpy().astype(np.float32)
