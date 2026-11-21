@@ -384,6 +384,39 @@ def test_fast_tokenizer_matches_hf_tokenizer_for_default_model():
     assert torch.equal(fast(texts), ref(texts))
 
 
+def test_sentencepiece_tokenizer_matches_json():
+    """The SentencePiece stand-in for SigLIP 2's tokenizer.json must give the
+    same padded token ids, on the same tricky strings plus longer ones."""
+    import torch
+
+    import grape.model as gm
+    from grape.cli import DEFAULT_MODEL
+
+    model_name = DEFAULT_MODEL.split("/", 1)[0]
+    open_clip = gm._import_open_clip(use_transformers=True)
+    text_cfg = open_clip.get_model_config(model_name)["text_cfg"]
+    snapshot = gm._fast_tokenizer_dir(text_cfg)
+    if snapshot is None:
+        pytest.skip("default model's tokenizer files not cached")
+    assert gm._sha256(snapshot / "tokenizer.json") in gm._SENTENCEPIECE_EQUIVALENTS
+    model_file = gm._sentencepiece_equivalent(snapshot / "tokenizer.json")
+    if model_file is None:
+        pytest.skip("SentencePiece model not cached and can't be downloaded")
+    texts = [
+        "", "a photo of a dog", "A Photo Of THE Dog!!", "  tabs\tand\nnewlines ",
+        "caf\u00e9 cr\u00e8me", "\u732b\u306e\u5199\u771f", "&amp; &lt;b&gt;",
+        "emoji \U0001f436 and 50% off C++", "itap of a sunset.",
+        "a bad photo of the golden retriever on a beach at dusk",
+        "dog " * 200,
+        "Taken while in a car while driving on the Mumbai-Pune Expressway " * 3,
+    ]
+    ctx = text_cfg["context_length"]
+    clean = text_cfg["tokenizer_kwargs"]["clean"]
+    json_tokenizer = gm._FastHFTokenizer(snapshot, ctx, clean)
+    sp_tokenizer = gm._SentencePieceTokenizer(model_file, snapshot, ctx, clean)
+    assert torch.equal(sp_tokenizer(texts), json_tokenizer(texts))
+
+
 def test_encode_images_every_format(clip_model, tmp_path):
     """Every format/mode from the unit tests, plus animations, encodes in
     one batch to a unit-norm embedding (no per-file errors)."""
