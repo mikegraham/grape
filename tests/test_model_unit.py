@@ -382,11 +382,19 @@ def test_load_frames_never_leaks_pillow_errors_for_truncated_gif(tmp_path):
         pytest.skip("no truncation reproduced a decode error on this Pillow")
 
 
-def test_import_open_clip_falls_back_when_stubs_break_import(monkeypatch):
+@pytest.mark.parametrize("cli, expected", [
+    (True, ["stubbed", "plain"]),
+    (False, ["plain"]),  # library use: never stubbed
+])
+def test_import_open_clip_falls_back_when_stubs_break_import(
+    monkeypatch, cli, expected,
+):
     """open_clip 4.x imports names the coca_model stub lacks; the stubbed
-    import must fall back to a plain one instead of raising ImportError."""
+    import must fall back to a plain one instead of raising ImportError.
+    Only the CLI installs the stubs."""
     import sys
 
+    import grape.cli
     import grape.model as gm
 
     real = SimpleNamespace(__name__="open_clip")
@@ -411,9 +419,11 @@ def test_import_open_clip_falls_back_when_stubs_break_import(monkeypatch):
     monkeypatch.setattr(gm, "_open_clip_fast_path", False)
     monkeypatch.setattr(gm.importlib, "import_module", fake_import)
     monkeypatch.setattr(gm, "_model_needs_timm", lambda _name: False)
+    if cli:
+        grape.cli._stub_imports_HACK()
 
     assert gm._import_open_clip(use_transformers=False, model_name="X") is real
-    assert calls == ["stubbed", "plain"]
+    assert calls == expected
     assert "open_clip.mammut_model" not in sys.modules
     assert gm._open_clip_fast_path is False
 

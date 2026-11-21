@@ -25,7 +25,6 @@ import os
 import struct
 import sys
 import threading
-import types
 from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
@@ -54,13 +53,18 @@ def pick_device() -> str:
     if requested:
         log.debug("device: %s (from $GRAPE_DEVICE)", requested)
         return requested
-    if hasattr(torch, "xpu") and torch.xpu.is_available():
-        log.debug("device: xpu (%s)", torch.xpu.get_device_name(0))
-        return "xpu"
-    if torch.cuda.is_available():
-        # ROCm builds report AMD GPUs here too.
-        log.debug("device: cuda (%s)", torch.cuda.get_device_name(0))
-        return "cuda"
+    xpu = getattr(torch, "xpu", None)  # absent in older torch
+    if xpu is not None and xpu.is_available():
+        device = "xpu"
+    elif torch.cuda.is_available():  # ROCm builds report AMD GPUs here too
+        device = "cuda"
+    else:
+        log.debug("device: cpu (torch %s sees no xpu or cuda)", torch.__version__)
+        return "cpu"
+    if log.isEnabledFor(logging.DEBUG):  # the GPU's name takes ~0.2 s to get
+        name = getattr(torch, device).get_device_name(0)
+        log.debug("device: %s (%s)", device, name)
+    return device
     log.debug("device: cpu (torch %s sees no xpu or cuda)", torch.__version__)
     return "cpu"
 
@@ -128,14 +132,8 @@ class CLIPModel:
         self.device = pick_device()
         torch.set_num_threads(_cpu_threads())  # text usually runs on the CPU
         self._text_on_gpu = False
+        self._gpu_move_lock = threading.Lock()
         self.model.eval()
-        if self.device != "cpu":
-            # Only the image half goes to the GPU. A search encodes a few
-            # prompts, which the CPU does faster than the GPU can start up:
-            # its first call alone took ~2.4 s here. In fp16, since autocast
-            # converts the weights for every matmul anyway: half the memory
-            # and copy, scores within ~0.0005.
-            self.model.visual.to(self.device, dtype=torch.float16)
         log.debug("model: %s/%s, images on %s, text on cpu",
                   model_name, pretrained, self.device)
         if not quiet:
@@ -233,6 +231,17 @@ class CLIPModel:
         dim: int = cfg["embed_dim"]
         return dim
 
+    def _move_to_gpu(self, module: torch.nn.Module) -> None:
+        """Move part of the model to the GPU, a no-op once it's there.
+
+        In fp16, since autocast converts the weights for every matmul
+        anyway: half the memory and copy, scores within ~0.0005. Locked,
+        since images can encode in two threads at once (--like and the
+        library), and neither may run the model halfway through a move.
+        """
+        with self._gpu_move_lock:
+            module.to(self.device, dtype=torch.float16)
+
     @torch.no_grad()
     def encode_texts(self, texts: list[str]) -> NDArray[np.float32]:
         """Encode text strings to L2-normalized embeddings. Shape: (n, dim).
@@ -243,7 +252,7 @@ class CLIPModel:
         """
         tokens = self.tokenizer(texts)
         if len(texts) >= GPU_TEXT_MIN_PROMPTS and self.device != "cpu":
-            self.model.to(self.device, dtype=torch.float16)  # image half: no-op
+            self._move_to_gpu(self.model)
             self._text_on_gpu = True
         if self._text_on_gpu:
             with self._autocast():
@@ -302,6 +311,12 @@ class CLIPModel:
         if not ok:
             return loaded  # type: ignore[return-value]
         frames = torch.cat(ok)
+        if self.device != "cpu":
+            # Only the image half goes to the GPU, and only once images
+            # need it. A search encodes a few prompts, which the CPU does
+            # faster than the GPU can start up: its first call alone took
+            # ~2.4 s here.
+            self._move_to_gpu(self.model.visual)
         chunks = []
         with self._autocast():
             for i in range(0, len(frames), ENCODE_BATCH_SIZE):
@@ -439,7 +454,7 @@ def resolve_model_id(
 # path (import open_clip -> create_model -> load_checkpoint) takes ~3s on
 # a cold start.  These hacks bring it to ~1s by:
 #
-#   1. Import stubs (~1.2s saved): inject fake modules into sys.modules
+#   1. Import stubs (~2.7s saved, CLI only): fake modules in sys.modules
 #      so that `import open_clip` skips heavy dependencies we never use
 #      (transformers, CoCa, timm, torch._dynamo/sympy).
 #
@@ -468,24 +483,28 @@ _preload_thread: "threading.Thread | None" = None
 
 # -- Hack 1: Import stubs -------------------------------------------------
 #
-# open_clip eagerly imports modules we never use for plain CLIP inference:
-#   - transformers (~0.5s) -- HF text towers, only needed for custom text
-#   - open_clip.coca_model (~0.35s) -- CoCa architecture
-#   - open_clip.timm_model (~0.25s) -- timm vision backbones
-#   - torch._dynamo + sympy (~1.2s) -- pulled in by torchvision.ops;
-#     we never call torch.compile so this is pure waste
-#
-# We inject stub modules into sys.modules before importing open_clip.
-# The stubs are permanent for the process lifetime. If a model actually
-# needs one of these (e.g. CoCa or a timm backbone), _import_open_clip
-# purges them and reimports cleanly.
+# The CLI stubs out modules open_clip imports but grape doesn't use (see
+# cli._stub_imports_HACK). Library use never has them. _import_open_clip
+# drops a stub when the model needs the real module.
 
-def _make_stub(name: str, doc: str, **attrs: Any) -> types.ModuleType:
-    """Create a stub module with a docstring explaining why it exists."""
-    stub = types.ModuleType(name, doc)
-    for attr, val in attrs.items():
-        setattr(stub, attr, val)
-    return stub
+def _is_stub(module: object) -> bool:
+    """True for a stub from cli._stub_imports_HACK: it has no file."""
+    return module is not None and getattr(module, "__file__", None) is None
+
+
+def _drop_stubs(*names: str) -> None:
+    """Remove the stubs for these modules and their submodules."""
+    for key in list(sys.modules):
+        if key in names or key.startswith(tuple(n + "." for n in names)):
+            if _is_stub(sys.modules[key]):
+                del sys.modules[key]
+
+
+def _forget_open_clip() -> None:
+    """Remove open_clip from sys.modules, so it can be imported afresh."""
+    for name in list(sys.modules):
+        if name == "open_clip" or name.startswith("open_clip."):
+            del sys.modules[name]
 
 
 def _builtin_model_config(model_name: str) -> dict | None:
@@ -658,122 +677,40 @@ class _SentencePieceTokenizer:
         return torch.tensor(rows, dtype=torch.long)
 
 
-def _install_import_stubs(*, stub_timm: bool = True) -> None:
-    """Inject stub modules into sys.modules to skip heavy imports.
-
-    Permanent for the process lifetime. See "Hack 1" comment above.
-    """
-    if "transformers" not in sys.modules:
-        sys.modules["transformers"] = _make_stub(
-            "transformers",
-            "grape startup stub: blocks heavy transformers import",
-        )
-    if "open_clip.coca_model" not in sys.modules:
-        sys.modules["open_clip.coca_model"] = _make_stub(
-            "open_clip.coca_model",
-            "grape startup stub: CoCa not needed for plain CLIP",
-            CoCa="STUBBED by grape/model.py: CoCa not needed",
-        )
-    if stub_timm and "open_clip.timm_model" not in sys.modules:
-        sys.modules["open_clip.timm_model"] = _make_stub(
-            "open_clip.timm_model",
-            "grape startup stub: timm backbone not needed for this model",
-            TimmModel="STUBBED by grape/model.py: timm not needed",
-        )
-    # torch._dynamo stub must provide `disable` (used as a no-op decorator
-    # by torch.compiler.disable and torch._compile.inner) and `utils` with
-    # `is_compile_supported`. Since we never call torch.compile, `disable`
-    # just returns the decorated function unchanged.
-    #
-    # The stub is tagged with _grape_stub=True so remove_dynamo_stubs() can
-    # find and purge it when the caller actually wants torch.compile.
-    if "torch._dynamo" not in sys.modules:
-
-        def _dynamo_disable_noop(fn=None, recursive=True, **kwargs):
-            """No-op: torch.compile is never used."""
-            if fn is None:
-                return _dynamo_disable_noop
-            return fn
-
-        dynamo_stub = _make_stub(
-            "torch._dynamo",
-            "grape startup stub: torch.compile not used",
-            disable=_dynamo_disable_noop,
-            _grape_stub=True,
-        )
-        dynamo_utils_stub = _make_stub(
-            "torch._dynamo.utils",
-            "grape startup stub: deferred",
-            is_compile_supported=lambda: False,
-            _grape_stub=True,
-        )
-        dynamo_stub.utils = dynamo_utils_stub  # type: ignore[attr-defined]
-        sys.modules["torch._dynamo"] = dynamo_stub
-        sys.modules["torch._dynamo.utils"] = dynamo_utils_stub
-
-
-def remove_dynamo_stubs() -> None:
-    """Remove grape's torch._dynamo stubs from sys.modules.
-
-    Call this before torch.compile to let the real torch._dynamo load.
-    The stubs are only installed to skip the ~620ms torchvision.ops import
-    cost on startup; once open_clip is loaded they are no longer needed.
-    Does nothing if the real module is already loaded.
-    """
-    for key in list(sys.modules):
-        if (key == "torch._dynamo" or key.startswith("torch._dynamo.")) and (
-            getattr(sys.modules[key], "_grape_stub", False)
-        ):
-            del sys.modules[key]
-
-
 def _import_open_clip(
     *,
     use_transformers: bool,
     model_name: str | None = None,
 ):
-    """Import open_clip, optionally with import stubs installed."""
+    """Import open_clip, keeping the CLI's import stubs the model can do
+    without."""
     global _open_clip_fast_path, _open_clip_module
     if _open_clip_module is not None:
         if use_transformers and _open_clip_fast_path:
-            # Previously imported with stubs; purge and reimport cleanly.
-            for name in list(sys.modules):
-                if name == "open_clip" or name.startswith("open_clip."):
-                    del sys.modules[name]
+            _forget_open_clip()  # imported with stubs; reimport without
             _open_clip_module = None
         else:
             return _open_clip_module
 
     if use_transformers:
-        # Purge any stubs we installed so the real modules load.
-        for prefix in ("transformers", "open_clip.coca_model",
-                        "open_clip.timm_model"):
-            for key in list(sys.modules):
-                mod = sys.modules[key]
-                if (key == prefix or key.startswith(prefix + ".")) and (
-                    getattr(mod, "__file__", None) is None
-                ):
-                    del sys.modules[key]
-        remove_dynamo_stubs()  # transformers' lazy imports trip on it
-        _open_clip_module = importlib.import_module("open_clip")
-        _open_clip_fast_path = False
-        return _open_clip_module
-
-    # Only stub timm when we know the model doesn't need it.
-    stub_timm = model_name is not None and not _model_needs_timm(model_name)
-    _install_import_stubs(stub_timm=stub_timm)
+        # transformers' lazy imports trip on the torch._dynamo stub too.
+        _drop_stubs("transformers", "open_clip.coca_model",
+                    "open_clip.timm_model", "torch._dynamo")
+    elif model_name is None or _model_needs_timm(model_name):
+        _drop_stubs("open_clip.timm_model")
+    stubbed = _is_stub(sys.modules.get("open_clip.coca_model"))
     try:
         _open_clip_module = importlib.import_module("open_clip")
     except ImportError as exc:
+        if not stubbed:
+            raise
         # open_clip's own imports outgrew the stubs (4.x's mammut_model
         # pulls names from coca_model at import time). Drop the
         # half-imported package and take the slow, stub-free path.
         log.debug("open_clip import failed with stubs (%s); retrying without", exc)
-        for name in list(sys.modules):
-            if name == "open_clip" or name.startswith("open_clip."):
-                del sys.modules[name]
+        _forget_open_clip()
         return _import_open_clip(use_transformers=True)
-    _open_clip_fast_path = True
+    _open_clip_fast_path = stubbed
     return _open_clip_module
 
 
@@ -785,8 +722,7 @@ def _requires_transformers(exc: Exception) -> bool:
     if "install" in text:
         return True
     # Against our stub, HF tokenizers fail with "cannot import name", not "install".
-    stub = sys.modules.get("transformers")
-    return stub is not None and getattr(stub, "__file__", None) is None
+    return _is_stub(sys.modules.get("transformers"))
 
 
 # -- Hack 2: HF cache probing ---------------------------------------------
@@ -937,8 +873,6 @@ def preload_weights(model_name: str, pretrained: str) -> None:
     global _preload_thread, _preloaded_state_dict
     if _preload_thread is not None:
         return  # already started
-    # Side effect: installs import stubs for open_clip (unless the model
-    # needs the real transformers).
     needs_tf = _model_needs_transformers(model_name)
     _import_open_clip(use_transformers=needs_tf, model_name=model_name)
     path = _cached_weight_path(model_name, pretrained)

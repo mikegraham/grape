@@ -9,6 +9,7 @@ import shlex
 import signal
 import sys
 import threading
+import types
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractContextManager, closing, nullcontext
 from dataclasses import dataclass
@@ -1446,7 +1447,38 @@ def _sigint_handler(verbose: bool):
     return handler
 
 
+def _stub_imports_HACK() -> None:
+    """Put stand-ins in sys.modules for heavy modules open_clip imports
+    but grape doesn't use, so loading the model takes ~2.7 s less.
+
+    For the CLI only: they're process-wide, which grape as a library
+    shouldn't impose on the program importing it. grape.model drops any
+    stub a model needs the real module for.
+    """
+    def stub(name: str, **attrs: Any) -> None:
+        module = types.ModuleType(name, "grape startup stub")
+        for attr, value in attrs.items():
+            setattr(module, attr, value)
+        sys.modules[name] = module
+
+    # HF text towers; plain CLIP and SigLIP don't need them.
+    stub("transformers")
+    stub("open_clip.coca_model", CoCa=None)
+    stub("open_clip.timm_model", TimmModel=None)
+
+    # torchvision.ops pulls in torch._dynamo and sympy (~1.2 s), and grape
+    # never calls torch.compile. torch uses `disable` as a decorator.
+    def disable(fn: Any = None, recursive: bool = True, **kwargs: Any) -> Any:
+        if fn is None:
+            return disable
+        return fn
+
+    stub("torch._dynamo.utils", is_compile_supported=lambda: False)
+    stub("torch._dynamo", disable=disable, utils=sys.modules["torch._dynamo.utils"])
+
+
 def main() -> None:
+    _stub_imports_HACK()
     parser = _build_parser()
 
     args = parser.parse_args()
