@@ -1,6 +1,6 @@
-0.232  tests/fixtures/beach.jpg
-  sunset: 0.193  beach: 0.271
-0.230  tests/fixtures/lenna.png
-  sunset: 0.228  beach: 0.231
-0.204  tests/fixtures/subdir/sunset.jpg
-  sunset: 0.258  beach: 0.151
+0.273  tests/fixtures/wolves.jpg
+  dog: 0.261  howling: 0.286
+0.214  tests/fixtures/dog.jpg
+  dog: 0.274  howling: 0.154
+0.182  tests/fixtures/beach.jpg
+  dog: 0.203  howling: 0.162

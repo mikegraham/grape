@@ -3,12 +3,12 @@
 Search your photos by describing what's in them. Like grep, but for images.
 
 ```
-$ grape -R -s -n 5 --keywords sunset tests/fixtures
-0.258  tests/fixtures/subdir/sunset.jpg
-0.228  tests/fixtures/lenna.png
-0.193  tests/fixtures/beach.jpg
-0.191  tests/fixtures/omelette.jpg
-0.179  tests/fixtures/teapot.png
+$ grape -R -s -n 5 --keywords dog tests/fixtures
+0.274  tests/fixtures/dog.jpg
+0.261  tests/fixtures/wolves.jpg
+0.208  tests/fixtures/dovetail.jpg
+0.205  tests/fixtures/cat.jpg
+0.203  tests/fixtures/beach.jpg
 ```
 
 The same search with `--view`:
@@ -73,18 +73,6 @@ Results are listed best match first.
 
 - `-n 10` shows only the top 10.
 - `-s` shows each photo's score.
-- `-v` also shows how each keyword scored:
-
-  ```
-  $ grape -R -v -n 3 --keywords sunset,beach tests/fixtures
-  0.232  tests/fixtures/beach.jpg
-    sunset: 0.193  beach: 0.271
-  0.230  tests/fixtures/lenna.png
-    sunset: 0.228  beach: 0.231
-  0.204  tests/fixtures/subdir/sunset.jpg
-    sunset: 0.258  beach: 0.151
-  ```
-
 - `--view` opens the results in a window. Click photos to select them;
   when you close the window, grape prints the selected paths, ready to
   pass to another command:
