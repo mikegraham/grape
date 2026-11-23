@@ -487,6 +487,10 @@ _preload_thread: "threading.Thread | None" = None
 # cli._stub_imports_HACK). Library use never has them. _import_open_clip
 # drops a stub when the model needs the real module.
 
+# The modules cli._stub_imports_HACK stubs.
+_STUBBED = ("transformers", "open_clip.timm_model", "torch._dynamo")
+
+
 def _is_stub(module: object) -> bool:
     """True for a stub from cli._stub_imports_HACK: it has no file."""
     return module is not None and getattr(module, "__file__", None) is None
@@ -694,19 +698,18 @@ def _import_open_clip(
 
     if use_transformers:
         # transformers' lazy imports trip on the torch._dynamo stub too.
-        _drop_stubs("transformers", "open_clip.coca_model",
-                    "open_clip.timm_model", "torch._dynamo")
+        _drop_stubs(*_STUBBED)
     elif model_name is None or _model_needs_timm(model_name):
         _drop_stubs("open_clip.timm_model")
-    stubbed = _is_stub(sys.modules.get("open_clip.coca_model"))
+    stubbed = any(_is_stub(sys.modules.get(name)) for name in _STUBBED)
     try:
         _open_clip_module = importlib.import_module("open_clip")
     except ImportError as exc:
         if not stubbed:
             raise
-        # open_clip's own imports outgrew the stubs (4.x's mammut_model
-        # pulls names from coca_model at import time). Drop the
-        # half-imported package and take the slow, stub-free path.
+        # open_clip's own imports outgrew the stubs (as 4.x's did a stub
+        # of coca_model). Drop the half-imported package and take the
+        # slow, stub-free path.
         log.debug("open_clip import failed with stubs (%s); retrying without", exc)
         _forget_open_clip()
         return _import_open_clip(use_transformers=True)
