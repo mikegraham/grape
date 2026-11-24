@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-24
+
+### Fixed
+- With open_clip 4, loading the model took ~3 s longer than it should: grape's startup shortcut for importing open_clip failed and fell back to a full import.
+
 ## [0.6.0] - 2026-11-20
 
 ### Added
