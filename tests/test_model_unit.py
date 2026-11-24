@@ -429,8 +429,9 @@ def test_load_frames_never_leaks_pillow_errors_for_truncated_gif(tmp_path):
 
 
 def test_import_open_clip_falls_back_when_stubs_break_import(monkeypatch):
-    """open_clip 4.x imports names the coca_model stub lacks; the stubbed
-    import must fall back to a plain one instead of raising ImportError."""
+    """If open_clip imports a name a stub lacks (as 4.x did from a
+    coca_model stub), the stubbed import must fall back to a plain one
+    instead of raising ImportError."""
     import sys
 
     import grape.model as gm
@@ -440,8 +441,8 @@ def test_import_open_clip_falls_back_when_stubs_break_import(monkeypatch):
 
     def fake_import(name):
         assert name == "open_clip"
-        coca = sys.modules.get("open_clip.coca_model")
-        stubbed = coca is not None and getattr(coca, "__file__", None) is None
+        timm = sys.modules.get("open_clip.timm_model")
+        stubbed = timm is not None and getattr(timm, "__file__", None) is None
         calls.append("stubbed" if stubbed else "plain")
         if stubbed:
             sys.modules["open_clip.mammut_model"] = SimpleNamespace()  # half-import

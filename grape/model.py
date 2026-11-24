@@ -427,7 +427,6 @@ _preloaded_tokenizer: Any | None = None
 #
 # open_clip eagerly imports modules we never use for plain CLIP inference:
 #   - transformers (~0.5s) -- HF text towers, only needed for custom text
-#   - open_clip.coca_model (~0.35s) -- CoCa architecture
 #   - open_clip.timm_model (~0.25s) -- timm vision backbones
 #   - torch._dynamo + sympy (~1.2s) -- pulled in by torchvision.ops;
 #     we never call torch.compile so this is pure waste
@@ -541,12 +540,6 @@ def _install_import_stubs(*, stub_timm: bool = True) -> None:
             "transformers",
             "grape startup stub: blocks heavy transformers import",
         )
-    if "open_clip.coca_model" not in sys.modules:
-        sys.modules["open_clip.coca_model"] = _make_stub(
-            "open_clip.coca_model",
-            "grape startup stub: CoCa not needed for plain CLIP",
-            CoCa="STUBBED by grape/model.py: CoCa not needed",
-        )
     if stub_timm and "open_clip.timm_model" not in sys.modules:
         sys.modules["open_clip.timm_model"] = _make_stub(
             "open_clip.timm_model",
@@ -619,8 +612,7 @@ def _import_open_clip(
 
     if use_transformers:
         # Purge any stubs we installed so the real modules load.
-        for prefix in ("transformers", "open_clip.coca_model",
-                        "open_clip.timm_model"):
+        for prefix in ("transformers", "open_clip.timm_model"):
             for key in list(sys.modules):
                 mod = sys.modules[key]
                 if (key == prefix or key.startswith(prefix + ".")) and (
@@ -638,9 +630,9 @@ def _import_open_clip(
     try:
         _open_clip_module = importlib.import_module("open_clip")
     except ImportError as exc:
-        # open_clip's own imports outgrew the stubs (4.x's mammut_model
-        # pulls names from coca_model at import time). Drop the
-        # half-imported package and take the slow, stub-free path.
+        # open_clip's own imports outgrew the stubs (as 4.x's did a stub
+        # of coca_model, since removed). Drop the half-imported package
+        # and take the slow, stub-free path.
         log.debug("open_clip import failed with stubs (%s); retrying without", exc)
         for name in list(sys.modules):
             if name == "open_clip" or name.startswith("open_clip."):
