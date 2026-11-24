@@ -1,3 +1,5 @@
+<img src="https://raw.githubusercontent.com/mikegraham/grape/master/docs/icon.png" alt="" width="96" align="right">
+
 # grape
 
 Search your photos by describing what's in them. Like grep, but for images.

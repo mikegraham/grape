@@ -370,7 +370,9 @@ def test_show_in_webview_calls_create_window_and_start(monkeypatch):
     assert calls[0][2]["zoomable"] is True
     assert calls[0][2]["min_size"] == (480, 320)
     assert loaded_html == ["<html>ok</html>"]
-    assert calls[1] == ("start", {"debug": True})
+    assert calls[1][0] == "start"
+    assert calls[1][1]["debug"] is True
+    assert Path(calls[1][1]["icon"]).is_file()  # shipped with the package
     assert fake_webview.settings["OPEN_DEVTOOLS_IN_DEBUG"] is False
 
 
