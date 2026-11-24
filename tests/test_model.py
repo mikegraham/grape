@@ -356,65 +356,90 @@ def test_hf_tokenizer_loads_from_local_snapshot(monkeypatch, tmp_path):
     assert seen["kwargs"]["clean"] == "canonicalize"
 
 
-def test_fast_tokenizer_matches_hf_tokenizer_for_default_model():
+# The smallest real SigLIP 2 model (1.5 GB), for its text half: Gemma's
+# tokenizer and SigLIP 2's text tower, as in the default model.
+SIGLIP2_SMALL = ("ViT-B-32-SigLIP2-256", "webli")
+
+TRICKY_TEXTS = [
+    "", "a photo of a dog", "A Photo Of THE Dog!!", "  tabs\tand\nnewlines ",
+    "caf\u00e9 cr\u00e8me", "\u732b\u306e\u5199\u771f", "&amp; &lt;b&gt;",
+    "emoji \U0001f436 and 50% off C++", "itap of a sunset.",
+    "a bad photo of the golden retriever on a beach at dusk",
+    "dog " * 200,
+    "Taken while in a car while driving on the Mumbai-Pune Expressway " * 3,
+]
+
+
+@pytest.fixture(scope="module")
+def siglip2_model():
+    """Downloads the model and its tokenizer files on first use."""
+    from grape.model import CLIPModel
+
+    model = CLIPModel(*SIGLIP2_SMALL, quiet=True)
+    model.tokenizer  # builds (and so downloads) the tokenizer
+    return model
+
+
+def _siglip2_text_cfg():
+    from grape.openclip_files import builtin_model_config
+
+    return builtin_model_config(SIGLIP2_SMALL[0])["text_cfg"]
+
+
+def test_fast_tokenizer_matches_hf_tokenizer(siglip2_model):
     """Real SigLIP 2 files: the lightweight tokenizer must give HFTokenizer's ids."""
     import torch
 
     import grape.model as gm
-    from grape.cli import DEFAULT_MODEL
+    from grape.openclip_files import fast_tokenizer_dir
 
-    model_name = DEFAULT_MODEL.split("/", 1)[0]
+    text_cfg = _siglip2_text_cfg()
+    snapshot = fast_tokenizer_dir(text_cfg)
+    assert snapshot is not None
     open_clip = gm._import_open_clip(use_transformers=True)
-    text_cfg = open_clip.get_model_config(model_name)["text_cfg"]
-    snapshot = gm._fast_tokenizer_dir(text_cfg)
-    if snapshot is None:
-        pytest.skip("default model's tokenizer files not cached")
-    texts = [
-        "", "a photo of a dog", "A Photo Of THE Dog!!", "  tabs\tand\nnewlines ",
-        "caf\u00e9 cr\u00e8me", "\u732b\u306e\u5199\u771f", "&amp; &lt;b&gt;",
-        "dog " * 200,
-    ]
     ctx = text_cfg["context_length"]
     ref = open_clip.tokenizer.HFTokenizer(
         str(snapshot), context_length=ctx, **text_cfg["tokenizer_kwargs"],
     )
-    fast = gm._FastHFTokenizer(
-        snapshot, ctx, text_cfg["tokenizer_kwargs"]["clean"],
-    )
-    assert torch.equal(fast(texts), ref(texts))
+    fast = gm._FastHFTokenizer(snapshot, ctx, text_cfg["tokenizer_kwargs"]["clean"])
+    assert torch.equal(fast(TRICKY_TEXTS), ref(TRICKY_TEXTS))
 
 
-def test_sentencepiece_tokenizer_matches_json():
+def test_sentencepiece_tokenizer_matches_json(siglip2_model):
     """The SentencePiece stand-in for SigLIP 2's tokenizer.json must give the
     same padded token ids, on the same tricky strings plus longer ones."""
-    import torch
-
     import grape.model as gm
-    from grape.cli import DEFAULT_MODEL
+    from grape import openclip_files
 
-    model_name = DEFAULT_MODEL.split("/", 1)[0]
-    open_clip = gm._import_open_clip(use_transformers=True)
-    text_cfg = open_clip.get_model_config(model_name)["text_cfg"]
-    snapshot = gm._fast_tokenizer_dir(text_cfg)
-    if snapshot is None:
-        pytest.skip("default model's tokenizer files not cached")
-    assert gm._sha256(snapshot / "tokenizer.json") in gm._SENTENCEPIECE_EQUIVALENTS
-    model_file = gm._sentencepiece_equivalent(snapshot / "tokenizer.json")
-    if model_file is None:
-        pytest.skip("SentencePiece model not cached and can't be downloaded")
-    texts = [
-        "", "a photo of a dog", "A Photo Of THE Dog!!", "  tabs\tand\nnewlines ",
-        "caf\u00e9 cr\u00e8me", "\u732b\u306e\u5199\u771f", "&amp; &lt;b&gt;",
-        "emoji \U0001f436 and 50% off C++", "itap of a sunset.",
-        "a bad photo of the golden retriever on a beach at dusk",
-        "dog " * 200,
-        "Taken while in a car while driving on the Mumbai-Pune Expressway " * 3,
-    ]
+    text_cfg = _siglip2_text_cfg()
+    snapshot = openclip_files.fast_tokenizer_dir(text_cfg)
+    tokenizer_json = snapshot / "tokenizer.json"
+    known = openclip_files.SENTENCEPIECE_EQUIVALENTS
+    assert openclip_files.sha256(tokenizer_json) in known
+    sp_tokenizer = openclip_files.sentencepiece_tokenizer(text_cfg)
+    assert sp_tokenizer is not None
     ctx = text_cfg["context_length"]
-    clean = text_cfg["tokenizer_kwargs"]["clean"]
-    json_tokenizer = gm._FastHFTokenizer(snapshot, ctx, clean)
-    sp_tokenizer = gm._SentencePieceTokenizer(model_file, snapshot, ctx, clean)
-    assert torch.equal(sp_tokenizer(texts), json_tokenizer(texts))
+    json_tokenizer = gm._FastHFTokenizer(snapshot, ctx, "canonicalize")
+    assert (sp_tokenizer(TRICKY_TEXTS) == json_tokenizer(TRICKY_TEXTS).numpy()).all()
+
+
+def test_textfast_matches_torch(siglip2_model):
+    """grape.textfast, run from the checkpoint torch loaded, gives torch's
+    embeddings."""
+    from grape import textfast
+
+    encoder = textfast.text_encoder(SIGLIP2_SMALL[0], siglip2_model.model_id())
+    assert encoder is not None
+    got = encoder(TRICKY_TEXTS)
+    want = siglip2_model.encode_texts(TRICKY_TEXTS)
+    assert got.shape == want.shape
+    assert (got * want).sum(-1).min() > 0.9999
+
+
+def test_textfast_skips_other_models(clip_model):
+    from grape import textfast
+
+    assert textfast.text_encoder("ViT-B-32", clip_model.model_id()) is None
 
 
 def test_encode_images_every_format(clip_model, tmp_path):

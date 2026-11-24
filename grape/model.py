@@ -18,7 +18,6 @@ This module contains some crazy hacks to reduce latency.
 from __future__ import annotations
 
 import functools
-import hashlib
 import importlib
 import logging
 import os
@@ -36,8 +35,14 @@ import torch
 from numpy.typing import NDArray
 from PIL import Image
 
+from grape.cpus import cpu_threads
 from grape.hf_cache import WEIGHT_FILENAMES as _WEIGHT_FILENAMES
 from grape.hf_cache import cached_file_from_repo as _cached_file_from_repo
+from grape.openclip_files import (
+    builtin_model_config,
+    fast_tokenizer_dir,
+    sentencepiece_tokenizer,
+)
 from grape.search import ENCODE_BATCH_SIZE
 
 # Cap on uniformly-sampled frames per animated GIF/WEBP/APNG. K=8 is
@@ -75,24 +80,6 @@ def pick_device() -> str:
 GPU_TEXT_MIN_PROMPTS = 16
 
 
-def _cpu_threads() -> int:
-    """Threads for torch on the CPU: three quarters of the usable CPUs.
-
-    Every CPU (torch's default) was the slowest setting for a full run on
-    both a hybrid 8-core laptop and a 24-core server: grape's image-decode
-    threads need CPU at the same time.
-    """
-    cpus: int | None
-    getaffinity = getattr(os, "sched_getaffinity", None)
-    if getaffinity is not None:
-        cpus = len(getaffinity(0))  # respects taskset and containers
-    else:
-        cpus = os.cpu_count()
-    if cpus is None:  # the OS can't say
-        return 1
-    return max(1, cpus * 3 // 4)
-
-
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -113,10 +100,8 @@ class CLIPModel:
         # the model moves to self.device once built.
         self.device = "cpu"
         self._decode_pool: ThreadPoolExecutor | None = None
-        open_clip = _import_open_clip(
-            use_transformers=_model_needs_transformers(model_name),
-            model_name=model_name,
-        )
+        needs_transformers = _model_needs_transformers(model_name)
+        open_clip = _import_open_clip(use_transformers=needs_transformers)
         if not quiet:
             print("Loading model...", end=" ", flush=True, file=sys.stderr)
         try:
@@ -130,7 +115,7 @@ class CLIPModel:
         size = self.model.visual.preprocess_cfg["size"]
         self._image_size = max(size) if isinstance(size, (tuple, list)) else size
         self.device = pick_device()
-        torch.set_num_threads(_cpu_threads())  # text usually runs on the CPU
+        torch.set_num_threads(cpu_threads())  # text usually runs on the CPU
         self._text_on_gpu = False
         self._gpu_move_lock = threading.Lock()
         self.model.eval()
@@ -224,9 +209,7 @@ class CLIPModel:
 
     def embed_dim(self) -> int:
         """Embedding dimensionality for this model architecture."""
-        open_clip = _import_open_clip(
-            use_transformers=False, model_name=self._model_name,
-        )
+        open_clip = _import_open_clip(use_transformers=False)
         cfg = open_clip.get_model_config(self._model_name)
         dim: int = cfg["embed_dim"]
         return dim
@@ -421,15 +404,11 @@ def get_hf_hub(model_name: str, pretrained: str) -> str:
     Requires open_clip to be imported.
     """
     try:
-        open_clip = _import_open_clip(
-            use_transformers=False, model_name=model_name,
-        )
+        open_clip = _import_open_clip(use_transformers=False)
     except ImportError as exc:
         if not _requires_transformers(exc):
             raise
-        open_clip = _import_open_clip(
-            use_transformers=True, model_name=model_name,
-        )
+        open_clip = _import_open_clip(use_transformers=True)
     cfg = open_clip.get_pretrained_cfg(model_name, pretrained)
     hf_hub: str = (cfg or {}).get("hf_hub", "")
     return hf_hub.rstrip("/")
@@ -488,7 +467,7 @@ _preload_thread: "threading.Thread | None" = None
 # drops a stub when the model needs the real module.
 
 # The modules cli._stub_imports_HACK stubs.
-_STUBBED = ("transformers", "open_clip.timm_model", "torch._dynamo")
+_STUBBED = ("transformers", "torch._dynamo")
 
 
 def _is_stub(module: object) -> bool:
@@ -511,57 +490,15 @@ def _forget_open_clip() -> None:
             del sys.modules[name]
 
 
-def _builtin_model_config(model_name: str) -> dict | None:
-    """Read open_clip's built-in JSON config without importing open_clip."""
-    oc_init = sys.modules.get("open_clip", None)
-    if oc_init is not None and getattr(oc_init, "__file__", None) is not None:
-        cfg_dir = Path(oc_init.__file__).parent / "model_configs"  # type: ignore[arg-type]
-    else:
-        import importlib.util
-        spec = importlib.util.find_spec("open_clip")
-        if spec is None or spec.origin is None:
-            return None
-        cfg_dir = Path(spec.origin).parent / "model_configs"
-    cfg_file = cfg_dir / f"{model_name}.json"
-    if not cfg_file.is_file():
-        return None
-    import json
-    # JSON is UTF-8 by spec; the locale default is cp1252 on Windows.
-    cfg: dict = json.loads(cfg_file.read_text(encoding="utf-8"))
-    return cfg
-
-
-def _model_needs_timm(model_name: str) -> bool:
-    """Check whether a model architecture requires timm."""
-    cfg = _builtin_model_config(model_name)
-    if cfg is None:
-        return True  # can't tell, assume yes (safe)
-    vcfg = cfg.get("vision_cfg", {})
-    return isinstance(vcfg, dict) and "timm_model_name" in vcfg
-
-
 def _model_needs_transformers(model_name: str) -> bool:
     """True when the model's text tower or tokenizer needs transformers."""
-    cfg = _builtin_model_config(model_name)
+    cfg = builtin_model_config(model_name)
     if cfg is None:
         return True  # unknown model, assume yes (safe)
     text_cfg = cfg.get("text_cfg", {})
     if not text_cfg.get("hf_tokenizer_name"):
         return False
-    return _fast_tokenizer_dir(text_cfg) is None
-
-
-def _fast_tokenizer_dir(text_cfg: dict) -> Path | None:
-    """Cached snapshot dir, if _FastHFTokenizer can stand in for HFTokenizer."""
-    if text_cfg.get("hf_model_name") or text_cfg.get("tokenizer_mode"):
-        return None
-    if set(text_cfg.get("tokenizer_kwargs", {})) - {"clean"}:
-        return None
-    repo = text_cfg["hf_tokenizer_name"]
-    config = _cached_file_from_repo(repo, "tokenizer_config.json")
-    if config is None or _cached_file_from_repo(repo, "tokenizer.json") is None:
-        return None
-    return Path(config).parent
+    return fast_tokenizer_dir(text_cfg) is None
 
 
 class _FastHFTokenizer:
@@ -598,94 +535,7 @@ class _FastHFTokenizer:
 
 
 # tokenizer.json files, by SHA-256 of their contents, that have an
-# equivalent SentencePiece model: (repo, file, SHA-256 of that file).
-# tokenizers parses a 256k-word tokenizer.json in ~2 s, holding the GIL;
-# SentencePiece loads the same vocabulary in ~0.1 s without it. Keyed by
-# contents, so a changed tokenizer.json quietly falls back to the JSON.
-# test_sentencepiece_tokenizer_matches_json checks each entry.
-_SENTENCEPIECE_EQUIVALENTS = {
-    # Gemma's tokenizer, shared by every SigLIP 2 model. timm's repos
-    # ship only tokenizer.json; Google's ship tokenizer.model too.
-    "220c63d496e0c14e63eb656c91e0215e926202e4c74b1f089e09f1920d779b04": (
-        "google/siglip2-base-patch16-256",
-        "tokenizer.model",
-        "61a7b147390c64585d6c3543dd6fc636906c9af3865a5548f27f31aee1d4c8e2",
-    ),
-}
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as f:
-        while chunk := f.read(1 << 20):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _sentencepiece_equivalent(tokenizer_json: Path) -> Path | None:
-    """A verified SentencePiece model equivalent to *tokenizer_json*, or None.
-
-    Downloaded once (4 MB) into the Hugging Face cache; offline, the
-    tokenizer.json is used instead.
-    """
-    entry = _SENTENCEPIECE_EQUIVALENTS.get(_sha256(tokenizer_json))
-    if entry is None:
-        return None
-    repo, filename, sha256 = entry
-    path = _cached_file_from_repo(repo, filename)
-    if path is None:
-        from huggingface_hub import hf_hub_download
-        try:
-            path = hf_hub_download(repo, filename)
-        except OSError as exc:
-            log.debug("no %s from %s (%s); using tokenizer.json", filename, repo, exc)
-            return None
-    if _sha256(Path(path)) != sha256:
-        log.debug("%s from %s has changed; using tokenizer.json", filename, repo)
-        return None
-    return Path(path)
-
-
-class _SentencePieceTokenizer:
-    """_FastHFTokenizer's output from an equivalent SentencePiece model.
-
-    Matches tokenizer.json files whose post-processor appends the EOS token
-    and which pad on the right, as Gemma's does.
-    """
-
-    def __init__(
-        self, model_file: Path, snapshot: Path, context_length: int, clean: str,
-    ) -> None:
-        import json
-
-        import sentencepiece
-        from open_clip.tokenizer import get_clean_fn
-
-        config = json.loads(  # UTF-8 by spec, not the locale's encoding
-            (snapshot / "tokenizer_config.json").read_text(encoding="utf-8")
-        )
-        pad = config["pad_token"]
-        pad = pad["content"] if isinstance(pad, dict) else pad
-        self._sp = sentencepiece.SentencePieceProcessor(model_file=str(model_file))
-        self._clean = get_clean_fn(clean)
-        self._length = context_length
-        self._pad = self._sp.piece_to_id(pad)
-
-    def __call__(self, texts: list[str]) -> torch.Tensor:
-        rows = []
-        for text in texts:
-            ids = self._sp.encode(self._clean(text))[: self._length - 1]
-            ids.append(self._sp.eos_id())
-            ids.extend([self._pad] * (self._length - len(ids)))
-            rows.append(ids)
-        return torch.tensor(rows, dtype=torch.long)
-
-
-def _import_open_clip(
-    *,
-    use_transformers: bool,
-    model_name: str | None = None,
-):
+def _import_open_clip(*, use_transformers: bool):
     """Import open_clip, keeping the CLI's import stubs the model can do
     without."""
     global _open_clip_fast_path, _open_clip_module
@@ -699,8 +549,6 @@ def _import_open_clip(
     if use_transformers:
         # transformers' lazy imports trip on the torch._dynamo stub too.
         _drop_stubs(*_STUBBED)
-    elif model_name is None or _model_needs_timm(model_name):
-        _drop_stubs("open_clip.timm_model")
     stubbed = any(_is_stub(sys.modules.get(name)) for name in _STUBBED)
     try:
         _open_clip_module = importlib.import_module("open_clip")
@@ -745,9 +593,7 @@ def _has_cached_weights(model_name: str, pretrained: str) -> bool:
 
 def _cached_weight_path(model_name: str, pretrained: str) -> str | None:
     """Return a local cached checkpoint path for this model when available."""
-    open_clip = _import_open_clip(
-        use_transformers=False, model_name=model_name,
-    )
+    open_clip = _import_open_clip(use_transformers=False)
     cfg = open_clip.get_pretrained_cfg(model_name, pretrained) or {}
     hf_hub = str(cfg.get("hf_hub", "")).rstrip("/")
     if not hf_hub:
@@ -782,14 +628,12 @@ def _load_tokenizer(open_clip: Any, model_name: str) -> Any:
     context_length = text_cfg.get(
         "context_length", open_clip.tokenizer.DEFAULT_CONTEXT_LENGTH,
     )
-    fast = _fast_tokenizer_dir(text_cfg) if "hf_tokenizer_name" in text_cfg else None
+    sentencepiece = sentencepiece_tokenizer(text_cfg)
+    if sentencepiece is not None:
+        return lambda texts: torch.from_numpy(sentencepiece(texts))
+    fast = fast_tokenizer_dir(text_cfg) if "hf_tokenizer_name" in text_cfg else None
     if fast is not None:
         clean = text_cfg.get("tokenizer_kwargs", {}).get("clean", "whitespace")
-        sentencepiece_model = _sentencepiece_equivalent(fast / "tokenizer.json")
-        if sentencepiece_model is not None:
-            return _SentencePieceTokenizer(
-                sentencepiece_model, fast, context_length, clean,
-            )
         return _FastHFTokenizer(fast, context_length, clean)
     repo = text_cfg.get("hf_tokenizer_name")
     local = _cached_file_from_repo(repo, "tokenizer_config.json") if repo else None
@@ -877,7 +721,7 @@ def preload_weights(model_name: str, pretrained: str) -> None:
     if _preload_thread is not None:
         return  # already started
     needs_tf = _model_needs_transformers(model_name)
-    _import_open_clip(use_transformers=needs_tf, model_name=model_name)
+    _import_open_clip(use_transformers=needs_tf)
     path = _cached_weight_path(model_name, pretrained)
     if path is None:
         return

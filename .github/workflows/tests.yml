@@ -41,13 +41,14 @@ jobs:
       - name: Install Firefox for Playwright
         run: playwright install firefox
 
-      # Cache the CLIP model weights across runs. Key is static because the
-      # checkpoint is immutable; a fresh key forces a re-download.
+      # Cache the test models' weights across runs (CLIP ViT-B-32, and the
+      # smallest SigLIP 2 for grape.textfast). Key is static because the
+      # checkpoints are immutable; a fresh key forces a re-download.
       - name: Cache HuggingFace Hub
         uses: actions/cache@v6
         with:
           path: ~/.cache/huggingface
-          key: hf-vit-b-32-laion2b-s34b-b79k-v1
+          key: hf-vit-b-32-laion2b-siglip2-b-32-v1
 
       - name: Run tests (including @pytest.mark.slow)
         run: pytest

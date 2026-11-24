@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Keywords are matched as written by default, instead of averaged over several prompt templates: as good on photo retrieval in our tests, and a new keyword encodes much faster. Keyword scores change slightly.
+- A search for a new keyword over photos grape has already indexed takes ~1 s instead of ~5 s with the default model: grape encodes the keyword without loading torch.
 
 ## [0.6.0] - 2026-11-20
 

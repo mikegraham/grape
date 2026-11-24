@@ -233,16 +233,17 @@ def test_fast_hf_tokenizer_matches_open_clip_hf_tokenizer(tmp_path):
 
 def test_model_needs_transformers_only_without_fast_tokenizer(monkeypatch):
     import grape.model as gm
+    import grape.openclip_files
 
     cached = {"tokenizer.json", "tokenizer_config.json"}
     monkeypatch.setattr(
-        gm, "_cached_file_from_repo",
+        grape.openclip_files, "cached_file_from_repo",
         lambda repo, fn: f"/snap/{fn}" if fn in cached else None,
     )
 
     def needs(text_cfg):
         monkeypatch.setattr(
-            gm, "_builtin_model_config", lambda _name: {"text_cfg": text_cfg},
+            gm, "builtin_model_config", lambda _name: {"text_cfg": text_cfg},
         )
         return gm._model_needs_transformers("m")
 
@@ -402,8 +403,7 @@ def test_import_open_clip_falls_back_when_stubs_break_import(
 
     def fake_import(name):
         assert name == "open_clip"
-        timm = sys.modules.get("open_clip.timm_model")
-        stubbed = timm is not None and getattr(timm, "__file__", None) is None
+        stubbed = gm._is_stub(sys.modules.get("transformers"))
         calls.append("stubbed" if stubbed else "plain")
         if stubbed:
             sys.modules["open_clip.mammut_model"] = SimpleNamespace()  # half-import
@@ -418,11 +418,11 @@ def test_import_open_clip_falls_back_when_stubs_break_import(
     monkeypatch.setattr(gm, "_open_clip_module", None)
     monkeypatch.setattr(gm, "_open_clip_fast_path", False)
     monkeypatch.setattr(gm.importlib, "import_module", fake_import)
-    monkeypatch.setattr(gm, "_model_needs_timm", lambda _name: False)
     if cli:
+        sys.modules.pop("transformers", None)  # an earlier test's real one
         grape.cli._stub_imports_HACK()
 
-    assert gm._import_open_clip(use_transformers=False, model_name="X") is real
+    assert gm._import_open_clip(use_transformers=False) is real
     assert calls == expected
     assert "open_clip.mammut_model" not in sys.modules
     assert gm._open_clip_fast_path is False
@@ -607,9 +607,9 @@ def test_load_frames_drafts_large_jpegs_to_twice_the_size(tmp_path):
 
 @pytest.mark.parametrize("cpus, threads", [(8, 6), (6, 4), (4, 3), (1, 1)])
 def test_cpu_threads_leave_a_quarter_free(monkeypatch, cpus, threads):
-    from grape.model import _cpu_threads
+    from grape.cpus import cpu_threads
 
     monkeypatch.setattr(
         os, "sched_getaffinity", lambda _pid: set(range(cpus)), raising=False,
     )
-    assert _cpu_threads() == threads
+    assert cpu_threads() == threads
