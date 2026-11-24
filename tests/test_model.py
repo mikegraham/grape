@@ -423,6 +423,25 @@ def test_sentencepiece_tokenizer_matches_json(siglip2_model):
     assert (sp_tokenizer(TRICKY_TEXTS) == json_tokenizer(TRICKY_TEXTS).numpy()).all()
 
 
+def test_textfast_matches_torch(siglip2_model):
+    """grape.textfast, run from the checkpoint torch loaded, gives torch's
+    embeddings."""
+    from grape import textfast
+
+    encoder = textfast.text_encoder(SIGLIP2_SMALL[0], siglip2_model.model_id())
+    assert encoder is not None
+    got = encoder(TRICKY_TEXTS)
+    want = siglip2_model.encode_texts(TRICKY_TEXTS)
+    assert got.shape == want.shape
+    assert (got * want).sum(-1).min() > 0.9999
+
+
+def test_textfast_skips_other_models(clip_model):
+    from grape import textfast
+
+    assert textfast.text_encoder("ViT-B-32", clip_model.model_id()) is None
+
+
 def test_encode_images_every_format(clip_model, tmp_path):
     """Every format/mode from the unit tests, plus animations, encodes in
     one batch to a unit-norm embedding (no per-file errors)."""

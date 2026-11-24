@@ -42,7 +42,7 @@ jobs:
         run: playwright install firefox
 
       # Cache the test models' weights across runs (CLIP ViT-B-32, and the
-      # smallest SigLIP 2 for its tokenizer). Key is static because the
+      # smallest SigLIP 2 for grape.textfast). Key is static because the
       # checkpoints are immutable; a fresh key forces a re-download.
       - name: Cache HuggingFace Hub
         uses: actions/cache@v6

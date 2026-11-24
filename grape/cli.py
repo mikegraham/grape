@@ -200,6 +200,8 @@ class _LazyModel:
         self._cache = cache
         self._model: CLIPModel | None = None
         self._lock = threading.Lock()
+        # Set when text was encoded without torch: the model id it used.
+        self._fast_text_model_id: str | None = None
 
     def _ensure_loaded(self) -> CLIPModel:
         if self._model is None:
@@ -232,9 +234,23 @@ class _LazyModel:
         return self._ensure_loaded().encode_images(image_paths)
 
     def encode_texts(self, texts: list[str]) -> NDArray[np.float32]:
+        # Without torch if the model isn't loaded: a search for a new
+        # keyword over an indexed library then never imports it.
+        if self._model is None and self._cache is not None:
+            model_id = self._cache.get_model_id(self._model_name, self._pretrained)
+            if model_id is not None:
+                from grape.textfast import text_encoder
+                encoder = text_encoder(self._model_name, model_id)
+                if encoder is not None:
+                    log.debug("text: encoded without torch")
+                    self._fast_text_model_id = model_id
+                    return encoder(texts)
         return self._ensure_loaded().encode_texts(texts)
 
     def model_id(self) -> str:
+        if self._model is None and self._fast_text_model_id is not None:
+            # The text encoder read this model id's own weight file.
+            return self._fast_text_model_id
         return self._ensure_loaded().model_id()
 
 
