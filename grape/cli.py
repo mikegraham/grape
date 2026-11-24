@@ -1070,7 +1070,11 @@ def _show_in_webview(html_doc: str, verbose: bool = False) -> list[str]:
             min_size=(480, 320),
             js_api=api,
         )
-        webview.start(debug=True)
+        # The taskbar and alt-tab icon. Windows wants .ico. On Wayland most
+        # desktops ignore it and look for an installed .desktop file instead.
+        icon_file = "grape.ico" if sys.platform == "win32" else "grape.png"
+        icon = Path(__file__).parent / "icons" / icon_file
+        webview.start(debug=True, icon=str(icon))
     return api._paths
 
 

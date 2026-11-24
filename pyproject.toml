@@ -54,6 +54,9 @@ version = {attr = "grape.__version__"}
 [tool.setuptools.packages.find]
 include = ["grape*"]
 
+[tool.setuptools.package-data]
+grape = ["icons/*"]
+
 [project.scripts]
 grape = "grape.cli:run"
 
