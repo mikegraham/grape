@@ -36,6 +36,7 @@ import torch
 from numpy.typing import NDArray
 from PIL import Image
 
+from grape.cpus import cpu_threads
 from grape.hf_cache import WEIGHT_FILENAMES as _WEIGHT_FILENAMES
 from grape.hf_cache import cached_file_from_repo as _cached_file_from_repo
 from grape.search import ENCODE_BATCH_SIZE
@@ -75,24 +76,6 @@ def pick_device() -> str:
 GPU_TEXT_MIN_PROMPTS = 16
 
 
-def _cpu_threads() -> int:
-    """Threads for torch on the CPU: three quarters of the usable CPUs.
-
-    Every CPU (torch's default) was the slowest setting for a full run on
-    both a hybrid 8-core laptop and a 24-core server: grape's image-decode
-    threads need CPU at the same time.
-    """
-    cpus: int | None
-    getaffinity = getattr(os, "sched_getaffinity", None)
-    if getaffinity is not None:
-        cpus = len(getaffinity(0))  # respects taskset and containers
-    else:
-        cpus = os.cpu_count()
-    if cpus is None:  # the OS can't say
-        return 1
-    return max(1, cpus * 3 // 4)
-
-
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -128,7 +111,7 @@ class CLIPModel:
         size = self.model.visual.preprocess_cfg["size"]
         self._image_size = max(size) if isinstance(size, (tuple, list)) else size
         self.device = pick_device()
-        torch.set_num_threads(_cpu_threads())  # text usually runs on the CPU
+        torch.set_num_threads(cpu_threads())  # text usually runs on the CPU
         self._text_on_gpu = False
         self._gpu_move_lock = threading.Lock()
         self.model.eval()
