@@ -233,16 +233,17 @@ def test_fast_hf_tokenizer_matches_open_clip_hf_tokenizer(tmp_path):
 
 def test_model_needs_transformers_only_without_fast_tokenizer(monkeypatch):
     import grape.model as gm
+    import grape.openclip_files
 
     cached = {"tokenizer.json", "tokenizer_config.json"}
     monkeypatch.setattr(
-        gm, "_cached_file_from_repo",
+        grape.openclip_files, "cached_file_from_repo",
         lambda repo, fn: f"/snap/{fn}" if fn in cached else None,
     )
 
     def needs(text_cfg):
         monkeypatch.setattr(
-            gm, "_builtin_model_config", lambda _name: {"text_cfg": text_cfg},
+            gm, "builtin_model_config", lambda _name: {"text_cfg": text_cfg},
         )
         return gm._model_needs_transformers("m")
 
