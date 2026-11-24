@@ -1468,9 +1468,10 @@ def _stub_imports_HACK() -> None:
         sys.modules[name] = module
 
     # HF text towers; plain CLIP and SigLIP don't need them. (Not CoCa's
-    # module: open_clip 4 imports from it, and stubbing it saved nothing.)
+    # or timm's modules: open_clip 4 imports from the first and imports
+    # timm elsewhere anyway, so stubbing them saved nothing, and a timm
+    # stub broke loading a timm-based model, like the default, later on.)
     stub("transformers")
-    stub("open_clip.timm_model", TimmModel=None)
 
     # torchvision.ops pulls in torch._dynamo and sympy (~1.3 s), and grape
     # never calls torch.compile. torch uses `disable` as a decorator.

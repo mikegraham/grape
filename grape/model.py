@@ -113,10 +113,8 @@ class CLIPModel:
         # the model moves to self.device once built.
         self.device = "cpu"
         self._decode_pool: ThreadPoolExecutor | None = None
-        open_clip = _import_open_clip(
-            use_transformers=_model_needs_transformers(model_name),
-            model_name=model_name,
-        )
+        needs_transformers = _model_needs_transformers(model_name)
+        open_clip = _import_open_clip(use_transformers=needs_transformers)
         if not quiet:
             print("Loading model...", end=" ", flush=True, file=sys.stderr)
         try:
@@ -224,9 +222,7 @@ class CLIPModel:
 
     def embed_dim(self) -> int:
         """Embedding dimensionality for this model architecture."""
-        open_clip = _import_open_clip(
-            use_transformers=False, model_name=self._model_name,
-        )
+        open_clip = _import_open_clip(use_transformers=False)
         cfg = open_clip.get_model_config(self._model_name)
         dim: int = cfg["embed_dim"]
         return dim
@@ -421,15 +417,11 @@ def get_hf_hub(model_name: str, pretrained: str) -> str:
     Requires open_clip to be imported.
     """
     try:
-        open_clip = _import_open_clip(
-            use_transformers=False, model_name=model_name,
-        )
+        open_clip = _import_open_clip(use_transformers=False)
     except ImportError as exc:
         if not _requires_transformers(exc):
             raise
-        open_clip = _import_open_clip(
-            use_transformers=True, model_name=model_name,
-        )
+        open_clip = _import_open_clip(use_transformers=True)
     cfg = open_clip.get_pretrained_cfg(model_name, pretrained)
     hf_hub: str = (cfg or {}).get("hf_hub", "")
     return hf_hub.rstrip("/")
@@ -488,7 +480,7 @@ _preload_thread: "threading.Thread | None" = None
 # drops a stub when the model needs the real module.
 
 # The modules cli._stub_imports_HACK stubs.
-_STUBBED = ("transformers", "open_clip.timm_model", "torch._dynamo")
+_STUBBED = ("transformers", "torch._dynamo")
 
 
 def _is_stub(module: object) -> bool:
@@ -529,15 +521,6 @@ def _builtin_model_config(model_name: str) -> dict | None:
     # JSON is UTF-8 by spec; the locale default is cp1252 on Windows.
     cfg: dict = json.loads(cfg_file.read_text(encoding="utf-8"))
     return cfg
-
-
-def _model_needs_timm(model_name: str) -> bool:
-    """Check whether a model architecture requires timm."""
-    cfg = _builtin_model_config(model_name)
-    if cfg is None:
-        return True  # can't tell, assume yes (safe)
-    vcfg = cfg.get("vision_cfg", {})
-    return isinstance(vcfg, dict) and "timm_model_name" in vcfg
 
 
 def _model_needs_transformers(model_name: str) -> bool:
@@ -681,11 +664,7 @@ class _SentencePieceTokenizer:
         return torch.tensor(rows, dtype=torch.long)
 
 
-def _import_open_clip(
-    *,
-    use_transformers: bool,
-    model_name: str | None = None,
-):
+def _import_open_clip(*, use_transformers: bool):
     """Import open_clip, keeping the CLI's import stubs the model can do
     without."""
     global _open_clip_fast_path, _open_clip_module
@@ -699,8 +678,6 @@ def _import_open_clip(
     if use_transformers:
         # transformers' lazy imports trip on the torch._dynamo stub too.
         _drop_stubs(*_STUBBED)
-    elif model_name is None or _model_needs_timm(model_name):
-        _drop_stubs("open_clip.timm_model")
     stubbed = any(_is_stub(sys.modules.get(name)) for name in _STUBBED)
     try:
         _open_clip_module = importlib.import_module("open_clip")
@@ -745,9 +722,7 @@ def _has_cached_weights(model_name: str, pretrained: str) -> bool:
 
 def _cached_weight_path(model_name: str, pretrained: str) -> str | None:
     """Return a local cached checkpoint path for this model when available."""
-    open_clip = _import_open_clip(
-        use_transformers=False, model_name=model_name,
-    )
+    open_clip = _import_open_clip(use_transformers=False)
     cfg = open_clip.get_pretrained_cfg(model_name, pretrained) or {}
     hf_hub = str(cfg.get("hf_hub", "")).rstrip("/")
     if not hf_hub:
@@ -877,7 +852,7 @@ def preload_weights(model_name: str, pretrained: str) -> None:
     if _preload_thread is not None:
         return  # already started
     needs_tf = _model_needs_transformers(model_name)
-    _import_open_clip(use_transformers=needs_tf, model_name=model_name)
+    _import_open_clip(use_transformers=needs_tf)
     path = _cached_weight_path(model_name, pretrained)
     if path is None:
         return
